@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+spec:
+  restartPolicy: Never
+  # The store path below is hello for x86_64-linux.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  # The restricted Pod Security level requires these. The runner image already
+  # runs as nobody.
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: hello
+      image: ghcr.io/kranzes/nix-store-csi-runner:master
+      # Setting args instead of command keeps tini as PID 1.
+      args: [/nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3/bin/hello]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: nix
+          mountPath: /nix/store
+  volumes:
+    - name: nix
+      csi:
+        driver: nix-store-csi
+        # The plugin rejects a volume without readOnly: true.
+        readOnly: true
+        volumeAttributes:
+          storePaths: /nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3

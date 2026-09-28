@@ -1,0 +1,22 @@
+{{- if and .Values.metrics.enabled .Values.metrics.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "nix-store-csi.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      # One plugin runs on each node, so the node's name identifies it and,
+      # unlike the pod's address, stays the same across restarts.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: instance
+{{- end }}

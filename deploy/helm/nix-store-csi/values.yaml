@@ -1,0 +1,79 @@
+image:
+  repository: ghcr.io/kranzes/nix-store-csi
+  # Empty means the chart's appVersion.
+  tag: ""
+  # Empty means IfNotPresent for a version tag and Always for a branch tag like
+  # master, since a branch tag moves.
+  pullPolicy: ""
+
+registrar:
+  image:
+    repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: v2.18.0
+  resources:
+    requests:
+      cpu: 10m
+      memory: 20Mi
+
+livenessProbe:
+  image:
+    repository: registry.k8s.io/sig-storage/livenessprobe
+    tag: v2.20.0
+  resources:
+    requests:
+      cpu: 10m
+      memory: 20Mi
+  # With hostNetwork this port is on the node, so it has to be free there.
+  port: 9808
+
+# Binary caches, the same for every pod on a node.
+substituters:
+  - https://cache.nixos.org
+# The plugin accepts only narinfos signed by one of these keys.
+trustedPublicKeys:
+  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+# A Secret whose netrc key holds the caches' credentials in netrc format:
+#   machine cache.example.com login user password secret
+netrcSecret: ""
+# Mounts a token with this audience for caches that take one, like niks3:
+#   http://niks3.niks3.svc?bearer-token-file=/var/run/secrets/nix-store-csi/token
+serviceAccountToken:
+  audience: ""
+# More nix-store-csi flags, like --keep-recent=7d.
+extraArgs: []
+
+# Prometheus metrics at /metrics on this port. With hostNetwork the port is on
+# the node, so it has to be free there.
+metrics:
+  enabled: false
+  port: 9809
+  # A PodMonitor for the Prometheus Operator, whose CRDs it needs.
+  podMonitor:
+    enabled: false
+    # Labels that the operator's Prometheus selects monitors by, like
+    # kube-prometheus-stack's `release: <its release name>`.
+    labels: {}
+  # A ConfigMap with the Grafana dashboard, for Grafana's dashboard sidecar.
+  grafanaDashboard:
+    enabled: false
+    labels:
+      grafana_dashboard: "1"
+    # The namespace that the sidecar watches. Empty means the release's.
+    namespace: ""
+
+kubeletDir: /var/lib/kubelet
+stateDir: /var/lib/nix-store-csi
+
+hostNetwork: false
+# system-node-critical keeps the plugin from being evicted. GKE allows that
+# class only in kube-system or in a namespace with a ResourceQuota for it.
+priorityClassName: ""
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - operator: Exists
+# No memory limit, since an OOM kill during a fetch is worse than overcommit.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi

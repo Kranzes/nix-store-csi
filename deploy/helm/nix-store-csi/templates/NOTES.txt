@@ -1,0 +1,14 @@
+The node plugin runs privileged. If {{ .Release.Namespace }} enforces a Pod Security
+level, it has to allow privileged pods:
+
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
+
+Pods mount the closures of store paths with an inline volume:
+
+  volumes:
+    - name: nix
+      csi:
+        driver: nix-store-csi
+        readOnly: true
+        volumeAttributes:
+          storePaths: /nix/store/<hash>-hello-2.12.3

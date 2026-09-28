@@ -1,0 +1,70 @@
+[package]
+name = "nix-store-csi"
+version = "0.1.0"
+edition = "2024"
+description = "Serves Nix store closures from binary caches to Kubernetes pods as CSI volumes"
+license = "MIT"
+repository = "https://github.com/Kranzes/nix-store-csi"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+async-compression = { version = "0.4.50", features = ["tokio", "xz", "zstd", "bzip2", "gzip", "brotli"] }
+# The `std` feature seeds the jitter randomly.
+backon = { version = "1.6.0", default-features = false, features = ["std", "tokio-sleep"] }
+bytesize = "2.7.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+harmonia-file-nar = { git = "https://github.com/nix-community/harmonia", rev = "e98705f89d0263aa502e1691cf68ae58cdab6b7b" }
+harmonia-store-nar-info = { git = "https://github.com/nix-community/harmonia", rev = "e98705f89d0263aa502e1691cf68ae58cdab6b7b" }
+harmonia-store-path = { git = "https://github.com/nix-community/harmonia", rev = "e98705f89d0263aa502e1691cf68ae58cdab6b7b" }
+harmonia-store-path-info = { git = "https://github.com/nix-community/harmonia", rev = "e98705f89d0263aa502e1691cf68ae58cdab6b7b" }
+harmonia-utils-hash = { git = "https://github.com/nix-community/harmonia", rev = "e98705f89d0263aa502e1691cf68ae58cdab6b7b" }
+harmonia-utils-signature = { git = "https://github.com/nix-community/harmonia", rev = "e98705f89d0263aa502e1691cf68ae58cdab6b7b" }
+humantime = "2"
+# With huge pages, mimalloc held several times the memory and was no faster.
+mimalloc = { version = "0.1.52", features = ["no_thp"] }
+rust-netrc = "0.1.2"
+percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
+prost = "0.14"
+prost-types = { version = "0.14", default-features = false }
+rayon = "1.12.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "stream"] }
+rustix = { version = "1.1.5", features = ["fs", "mount", "process"] }
+socket2 = "0.6.5"
+tempfile = "3"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1.19", default-features = false, features = ["net"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server"] }
+tonic-prost = "0.14"
+tracing = { version = "0.1.44", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "tracing-log"] }
+url = "2.5.8"
+walkdir = "2.5"
+prometheus-client = "0.25.1"
+hyper = { version = "1.11.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14", default-features = false }
+
+# Remove once merged into upstream.
+[patch."https://github.com/nix-community/harmonia"]
+harmonia-file-core = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-file-nar = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-store-content-address = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-store-nar-info = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-store-path = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-store-path-info = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-utils-base-encoding = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-utils-hash = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-utils-io = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }
+harmonia-utils-signature = { git = "https://github.com/Kranzes/harmonia", rev = "32c6b1a308f6d5e21f588a564adaf7ba110eded1" }

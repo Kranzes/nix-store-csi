@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+spec:
+  restartPolicy: Never
+  containers:
+    - name: hello
+      # From `nix build .#runner-image`.
+      image: ghcr.io/kranzes/nix-store-csi-runner:0.1.0
+      # Set args, not command, so tini stays PID 1.
+      args: [&hello /nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3/bin/hello]
+      volumeMounts:
+        - name: nix
+          mountPath: /nix/store
+  volumes:
+    - name: nix
+      csi:
+        driver: nix-store-csi
+        volumeAttributes:
+          # Space-separated paths, each standing for the closure of the store
+          # path that contains it.
+          closures: *hello

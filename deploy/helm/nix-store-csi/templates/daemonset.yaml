@@ -1,0 +1,90 @@
+{{- $socketDir := printf "%s/plugins/nix-store-csi" .Values.kubeletDir }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-node
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "nix-store-csi.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nix-store-csi.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      hostNetwork: {{ .Values.hostNetwork }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nix-store-csi
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+          args:
+            - --endpoint=/csi/csi.sock
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NIX_STORE_CSI_SUBSTITUTERS
+              value: {{ join " " .Values.substituters | quote }}
+            - name: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS
+              value: {{ join " " .Values.trustedPublicKeys | quote }}
+          # Mounting into kubelet's pod directories needs it.
+          securityContext:
+            privileged: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            # Kubelet's target paths have to mean the same here, and the
+            # mounts made for pods have to reach the host.
+            - name: kubelet
+              mountPath: {{ .Values.kubeletDir }}
+              mountPropagation: Bidirectional
+            - name: state
+              mountPath: /var/lib/nix-store-csi
+        - name: registrar
+          image: {{ .Values.registrar.image.repository }}:{{ .Values.registrar.image.tag }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ $socketDir }}/csi.sock
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: registration
+              mountPath: /registration
+      volumes:
+        - name: socket
+          hostPath:
+            path: {{ $socketDir }}
+            type: DirectoryOrCreate
+        - name: registration
+          hostPath:
+            path: {{ .Values.kubeletDir }}/plugins_registry
+            type: Directory
+        - name: kubelet
+          hostPath:
+            path: {{ .Values.kubeletDir }}
+            type: Directory
+        - name: state
+          hostPath:
+            path: {{ .Values.stateDir }}
+            type: DirectoryOrCreate

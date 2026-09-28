@@ -1,0 +1,12 @@
+The node plugin runs privileged, so {{ .Release.Namespace }} has to allow it:
+
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
+
+Pods mount store closures with an inline volume:
+
+  volumes:
+    - name: nix
+      csi:
+        driver: nix-store-csi
+        volumeAttributes:
+          closures: /nix/store/<hash>-hello-2.12.3/bin/hello

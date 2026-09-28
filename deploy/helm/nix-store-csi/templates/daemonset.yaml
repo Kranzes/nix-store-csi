@@ -1,0 +1,168 @@
+{{- $socketDir := printf "%s/plugins/nix-store-csi" .Values.kubeletDir }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-node
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "nix-store-csi.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      # Selector labels only: helm.sh/chart changes with every chart version,
+      # and in the pod template that would restart every node plugin.
+      labels:
+        {{- include "nix-store-csi.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      automountServiceAccountToken: false
+      hostNetwork: {{ .Values.hostNetwork }}
+      {{- if .Values.hostNetwork }}
+      # Lets the plugin on the host network resolve cluster names, like a
+      # cache's Service.
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nix-store-csi
+          {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
+          image: {{ .Values.image.repository }}:{{ $tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default (ternary "IfNotPresent" "Always" (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+" $tag)) }}
+          args:
+            - --endpoint=/csi/csi.sock
+            {{- if .Values.netrcSecret }}
+            - --netrc-file=/var/run/secrets/nix-store-csi/netrc
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            # Dual-stack, so Prometheus reaches it on IPv4 and IPv6 pod IPs.
+            # The plugin binds 0.0.0.0 instead on nodes without IPv6.
+            - "--metrics-address=[::]:{{ .Values.metrics.port }}"
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NIX_STORE_CSI_SUBSTITUTERS
+              value: {{ join " " .Values.substituters | quote }}
+            - name: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS
+              value: {{ join " " .Values.trustedPublicKeys | quote }}
+          ports:
+            - name: healthz
+              containerPort: {{ .Values.livenessProbe.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
+          # Start-up reads every narinfo and prunes the views before the
+          # plugin serves, which takes a while on a big node store.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            periodSeconds: 10
+            failureThreshold: 180
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+          # Mounting into kubelet's pod directories needs it.
+          securityContext:
+            privileged: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            # Kubelet's target paths have to resolve to the same place here.
+            # Bidirectional propagates the plugin's mounts out to the host.
+            - name: kubelet
+              mountPath: {{ .Values.kubeletDir }}
+              mountPropagation: Bidirectional
+            - name: state
+              mountPath: /var/lib/nix-store-csi
+            {{- if or .Values.serviceAccountToken.audience .Values.netrcSecret }}
+            # A subPath mount wouldn't see kubelet rotate the token or update
+            # the Secret, so this mounts the whole directory.
+            - name: credentials
+              mountPath: /var/run/secrets/nix-store-csi
+              readOnly: true
+            {{- end }}
+        - name: registrar
+          image: {{ .Values.registrar.image.repository }}:{{ .Values.registrar.image.tag }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ $socketDir }}/csi.sock
+          {{- with .Values.registrar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: registration
+              mountPath: /registration
+        # Serves the healthz probe above by calling the plugin's Probe RPC.
+        - name: liveness-probe
+          image: {{ .Values.livenessProbe.image.repository }}:{{ .Values.livenessProbe.image.tag }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port={{ .Values.livenessProbe.port }}
+          {{- with .Values.livenessProbe.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+      volumes:
+        - name: socket
+          hostPath:
+            path: {{ $socketDir }}
+            type: DirectoryOrCreate
+        - name: registration
+          hostPath:
+            path: {{ .Values.kubeletDir }}/plugins_registry
+            type: Directory
+        - name: kubelet
+          hostPath:
+            path: {{ .Values.kubeletDir }}
+            type: Directory
+        - name: state
+          hostPath:
+            path: {{ .Values.stateDir }}
+            type: DirectoryOrCreate
+        {{- if or .Values.serviceAccountToken.audience .Values.netrcSecret }}
+        - name: credentials
+          projected:
+            sources:
+              {{- with .Values.serviceAccountToken.audience }}
+              - serviceAccountToken:
+                  audience: {{ . | quote }}
+                  path: token
+              {{- end }}
+              {{- with .Values.netrcSecret }}
+              - secret:
+                  name: {{ . }}
+                  items:
+                    - key: netrc
+                      path: netrc
+              {{- end }}
+        {{- end }}

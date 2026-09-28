@@ -1,0 +1,4 @@
+/rust/target
+.direnv
+result*
+/.claude

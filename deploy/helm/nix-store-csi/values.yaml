@@ -1,0 +1,41 @@
+image:
+  repository: ghcr.io/kranzes/nix-store-csi
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # Defaults to Always for a branch tag like master, which moves, and to
+  # IfNotPresent for a version.
+  pullPolicy: ""
+
+registrar:
+  image:
+    repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: v2.18.0
+
+livenessProbe:
+  image:
+    repository: registry.k8s.io/sig-storage/livenessprobe
+    tag: v2.20.0
+  # With hostNetwork this port is on the node, so it has to be free there.
+  port: 9808
+
+# Binary caches every pod on a node shares.
+substituters:
+  - https://cache.nixos.org
+# Keys that narinfos must be signed by.
+trustedPublicKeys:
+  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+# More nix-store-csi options, like --gc-after=7d.
+extraArgs: []
+
+kubeletDir: /var/lib/kubelet
+stateDir: /var/lib/nix-store-csi
+
+hostNetwork: false
+# system-node-critical keeps the plugin from being evicted. GKE allows it only in
+# kube-system or a namespace with a ResourceQuota for it.
+priorityClassName: ""
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - operator: Exists
+resources: {}

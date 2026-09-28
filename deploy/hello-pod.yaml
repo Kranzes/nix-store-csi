@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+spec:
+  restartPolicy: Never
+  # The store path below is hello for x86_64-linux.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  containers:
+    - name: hello
+      image: ghcr.io/kranzes/nix-store-csi-runner:0.1.0
+      # Set args, not command, so tini stays PID 1.
+      args: [&hello /nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3/bin/hello]
+      volumeMounts:
+        - name: nix
+          mountPath: /nix/store
+  volumes:
+    - name: nix
+      csi:
+        driver: nix-store-csi
+        # Required, plugin rejects otherwise.
+        readOnly: true
+        volumeAttributes:
+          closures: *hello

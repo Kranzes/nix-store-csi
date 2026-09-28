@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  # Pods name the driver, so it doesn't follow the release name.
+  name: nix-store-csi
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+    # OpenShift refuses inline volumes of a driver without it in namespaces
+    # below privileged, and pods that use this one pass restricted.
+    security.openshift.io/csi-ephemeral-volume-profile: restricted
+spec:
+  attachRequired: false
+  # Keeps kubelet from chowning the read-only mount for a pod's fsGroup.
+  fsGroupPolicy: None
+  volumeLifecycleModes:
+    - Ephemeral

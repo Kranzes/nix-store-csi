@@ -1,0 +1,46 @@
+[package]
+name = "nix-store-csi"
+version = "0.1.0"
+edition = "2024"
+description = "Serves Nix store closures from binary caches to Kubernetes pods as CSI volumes"
+license = "MIT"
+repository = "https://github.com/Kranzes/nix-store-csi"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+async-compression = { version = "0.4.48", features = ["tokio", "xz", "zstd", "bzip2", "gzip", "brotli"] }
+backon = "1.6.0"
+bytesize = "2.7.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+harmonia-file-nar = { git = "https://github.com/nix-community/harmonia", rev = "63989bd7eb7e1986d7e5c4d8f1988260da2dc24f" }
+harmonia-store-nar-info = { git = "https://github.com/nix-community/harmonia", rev = "63989bd7eb7e1986d7e5c4d8f1988260da2dc24f" }
+harmonia-store-path = { git = "https://github.com/nix-community/harmonia", rev = "63989bd7eb7e1986d7e5c4d8f1988260da2dc24f" }
+harmonia-store-path-info = { git = "https://github.com/nix-community/harmonia", rev = "63989bd7eb7e1986d7e5c4d8f1988260da2dc24f" }
+harmonia-utils-hash = { git = "https://github.com/nix-community/harmonia", rev = "63989bd7eb7e1986d7e5c4d8f1988260da2dc24f" }
+harmonia-utils-signature = { git = "https://github.com/nix-community/harmonia", rev = "63989bd7eb7e1986d7e5c4d8f1988260da2dc24f" }
+humantime = "2"
+percent-encoding = "2.3.2"
+prost = "0.14"
+prost-types = "0.14"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "stream"] }
+rustix = { version = "1.1.5", features = ["fs", "mount"] }
+tempfile = "3"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "std", "tracing-log"] }
+url = "2.5.8"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"

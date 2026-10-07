@@ -23,4 +23,4 @@ allow = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/nix-community/harmonia", "https://github.com/Kranzes/harmonia"]
+allow-git = ["https://github.com/nix-community/harmonia"]

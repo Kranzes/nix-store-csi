@@ -6,13 +6,18 @@ plugin fetches their closure from binary caches into a store shared by the node.
 It then mounts a view that holds that closure and nothing else. The pod's image
 needs no `/nix/store` of its own.
 
+A volume can list store paths for each Nix system, and the plugin uses the list
+for its node's system. Every view has a `.roots/` directory that links each
+listed store path by its name without the hash. A pod's command can then use
+the same path on every system.
+
 ```mermaid
 flowchart LR
     caches[("binary caches<br/>narinfos, NARs")]
     subgraph node[Node]
         kubelet -- gRPC over a unix socket --> plugin[nix-store-csi node plugin]
         plugin -- fetch, verify, unpack --> store[("/var/lib/nix-store-csi/store")]
-        store -- hard links --> views[("/var/lib/nix-store-csi/views/&lt;generation&gt;-&lt;closure hash&gt;")]
+        store -- hard links --> views[("/var/lib/nix-store-csi/views/&lt;generation&gt;-&lt;hash&gt;")]
         views -- one read-only bind mount --> view["pod's /nix/store:<br/>its closure only"]
         pod -- reads --> view
     end
@@ -64,8 +69,9 @@ used paths, least recently used first, until it frees enough.
   store/<name>              unpacked store objects, verified
   narinfo/<name>.narinfo    a narinfo per store path, dated by last use, and
                             named <name>.unsynced until the path is synced
-  views/<generation>-<closure hash>/
-                            a closure, hard-linked from store/
+  views/<generation>-<hash>/
+                            a closure, hard-linked from store/, and .roots/.
+                            The hash covers the closure and the roots.
   volumes/<volume>          which view the volume mounts, and where
   tmp/                      store objects being unpacked, views being built,
                             and trash being deleted

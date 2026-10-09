@@ -351,10 +351,22 @@ mod tests {
         age(&store, &paths, 2);
         let t1 = tmp.path().join("t1");
         let view = store
-            .view("v1", std::slice::from_ref(&hello), &t1, UNBOUND)
+            .view(
+                "v1",
+                std::slice::from_ref(&hello),
+                std::slice::from_ref(&hello),
+                &t1,
+                UNBOUND,
+            )
             .unwrap();
         store
-            .view("v2", &paths, &tmp.path().join("t2"), UNBOUND)
+            .view(
+                "v2",
+                std::slice::from_ref(&hello),
+                &paths,
+                &tmp.path().join("t2"),
+                UNBOUND,
+            )
             .unwrap();
         let bound = move |v: &Path, t: &Path| Ok(v == view && t == t1);
         assert_eq!(store.collect(bound.clone(), day, NONE).await.unwrap(), 0);
@@ -403,7 +415,13 @@ mod tests {
         age(&store, std::slice::from_ref(oldest), 3);
         let target = tmp.path().join("target");
         let view = store
-            .view("v1", std::slice::from_ref(&hello), &target, UNBOUND)
+            .view(
+                "v1",
+                std::slice::from_ref(&hello),
+                std::slice::from_ref(&hello),
+                &target,
+                UNBOUND,
+            )
             .unwrap();
         let bound = move |v: &Path, t: &Path| Ok(v == view && t == target);
 
@@ -483,7 +501,14 @@ mod tests {
             return;
         };
         let ino = |path: &Path| std::fs::symlink_metadata(path).unwrap().ino();
-        let view = (store.view("v1", &paths, &tmp.path().join("t1"), UNBOUND)).unwrap();
+        let view = (store.view(
+            "v1",
+            std::slice::from_ref(&hello),
+            &paths,
+            &tmp.path().join("t1"),
+            UNBOUND,
+        ))
+        .unwrap();
         let view_ino = ino(&view);
         let trash = store.drop_view("v1").unwrap();
         assert_eq!(inodes(&tmp.path().join("tmp")), [view_ino]);

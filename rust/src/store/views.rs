@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{FileType, Permissions};
 use std::io;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, HashFormat};
 use rayon::prelude::*;
@@ -17,13 +17,19 @@ use tracing::info;
 use super::fs::{Scratch, remove_file, set_canonical_time};
 use super::{Store, list_names, list_store_paths, write_synced};
 
+/// The directory in a view that links each root under its name without the
+/// hash. Pods reach a root there by the same path on every system.
+pub const ROOTS: &str = ".roots";
+
 impl Store {
-    /// Returns the view of `paths` for `volume` to mount at `target`. Volumes
-    /// with the same closure share a view of the current generation. Call it
-    /// with the guard from [`Store::gc_guard`] held.
+    /// Returns the view of `paths`, the closure of `roots`, for `volume` to
+    /// mount at `target`. Volumes with the same roots and closure share a view
+    /// of the current generation. Call it with the guard from
+    /// [`Store::gc_guard`] held.
     pub fn view(
         &self,
         volume: &str,
+        roots: &[StorePath],
         paths: &[StorePath],
         target: &Path,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
@@ -38,8 +44,9 @@ impl Store {
         {
             return Ok(self.views.join(old.key));
         }
+        let links = root_links(roots)?;
         let volume = Volume {
-            key: view_key(self.generation.load(Ordering::SeqCst), paths),
+            key: view_key(self.generation.load(Ordering::SeqCst), &links, paths),
             target: target.to_owned(),
         };
         let dir = self.views.join(&volume.key);
@@ -73,6 +80,7 @@ impl Store {
             link_tree(&src, &view.join(path.to_string()), kind)
                 .with_context(|| format!("linking {path} into the view"))
         })?;
+        link_roots(&view.join(ROOTS), &links)?;
         let _views = self.views_lock.lock().unwrap();
         std::fs::rename(&view, &dir)
             .with_context(|| format!("moving {} into place", dir.display()))?;
@@ -155,13 +163,43 @@ impl Store {
     }
 }
 
+/// Maps the names of `roots` without their hashes to the roots, and fails if
+/// two roots share a name.
+pub fn root_links(roots: &[StorePath]) -> anyhow::Result<BTreeMap<&str, &StorePath>> {
+    let mut links = BTreeMap::new();
+    for root in roots {
+        if let Some(other) = links.insert(&**root.name(), root)
+            && other != root
+        {
+            bail!("{other} and {root} have the same name");
+        }
+    }
+    Ok(links)
+}
+
 /// Names the view of a closure in `generation`, so volumes with the same
-/// closure share it.
-fn view_key(generation: u64, paths: &[StorePath]) -> String {
+/// roots and closure share it.
+fn view_key(generation: u64, links: &BTreeMap<&str, &StorePath>, paths: &[StorePath]) -> String {
     let mut names: Vec<String> = paths.iter().map(ToString::to_string).collect();
     names.sort();
+    // The dot keeps roots apart from the closure, since no store path starts
+    // with one.
+    names.extend(links.values().map(|root| format!(".{root}")));
     let hash = Algorithm::SHA256.digest(names.join("\n"));
     format!("{generation}-{}", hash.as_base32().as_bare())
+}
+
+/// Makes `dir` with a relative symlink to each root, so the links also
+/// resolve outside the pod.
+fn link_roots(dir: &Path, links: &BTreeMap<&str, &StorePath>) -> anyhow::Result<()> {
+    std::fs::create_dir(dir)?;
+    for (name, root) in links {
+        std::os::unix::fs::symlink(Path::new("..").join(root.to_string()), dir.join(name))
+            .with_context(|| format!("linking {root} into the view"))?;
+    }
+    std::fs::set_permissions(dir, Permissions::from_mode(0o555))?;
+    set_canonical_time(dir)?;
+    Ok(())
 }
 
 /// The record of a published volume, so [`Store::collect`] can tell whether
@@ -240,10 +278,18 @@ mod tests {
         let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
             return;
         };
+        let roots = std::slice::from_ref(&hello);
 
         let target = tmp.path().join("target");
-        let view = store.view("v1", &paths, &target, UNBOUND).unwrap();
-        assert_eq!(count(&view), 5);
+        let view = store.view("v1", roots, &paths, &target, UNBOUND).unwrap();
+        // The closure and .roots.
+        assert_eq!(count(&view), 6);
+        let link = view.join(ROOTS).join(&**hello.name());
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("..").join(hello.to_string())
+        );
+        assert!(link.join("bin/hello").exists());
         let meta = |p: &Path| std::fs::symlink_metadata(p).unwrap();
         let bin = format!("{hello}/bin/hello");
         assert_eq!(
@@ -262,16 +308,29 @@ mod tests {
         // gets the same one.
         let other_target = tmp.path().join("other");
         assert_eq!(
-            store.view("v2", &paths, &other_target, UNBOUND).unwrap(),
+            store
+                .view("v2", roots, &paths, &other_target, UNBOUND)
+                .unwrap(),
             view
         );
-        assert_eq!(store.view("v1", &paths, &target, UNBOUND).unwrap(), view);
+        assert_eq!(
+            store.view("v1", roots, &paths, &target, UNBOUND).unwrap(),
+            view
+        );
         let other = store
-            .view("v3", &paths[..1], &other_target, UNBOUND)
+            .view("v3", &paths[..1], &paths[..1], &other_target, UNBOUND)
             .unwrap();
         assert_ne!(other, view);
-        assert_eq!(count(&other), 1);
+        assert_eq!(count(&other), 2);
         assert_eq!(count(tmp.path().join("views")), 2);
+        // Other roots get another view of the same closure.
+        let more_roots = store
+            .view("v4", &paths, &paths, &other_target, UNBOUND)
+            .unwrap();
+        assert!(more_roots != view && more_roots != other);
+        assert_eq!(count(more_roots.join(ROOTS)), paths.len());
+        store.drop_view("v3").unwrap();
+        store.drop_view("v4").unwrap();
 
         // Dropping the last volume that uses a view deletes the view.
         store.drop_view("v1").unwrap();
@@ -279,13 +338,25 @@ mod tests {
         store.drop_view("v2").unwrap();
         assert!(!view.exists());
         store.drop_view("v2").unwrap();
-        assert!(store.view("..", &paths, &target, UNBOUND).is_err());
+        assert!(store.view("..", roots, &paths, &target, UNBOUND).is_err());
 
         // A view that can't be read, here a symlink loop, is an error, not a
         // missing view.
         std::os::unix::fs::symlink(view.file_name().unwrap(), &view).unwrap();
-        let err = store.view("v1", &paths, &target, UNBOUND).unwrap_err();
+        let err = store
+            .view("v1", roots, &paths, &target, UNBOUND)
+            .unwrap_err();
         assert_eq!(err.to_string(), format!("reading {}", view.display()));
+    }
+
+    #[test]
+    fn rejects_roots_with_the_same_name() {
+        let path = |hash| StorePath::from_base_path(&format!("{hash}-hello-2.12.3")).unwrap();
+        let a = path("xl1h9i29pgq2q5cszjhm5wpfxfbbqwyi");
+        let b = path("jxxp01dayz0pv6vp7n39r9042ycsiicx");
+        assert_eq!(root_links(&[a.clone(), a.clone()]).unwrap().len(), 1);
+        let err = root_links(&[a.clone(), b.clone()]).unwrap_err();
+        assert_eq!(err.to_string(), format!("{a} and {b} have the same name"));
     }
 
     /// Symlinks in store objects often point at store paths the node store
@@ -317,8 +388,11 @@ mod tests {
         let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
             return;
         };
+        let roots = std::slice::from_ref(&hello);
         let target = |name: &str| tmp.path().join(name);
-        let old = store.view("v1", &paths, &target("t1"), UNBOUND).unwrap();
+        let old = store
+            .view("v1", roots, &paths, &target("t1"), UNBOUND)
+            .unwrap();
 
         // The sync loses a store object, and the next ensure fetches it again.
         let lost = paths.iter().find(|&p| *p != hello).unwrap();
@@ -326,27 +400,33 @@ mod tests {
         store.failed_syncs.store(1, Ordering::SeqCst);
         store.sync(lost).await.unwrap();
         assert!(!store.present(lost));
-        store.ensure(&[hello]).done().await.unwrap();
-        let new = store.view("v2", &paths, &target("t2"), UNBOUND).unwrap();
+        store.ensure(roots).done().await.unwrap();
+        let new = store
+            .view("v2", roots, &paths, &target("t2"), UNBOUND)
+            .unwrap();
         assert_ne!(new, old);
-        assert_eq!(count(&new), paths.len());
+        assert_eq!(count(&new), paths.len() + 1);
         assert!(old.exists());
 
         // A retried publish keeps the view that is mounted at its target.
         let t1 = target("t1");
         let bound = |v: &Path, t: &Path| Ok(v == old && t == t1);
-        assert_eq!(store.view("v1", &paths, &t1, bound).unwrap(), old);
-        assert_eq!(store.view("v1", &paths, &t1, UNBOUND).unwrap(), new);
+        assert_eq!(store.view("v1", roots, &paths, &t1, bound).unwrap(), old);
+        assert_eq!(store.view("v1", roots, &paths, &t1, UNBOUND).unwrap(), new);
 
         std::fs::write(&store.failed_record, "").unwrap();
         let config = || config(&dir, &dir.join("cache-zstd"), tmp.path());
         let store = reopen(store, config).await;
-        let after = store.view("v3", &paths, &target("t3"), UNBOUND).unwrap();
+        let after = store
+            .view("v3", roots, &paths, &target("t3"), UNBOUND)
+            .unwrap();
         assert!(after != new && after != old);
         // A restart with nothing lost keeps the generation.
         let store = reopen(store, config).await;
         assert_eq!(
-            store.view("v4", &paths, &target("t4"), UNBOUND).unwrap(),
+            store
+                .view("v4", roots, &paths, &target("t4"), UNBOUND)
+                .unwrap(),
             after
         );
     }

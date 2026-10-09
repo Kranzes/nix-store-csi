@@ -4,6 +4,7 @@
 # is preloaded.
 {
   lib,
+  stdenv,
   testers,
   dockerTools,
   writeClosure,
@@ -42,6 +43,9 @@ let
       name,
       args,
       readOnly ? true,
+      volumeAttributes ? {
+        storePaths = builtins.head args;
+      },
     }:
     {
       apiVersion = "v1";
@@ -73,9 +77,8 @@ let
           {
             name = "nix";
             csi = {
-              inherit readOnly;
+              inherit readOnly volumeAttributes;
               driver = "nix-store-csi";
-              volumeAttributes.storePaths = builtins.head args;
             };
           }
         ];
@@ -156,9 +159,16 @@ testers.runNixOSTest {
       };
       # hello exits. hello and busybox share all but one path of their closures.
       manifests.pods.content = [
+        # One manifest for multiple systems. The other store paths don't
+        # exist, so the pod runs only if the plugin picks this system's.
         (pod {
           name = "hello";
-          args = [ (lib.getExe hello) ];
+          args = [ "/nix/store/.roots/${hello.name}/bin/hello" ];
+          volumeAttributes = {
+            "storePaths.${stdenv.hostPlatform.system}" = "${hello}";
+            "storePaths.riscv64-linux" = "/nix/store/00000000000000000000000000000000-hello";
+            storePaths = "/nix/store/00000000000000000000000000000000-missing";
+          };
         })
         (sleeper "sleep")
         (pod {
@@ -242,6 +252,7 @@ testers.runNixOSTest {
     with subtest("the pod sees only its closure, on one read-only mount"):
         t.assertEqual(sorted(machine.succeed(ls).split()), closure)
         t.assertEqual(machine.succeed("kubectl exec sleep -- ${busybox}/bin/stat -c %a /nix/store").strip(), "755")
+        t.assertEqual(machine.succeed(f"{ls}/.roots").strip(), "${busybox.name}")
         [mount] = machine.succeed(volumes).splitlines()
         target, options = mount.split()[1], mount.split()[3].split(",")
         for option in ["ro", "nosuid", "nodev"]:

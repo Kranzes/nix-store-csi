@@ -29,10 +29,11 @@ use proto::{
     ProbeResponse,
 };
 
-/// Space-separated store paths, or paths inside them. It is the only volume
-/// attribute because pods on a node share the node store. A pod that could
-/// pick a cache or key could put its own content under any store path for
-/// every pod.
+/// Space-separated store paths, or paths inside them. On a node of Nix system
+/// `<system>`, `storePaths.<system>` replaces it, so one manifest can serve
+/// multiple systems. These are the only volume attributes because pods on a
+/// node share the node store. A pod that could pick a cache or key could put
+/// its own content under any store path for every pod.
 const STORE_PATHS: &str = "storePaths";
 
 /// The name pods give as the volume's `driver`.
@@ -77,13 +78,13 @@ impl Plugin {
         if !request.readonly {
             return Err(Status::invalid_argument("the volume needs readOnly: true"));
         }
-        let store_paths = (request.volume_context.get(STORE_PATHS))
-            .ok_or_else(|| Status::invalid_argument(format!("no {STORE_PATHS} attribute")))?;
+        let (attribute, store_paths) = store_paths(&request.volume_context, &system())?;
         let roots = (self.store.roots(store_paths.split_whitespace()))
             .map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
         if roots.is_empty() {
-            return Err(Status::invalid_argument(format!("{STORE_PATHS} is empty")));
+            return Err(Status::invalid_argument(format!("{attribute} is empty")));
         }
+        store::root_links(&roots).map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
 
         let mut ensuring = self.store.ensure(&roots);
         let done = tokio::select! {
@@ -115,8 +116,9 @@ impl Plugin {
 
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
+        let view_roots = roots.clone();
         self.for_volume(&request.volume_id, move |store| {
-            let view = store.view(&volume, &names, &target, mounts::is_bound)?;
+            let view = store.view(&volume, &view_roots, &names, &target, mounts::is_bound)?;
             mounts::publish(&view, &target)
         })
         .await?;
@@ -276,6 +278,28 @@ impl Node for Plugin {
     }
 }
 
+/// The Nix system of this node. Rust and Nix use the same names for `x86_64`
+/// and `aarch64`, the architectures the plugin is built for.
+fn system() -> String {
+    format!("{}-linux", std::env::consts::ARCH)
+}
+
+/// Returns the attribute that lists the store paths for `system`, and its
+/// value.
+fn store_paths<'a>(
+    context: &'a HashMap<String, String>,
+    system: &str,
+) -> Result<(String, &'a str), Status> {
+    let own = format!("{STORE_PATHS}.{system}");
+    [own.clone(), STORE_PATHS.to_owned()]
+        .into_iter()
+        .find_map(|attribute| {
+            let value = context.get(&attribute)?;
+            Some((attribute, value.as_str()))
+        })
+        .ok_or_else(|| Status::invalid_argument(format!("no {own} or {STORE_PATHS} attribute")))
+}
+
 /// The volume ID names a file in the state dir. An empty target would leave
 /// the mount in place while collection deletes its view.
 fn check_request(volume_id: &str, target_path: &str) -> Result<(), Status> {
@@ -289,6 +313,34 @@ fn check_request(volume_id: &str, target_path: &str) -> Result<(), Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_store_paths_by_system() {
+        let context = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            (pairs.iter())
+                .map(|&(k, v)| (k.to_owned(), v.to_owned()))
+                .collect()
+        };
+        let both = context(&[
+            ("storePaths", "/nix/store/a"),
+            ("storePaths.aarch64-linux", "/nix/store/b"),
+        ]);
+        let (attribute, value) = store_paths(&both, "aarch64-linux").unwrap();
+        assert_eq!(
+            (attribute.as_str(), value),
+            ("storePaths.aarch64-linux", "/nix/store/b")
+        );
+        let (attribute, value) = store_paths(&both, "x86_64-linux").unwrap();
+        assert_eq!((attribute.as_str(), value), ("storePaths", "/nix/store/a"));
+
+        let other = context(&[("storePaths.aarch64-linux", "/nix/store/b")]);
+        let e = store_paths(&other, "x86_64-linux").unwrap_err();
+        assert_eq!(e.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            e.message(),
+            "no storePaths.x86_64-linux or storePaths attribute"
+        );
+    }
 
     #[test]
     fn checks_requests() {

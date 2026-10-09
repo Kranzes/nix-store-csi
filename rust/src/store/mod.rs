@@ -31,7 +31,7 @@ use crate::narinfo::PublicKey;
 use crate::store_path;
 
 pub use self::gc::{EnsureFree, Excess, parse_ensure_free};
-pub use self::views::check_volume;
+pub use self::views::{check_volume, root_links};
 
 /// The kernel's id for the current boot, which a reboot changes.
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";

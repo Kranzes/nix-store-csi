@@ -27,7 +27,7 @@ usual `securityContext`, as in the example below.
 
 ## Example
 
-[hello-pod.yaml](hello-pod.yaml) runs GNU hello on an amd64 node:
+[hello-pod.yaml](hello-pod.yaml) runs GNU hello on an amd64 or arm64 node:
 
 ```sh
 kubectl apply -f https://raw.githubusercontent.com/Kranzes/nix-store-csi/master/deploy/hello-pod.yaml
@@ -68,8 +68,8 @@ helm upgrade --install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi 
 
 A nixpkgs update often changes store paths, so paths copied into manifests by
 hand go stale. Instead, write a variable like
-`${NIX_STORE_PATH_HELLO}` where a path goes and let Nix fill it in. In
-[hello-pod.yaml](hello-pod.yaml), that changes two lines:
+`${NIX_STORE_PATH_HELLO}` where a path goes and let Nix fill it in. In a pod
+for one system, that changes two lines:
 
 ```yaml
 args: [${NIX_STORE_PATH_HELLO}/bin/hello]
@@ -128,11 +128,55 @@ runCommand "manifests"
   doesn't set.
 - The store paths match the system of the `pkgs` that calls the derivation.
   Pin pods to that architecture with a `nodeSelector` on
-  `kubernetes.io/arch`.
+  `kubernetes.io/arch`, or list store paths for each system as in
+  [Multiple architectures](#multiple-architectures).
 
 CI can build the derivation and commit the result to a branch that Flux or
 Argo CD syncs. The same variables work in Helm values files and other
 text that ends up in a pod spec.
+
+## Multiple architectures
+
+One manifest can serve nodes of multiple architectures. Add a
+`storePaths.<system>` attribute for each Nix system. A node uses the one for
+its system and falls back to `storePaths`. The store paths differ per system,
+so `args` can't name one. It uses `/nix/store/.roots/<name>` instead, a link
+that the plugin adds for each listed store path, named without the hash.
+[hello-pod.yaml](hello-pod.yaml) does this:
+
+```yaml
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values: [amd64, arm64]
+  containers:
+    - name: hello
+      args: [/nix/store/.roots/hello-2.12.3/bin/hello]
+      # ...
+  volumes:
+    - name: nix
+      csi:
+        driver: nix-store-csi
+        readOnly: true
+        volumeAttributes:
+          storePaths.x86_64-linux: /nix/store/5z2yp3ysx8476c8g5w25b0smlgkjvaq3-hello-2.12.3
+          storePaths.aarch64-linux: /nix/store/0xy6jlccm8kfpwmhkxabz3638lchyi74-hello-2.12.3
+```
+
+- The affinity keeps the pod off nodes that have no store paths for their
+  system. A volume can't affect scheduling. Without the affinity, a pod on
+  such a node stays in `ContainerCreating`, and its events show the error.
+- Two store paths in one list can't have the same name, since they would need
+  the same link.
+- The name has the version in it, so `args` changes when the version does. To
+  inject the paths, add a variable for each system, like
+  `HELLO_AMD64 = nixpkgs.legacyPackages.x86_64-linux.hello`, and get the
+  link's name from `hello.name`.
 
 ## Your own image
 

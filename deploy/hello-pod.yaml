@@ -4,9 +4,15 @@ metadata:
   name: hello
 spec:
   restartPolicy: Never
-  # The store path below is hello for x86_64-linux.
-  nodeSelector:
-    kubernetes.io/arch: amd64
+  # The volume lists hello for these two architectures only.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values: [amd64, arm64]
   # The restricted Pod Security level requires these. The runner image already
   # runs as nobody.
   securityContext:
@@ -16,8 +22,9 @@ spec:
   containers:
     - name: hello
       image: ghcr.io/kranzes/nix-store-csi-runner:0.1.0
-      # Setting args instead of command keeps tini as PID 1.
-      args: [/nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3/bin/hello]
+      # Setting args instead of command keeps tini as PID 1. The link in
+      # .roots points at hello for the node's system.
+      args: [/nix/store/.roots/hello-2.12.3/bin/hello]
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
@@ -32,4 +39,5 @@ spec:
         # The plugin rejects a volume without readOnly: true.
         readOnly: true
         volumeAttributes:
-          storePaths: /nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3
+          storePaths.x86_64-linux: /nix/store/5z2yp3ysx8476c8g5w25b0smlgkjvaq3-hello-2.12.3
+          storePaths.aarch64-linux: /nix/store/0xy6jlccm8kfpwmhkxabz3638lchyi74-hello-2.12.3

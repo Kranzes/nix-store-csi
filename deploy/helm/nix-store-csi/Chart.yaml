@@ -2,8 +2,8 @@ apiVersion: v2
 name: nix-store-csi
 description: Mounts Nix store closures from binary caches into pods as CSI volumes
 type: application
-version: 0.1.0
-appVersion: 0.1.0
+version: 0.1.1
+appVersion: 0.1.1
 # CSI ephemeral inline volumes are GA from 1.25. The -0 also matches versions
 # with a suffix, like 1.30.0-eks-1234.
 kubeVersion: ">=1.25.0-0"

@@ -21,7 +21,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: hello
-      image: ghcr.io/kranzes/nix-store-csi-runner:0.1.0
+      image: ghcr.io/kranzes/nix-store-csi-runner:0.1.1
       # Setting args instead of command keeps tini as PID 1. The link in
       # .roots points at hello for the node's system.
       args: [/nix/store/.roots/hello-2.12.3/bin/hello]

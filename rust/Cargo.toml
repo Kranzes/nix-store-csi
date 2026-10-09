@@ -1,6 +1,6 @@
 [package]
 name = "nix-store-csi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Serves Nix store closures from binary caches to Kubernetes pods as CSI volumes"
 license = "MIT"

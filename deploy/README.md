@@ -11,8 +11,6 @@ The plugin needs:
 - disk space in `stateDir`, `/var/lib/nix-store-csi` by default, for the
   closures that pods use
 
-Like most CSI drivers, the node plugin goes in `kube-system`.
-
 ```sh
 helm install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi -n kube-system
 ```
@@ -80,46 +78,8 @@ volumeAttributes:
   storePaths: ${NIX_STORE_PATH_HELLO}
 ```
 
-A derivation fills in the variables. Each name in its `storePaths` set becomes
-a `NIX_STORE_PATH_` variable:
-
-```nix
-{
-  lib,
-  runCommand,
-  gettext,
-  hello,
-}:
-let
-  # Each name becomes NIX_STORE_PATH_<name> in the manifests
-  storePaths = {
-    HELLO = hello;
-  };
-in
-runCommand "manifests"
-  {
-    __structuredAttrs = true;
-    nativeBuildInputs = [ gettext ];
-    env = lib.mapAttrs' (
-      name: path:
-      lib.nameValuePair "NIX_STORE_PATH_${name}" (builtins.unsafeDiscardStringContext "${path}")
-    ) storePaths;
-  }
-  ''
-    format=$(printf '$%s ' "''${!NIX_STORE_PATH_@}")
-    cd ${./manifests}
-    find . -type f | while read -r file; do
-      for name in $(envsubst --variables "$(< "$file")"); do
-        if [[ $name == NIX_STORE_PATH_* && ! -v $name ]]; then
-          echo "$file uses $name, which storePaths doesn't set" >&2
-          exit 1
-        fi
-      done
-      mkdir -p "$out/$(dirname "$file")"
-      envsubst "$format" < "$file" > "$out/$file"
-    done
-  ''
-```
+[manifests.nix](manifests.nix) fills in the variables. Each name in its
+`storePaths` set becomes a `NIX_STORE_PATH_` variable.
 
 - `unsafeDiscardStringContext` drops the derivation's dependency on the
   packages, so the build neither builds nor fetches them. The nodes fetch
@@ -230,33 +190,15 @@ nobody. Any other image works if it meets these requirements:
     storePaths: ${NIX_STORE_PATH_TINI} ${NIX_STORE_PATH_HELLO}
   ```
 
-  Add `TINI = tini` to the derivation's `storePaths` from
-  [Injecting store paths into manifests](#injecting-store-paths-into-manifests).
+  Add `TINI = tini` to `storePaths` in [manifests.nix](manifests.nix).
 - The image provides what the program expects from its environment, like users
   in `/etc/passwd`, `/tmp` and CA certificates.
 
 Keep store paths out of the image, and the program's store path only in `args`
 and `storePaths`. The image then doesn't change when the program does. For
-example, this base image adds a company CA to nixpkgs' certificates. It copies
-what it needs instead of linking into the store, and runs as nobody, as the
-restricted Pod Security level wants:
-
-```nix
-dockerTools.buildLayeredImage {
-  name = "base";
-  extraCommands = ''
-    install -m 555 ${pkgsStatic.tini}/bin/tini tini
-    mkdir -p nix/store tmp etc/ssl/certs
-    chmod 1777 tmp
-    install -m 444 ${dockerTools.fakeNss}/etc/{passwd,group,nsswitch.conf} etc/
-    cat ${cacert}/etc/ssl/certs/ca-bundle.crt ${./company-ca.pem} > etc/ssl/certs/ca-certificates.crt
-  '';
-  config = {
-    Entrypoint = [ "/tini" "-s" "--" ];
-    User = "65534:65534";
-  };
-}
-```
+example, [base-image.nix](base-image.nix) adds a company CA to nixpkgs'
+certificates. It copies what it needs instead of linking into the store, and
+runs as nobody, as the restricted Pod Security level wants.
 
 Pods use it like the runner image, with the program in `args` and `storePaths`.
 
@@ -274,8 +216,7 @@ With `metrics.enabled=true`, the node plugin serves Prometheus metrics at
   Operator. `metrics.podMonitor.labels` adds labels to it.
 - `metrics.grafanaDashboard.enabled=true` adds a ConfigMap with a
   [Grafana dashboard](helm/nix-store-csi/dashboards/nix-store-csi.json) for
-  Grafana's dashboard sidecar. The flake also exports the dashboard as
-  `dashboards.nix-store-csi`.
+  Grafana's dashboard sidecar.
 
 Every metric starts with `nix_store_csi_`:
 

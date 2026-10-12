@@ -291,6 +291,12 @@ closure of every pod it runs, and the fetch goes on after the pod is gone.
 Collection can't delete store paths that a fetch or a mounted view holds, so
 pods with big closures can fill the state dir's disk.
 
+`maxClosureSize`, like `20G`, limits the NAR size of each volume's closure.
+The plugin refuses a bigger closure before it fetches any of it. The pod stays
+in `ContainerCreating`, and its events show the closure's size and the limit.
+`nix path-info -S` prints the same size. Many pods with different closures
+can still fill the disk.
+
 A pod gets only its own closure, on a read-only mount.
 
 To allow the driver's volumes only in some namespaces, list them in

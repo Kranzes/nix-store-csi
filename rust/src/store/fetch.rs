@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, bail, ensure};
 use backon::{ConstantBuilder, Retryable};
+use bytesize::ByteSize;
 use futures::StreamExt;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use harmonia_file_nar::{NarWriteError, parse_nar, restore};
@@ -34,7 +35,8 @@ pub(super) type Fetch = Shared<BoxFuture<'static, Result<(), Arc<String>>>>;
 impl Store {
     /// Starts fetching the paths in the closure of `roots` that the store
     /// lacks. Resolution and the fetches run in a task of their own, so they
-    /// carry on if the caller stops waiting.
+    /// carry on if the caller stops waiting. A closure over the store's limit
+    /// fails with [`TooBig`] before any fetch starts.
     pub fn ensure(self: &Arc<Self>, roots: &[StorePath]) -> Ensuring {
         let (this, roots) = (self.clone(), roots.to_vec());
         let progress = Arc::<OnceLock<_>>::default();
@@ -65,6 +67,11 @@ impl Store {
         let installs = self.installs.load(Ordering::SeqCst);
         let closure = self.caches.resolve(roots).await?;
         let total: u64 = closure.values().map(|e| e.info.nar_size()).sum();
+        if let Some(limit) = self.max_closure_size
+            && total > limit
+        {
+            return Err(TooBig { size: total, limit }.into());
+        }
         let paths: Arc<[StorePath]> = closure.keys().cloned().collect();
         // Under the guard, a collection either sees the hold or finishes
         // before this checks the store for the paths.
@@ -364,6 +371,26 @@ impl Ensuring {
     }
 }
 
+/// A closure whose NARs add up to more than the store's limit.
+#[derive(Debug)]
+pub struct TooBig {
+    pub size: u64,
+    pub limit: u64,
+}
+
+impl std::fmt::Display for TooBig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "the closure is {}, over the limit of {}",
+            ByteSize(self.size),
+            ByteSize(self.limit)
+        )
+    }
+}
+
+impl std::error::Error for TooBig {}
+
 /// Gives the tree Nix's canonical modes and modification time.
 fn seal(path: &Path) -> io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
@@ -629,6 +656,39 @@ mod tests {
         let stored = std::fs::read(store.caches.local_narinfo(&hello)).unwrap();
         assert_eq!(stored, info.to_text());
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
+    }
+
+    /// A closure over the limit fails before any fetch starts, and the paths
+    /// the store already has count towards it.
+    #[tokio::test]
+    async fn limits_closure_size() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let hello = fixture_root(&dir, "hello.path");
+        let limited = |limit| {
+            let mut config = config(&dir, &dir.join("cache-zstd"), tmp.path());
+            config.max_closure_size = Some(limit);
+            config
+        };
+        let ensure = |store: &Arc<Store>| store.ensure(std::slice::from_ref(&hello));
+
+        let store = Arc::new(Store::new(limited(1)).unwrap());
+        let err = ensure(&store).done().await.unwrap_err();
+        let &TooBig { size, limit } = err.downcast_ref().unwrap();
+        assert_eq!(limit, 1);
+        settled(&store).await;
+        assert!(store.ensuring.lock().unwrap().is_empty());
+        assert_eq!(count(store.dir()), 0);
+        assert_eq!(count(tmp.path().join("narinfo")), 0);
+
+        let store = reopen(store, || limited(size)).await;
+        assert_eq!(ensure(&store).done().await.unwrap().len(), 5);
+
+        let store = reopen(store, || limited(size - 1)).await;
+        let err = ensure(&store).done().await.unwrap_err();
+        assert!(err.is::<TooBig>(), "{err:#}");
     }
 
     #[tokio::test]

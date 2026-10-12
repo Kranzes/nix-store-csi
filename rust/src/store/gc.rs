@@ -285,13 +285,7 @@ pub enum EnsureFree {
 }
 
 /// Parses `--ensure-free` like harmonia-gc does: a percentage like `20%`, or a
-/// size like `50G`, where K, M, G and T are powers of 1024.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "the size is checked to fit"
-)]
+/// size for [`parse_size`].
 pub fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
@@ -302,6 +296,18 @@ pub fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
         );
         return Ok(EnsureFree::Percent(p));
     }
+    parse_size(s).map(EnsureFree::Bytes)
+}
+
+/// Parses a size like `50G`, where K, M, G and T are powers of 1024.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "the size is checked to fit"
+)]
+pub fn parse_size(s: &str) -> anyhow::Result<u64> {
+    let s = s.trim();
     let (number, shift) = match s.chars().last().map(|c| c.to_ascii_uppercase()) {
         Some('K') => (&s[..s.len() - 1], 10),
         Some('M') => (&s[..s.len() - 1], 20),
@@ -317,7 +323,7 @@ pub fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
         (0.0..=u64::MAX as f64).contains(&bytes),
         "{s:?} is out of range"
     );
-    Ok(EnsureFree::Bytes(bytes as u64))
+    Ok(bytes as u64)
 }
 
 #[cfg(test)]

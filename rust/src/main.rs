@@ -151,6 +151,15 @@ enum Command {
         /// `[::]:9809`. Off unless set.
         #[arg(long, value_name = "ADDRESS", env = "NIX_STORE_CSI_METRICS_ADDRESS")]
         metrics_address: Option<SocketAddr>,
+        /// Refuse a volume whose closure's NARs add up to more than SIZE, like
+        /// `20G`, before fetching any of it. Off unless set.
+        #[arg(
+            long,
+            value_name = "SIZE",
+            env = "NIX_STORE_CSI_MAX_CLOSURE_SIZE",
+            value_parser = store::parse_size
+        )]
+        max_closure_size: Option<u64>,
     },
     /// Fetch the closures of store paths into the node store and print its
     /// directory, for use with `podman -v DIR:/nix/store:ro`.
@@ -199,12 +208,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if stores.is_empty() {
         bail!("no substituters given");
     }
+    let max_closure_size = match cli.command {
+        Command::Csi {
+            max_closure_size, ..
+        } => max_closure_size,
+        Command::Unpack { .. } => None,
+    };
     let store = Arc::new(Store::new(Config {
         stores,
         trusted_keys: (!cli.no_require_sigs).then_some(trusted_keys),
         state_dir: cli.state_dir,
         jobs: cli.max_substitution_jobs.get(),
         netrc_file: cli.netrc_file,
+        max_closure_size,
     })?);
 
     match cli.command {
@@ -221,6 +237,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             keep_recent,
             ensure_free,
             metrics_address,
+            ..
         } => {
             store.prune_views(mounts::is_bound).await?;
             if let Some(address) = metrics_address {

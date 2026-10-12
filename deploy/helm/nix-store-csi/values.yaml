@@ -39,6 +39,9 @@ netrcSecret: ""
 #   http://niks3.niks3.svc?bearer-token-file=/var/run/secrets/nix-store-csi/token
 serviceAccountToken:
   audience: ""
+# Refuses volumes whose closure's NARs add up to more than this, like 20G,
+# where G is 1024^3 bytes. Empty means no limit.
+maxClosureSize: ""
 # More nix-store-csi flags, like --keep-recent=7d.
 extraArgs: []
 

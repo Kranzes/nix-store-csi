@@ -41,6 +41,7 @@ pub(super) fn config(fixtures: &Path, cache: &Path, state: &Path) -> Config {
         state_dir: state.to_owned(),
         jobs: 2,
         netrc_file: None,
+        max_closure_size: None,
     }
 }
 

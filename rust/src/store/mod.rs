@@ -30,7 +30,8 @@ use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 use crate::store_path;
 
-pub use self::gc::{EnsureFree, Excess, parse_ensure_free};
+pub use self::fetch::TooBig;
+pub use self::gc::{EnsureFree, Excess, parse_ensure_free, parse_size};
 pub use self::views::{check_volume, root_links};
 
 /// The kernel's id for the current boot, which a reboot changes.
@@ -48,6 +49,8 @@ pub struct Config {
     pub jobs: usize,
     /// Credentials for caches whose URLs have none.
     pub netrc_file: Option<PathBuf>,
+    /// Ensures fail for closures whose NARs add up to more than this.
+    pub max_closure_size: Option<u64>,
 }
 
 pub struct Store {
@@ -67,6 +70,7 @@ pub struct Store {
     tmp: PathBuf,
     jobs: Semaphore,
     max_jobs: usize,
+    max_closure_size: Option<u64>,
     /// Paths whose narinfos wait for a sync to get their final names, each
     /// with the number of failed syncs when its fetch began writing it. A
     /// fetch adds its path before it writes the narinfo, and collection
@@ -164,6 +168,7 @@ impl Store {
             tmp,
             jobs: Semaphore::new(config.jobs),
             max_jobs: config.jobs,
+            max_closure_size: config.max_closure_size,
             unsynced: Mutex::default(),
             failed_syncs: AtomicU64::default(),
             failed_record: state.join("sync-failed"),
@@ -599,6 +604,7 @@ mod tests {
             state_dir: state.to_owned(),
             jobs: 1,
             netrc_file: None,
+            max_closure_size: None,
         };
         let new = tmp.path().join("new");
         drop(Store::new(config(&new)).unwrap());

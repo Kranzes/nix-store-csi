@@ -56,6 +56,9 @@ spec:
             {{- if .Values.netrcSecret }}
             - --netrc-file=/var/run/secrets/nix-store-csi/netrc
             {{- end }}
+            {{- with .Values.maxClosureSize }}
+            - --max-closure-size={{ . }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             # Dual-stack, so Prometheus reaches it on IPv4 and IPv6 pod IPs.
             # The plugin binds 0.0.0.0 instead on nodes without IPv6.

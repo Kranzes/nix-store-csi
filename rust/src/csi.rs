@@ -97,7 +97,12 @@ impl Plugin {
             Ok(Ok(names)) => names,
             Ok(Err(e)) => {
                 warn!(volume = request.volume_id, "{e:#}");
-                return Err(Status::internal(format!("{e:#}")));
+                let code = if e.is::<store::TooBig>() {
+                    tonic::Code::ResourceExhausted
+                } else {
+                    tonic::Code::Internal
+                };
+                return Err(Status::new(code, format!("{e:#}")));
             }
             Err(_) => {
                 // Kubelet puts this message in the pod's events.

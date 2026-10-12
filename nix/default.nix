@@ -31,31 +31,9 @@ let
     };
 
     # Pods run this image with the volume mounted over its empty /nix/store.
-    runner-image = pkgs.dockerTools.buildLayeredImage {
+    runner-image = pkgs.callPackage ../deploy/base-image.nix {
       name = "${package.name}-runner";
       tag = package.version;
-      extraCommands = ''
-        install -m 555 ${pkgs.pkgsStatic.tini}/bin/tini tini
-        mkdir -p nix/store tmp etc var/empty
-        chmod 1777 tmp
-        # Copied, not linked, since the volume hides the store.
-        install -m 444 ${pkgs.dockerTools.fakeNss}/etc/{passwd,group,nsswitch.conf} etc/
-        install -D -m 444 ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt etc/ssl/certs/ca-certificates.crt
-        ln -s ca-certificates.crt etc/ssl/certs/ca-bundle.crt
-        mkdir -p etc/pki/tls/certs
-        ln -s ../../../ssl/certs/ca-certificates.crt etc/pki/tls/certs/ca-bundle.crt
-      '';
-      config = {
-        # -s keeps tini reaping zombies when it isn't PID 1.
-        Entrypoint = [
-          "/tini"
-          "-s"
-          "--"
-        ];
-        # nobody in fakeNss. Kubernetes checks runAsNonRoot only against a
-        # numeric user.
-        User = "65534:65534";
-      };
     };
 
     chart =

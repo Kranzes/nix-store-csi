@@ -195,12 +195,10 @@ nobody. Any other image works if it meets these requirements:
   in `/etc/passwd`, `/tmp` and CA certificates.
 
 Keep store paths out of the image, and the program's store path only in `args`
-and `storePaths`. The image then doesn't change when the program does. For
-example, [base-image.nix](base-image.nix) adds a company CA to nixpkgs'
-certificates. It copies what it needs instead of linking into the store, and
-runs as nobody, as the restricted Pod Security level wants.
-
-Pods use it like the runner image, with the program in `args` and `storePaths`.
+and `storePaths`. The image then doesn't change when the program does. The
+runner image is built this way from [base-image.nix](base-image.nix), which
+copies what it needs instead of linking into the store. To add a company CA,
+build your own with `extraCertificates = [ ./company-ca.pem ];`.
 
 To run an existing image built with `dockerTools.buildLayeredImage`, set
 `includeStorePaths = false`. The image then holds only links into `/nix/store`,

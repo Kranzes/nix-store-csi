@@ -1,4 +1,11 @@
 {{- $socketDir := printf "%s/plugins/nix-store-csi" .Values.kubeletDir }}
+{{- $keys := .Values.trustedPublicKeys | join " " | trim }}
+{{- range .Values.extraArgs }}
+{{- if hasPrefix "--trusted-public-keys" . }}{{ $keys = . }}{{ end }}
+{{- end }}
+{{- if not (or $keys (has "--no-require-sigs" .Values.extraArgs)) }}
+{{- fail "trustedPublicKeys is empty, so the plugin would refuse to start. Add a cache's key to trustedPublicKeys, or add --no-require-sigs to extraArgs to accept unsigned narinfos." }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

@@ -166,6 +166,14 @@ rec {
           helm lint --strict ${chartSrc}
           helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true
+          # helm lint ignores fail, so these use helm template.
+          helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
+          helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null
+          if helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' > /dev/null 2> err; then
+            echo "helm template accepted empty trustedPublicKeys" >&2
+            exit 1
+          fi
+          grep "trustedPublicKeys is empty" err
           for field in version appVersion; do
             grep -qx "$field: ${package.version}" ${chartSrc}/Chart.yaml || {
               echo "Chart.yaml's $field isn't Cargo.toml's ${package.version}" >&2

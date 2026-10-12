@@ -89,6 +89,24 @@
     },
     "kubeletDir": { "type": "string", "pattern": "^/" },
     "stateDir": { "type": "string", "pattern": "^/" },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxUnavailable": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1 },
+                { "type": "string", "pattern": "^([1-9][0-9]?|100)%$" }
+              ]
+            }
+          }
+        }
+      }
+    },
     "hostNetwork": { "type": "boolean" },
     "priorityClassName": { "type": "string" },
     "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },

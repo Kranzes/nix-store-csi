@@ -64,6 +64,13 @@ metrics:
 kubeletDir: /var/lib/kubelet
 stateDir: /var/lib/nix-store-csi
 
+# A number of nodes or a percentage, like 10%. maxSurge stays 0, since a second
+# plugin pod on a node fails to start while the first holds the state dir's
+# lock.
+updateStrategy:
+  rollingUpdate:
+    maxUnavailable: 1
+
 hostNetwork: false
 # system-node-critical keeps the plugin from being evicted. GKE allows that
 # class only in kube-system or in a namespace with a ResourceQuota for it.

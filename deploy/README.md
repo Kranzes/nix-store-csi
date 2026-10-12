@@ -25,6 +25,8 @@ enforces a Pod Security level, the level has to be `privileged`. Its volumes
 are allowed at the restricted level, so pods that use them pass it with the
 usual `securityContext`, as in the example below.
 
+Mounted volumes keep working while a node's plugin restarts, as in a rollout.
+
 ## Example
 
 [hello-pod.yaml](hello-pod.yaml) runs GNU hello on an amd64 or arm64 node:

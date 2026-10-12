@@ -13,8 +13,8 @@ it with podman:
 
 ```sh
 exe=$(nix eval --raw nixpkgs#pkgs --apply 'pkgs: pkgs.lib.getExe pkgs.hello')
-store=$(nix run github:Kranzes/nix-store-csi/v0.1.1 -- --state-dir /tmp/nix-store-csi unpack "$exe")
-podman run --rm -v "$store":/nix/store:ro ghcr.io/kranzes/nix-store-csi-runner:0.1.1 "$exe"
+store=$(nix run github:Kranzes/nix-store-csi/v0.1.2 -- --state-dir /tmp/nix-store-csi unpack "$exe")
+podman run --rm -v "$store":/nix/store:ro ghcr.io/kranzes/nix-store-csi-runner:0.1.2 "$exe"
 ```
 
 ## Documentation

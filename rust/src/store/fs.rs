@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, UTIME_OMIT, utimensat};
+use walkdir::WalkDir;
 
 /// A directory that's deleted when dropped. Unlike a `TempDir`, it can hold
 /// sealed, read-only trees.
@@ -108,4 +109,11 @@ pub(super) fn set_canonical_time(path: &Path) -> io::Result<()> {
         },
     };
     Ok(utimensat(CWD, path, &times, AtFlags::SYMLINK_NOFOLLOW)?)
+}
+
+/// Counts the files, directories and symlinks in the tree at `path`.
+pub(super) fn count_inodes(path: &Path) -> io::Result<u64> {
+    (WalkDir::new(path).follow_root_links(false).into_iter())
+        .try_fold(0, |n, entry| entry.map(|_| n + 1))
+        .map_err(io::Error::from)
 }

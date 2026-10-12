@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,9 +25,10 @@ use proto::{
     NodeGetInfoResponse, NodeGetStorageHealthRequest, NodeGetStorageHealthResponse,
     NodeGetVolumeHealthRequest, NodeGetVolumeHealthResponse, NodeGetVolumeStatsRequest,
     NodeGetVolumeStatsResponse, NodePublishVolumeRequest, NodePublishVolumeResponse,
-    NodeStageVolumeRequest, NodeStageVolumeResponse, NodeUnpublishVolumeRequest,
-    NodeUnpublishVolumeResponse, NodeUnstageVolumeRequest, NodeUnstageVolumeResponse, ProbeRequest,
-    ProbeResponse,
+    NodeServiceCapability, NodeStageVolumeRequest, NodeStageVolumeResponse,
+    NodeUnpublishVolumeRequest, NodeUnpublishVolumeResponse, NodeUnstageVolumeRequest,
+    NodeUnstageVolumeResponse, ProbeRequest, ProbeResponse, VolumeUsage, node_service_capability,
+    volume_usage,
 };
 
 /// Space-separated store paths, or paths inside them. On a node of Nix system
@@ -151,6 +153,39 @@ impl Plugin {
         Ok(NodeUnpublishVolumeResponse {})
     }
 
+    /// Skips the volume's turn, which a slow publish can hold for minutes.
+    async fn stats(
+        &self,
+        request: NodeGetVolumeStatsRequest,
+    ) -> Result<NodeGetVolumeStatsResponse, Status> {
+        check_request(&request.volume_id, &request.volume_path)?;
+        let missing = format!(
+            "volume {} isn't published at {}",
+            request.volume_id, request.volume_path
+        );
+        let store = self.store.clone();
+        let usage =
+            blocking(move || store.usage(&request.volume_id, Path::new(&request.volume_path)))
+                .await?
+                .ok_or_else(|| Status::not_found(missing))?;
+        let full = |unit: volume_usage::Unit, used: u64| {
+            let used = i64::try_from(used).unwrap_or(i64::MAX);
+            // A read-only volume reports itself full, like a squashfs mount.
+            VolumeUsage {
+                available: 0,
+                total: used,
+                used,
+                unit: unit.into(),
+            }
+        };
+        Ok(NodeGetVolumeStatsResponse {
+            usage: vec![
+                full(volume_usage::Unit::Bytes, usage.bytes),
+                full(volume_usage::Unit::Inodes, usage.inodes),
+            ],
+        })
+    }
+
     /// Runs `f` on a blocking thread in the volume's turn, with collection held
     /// off. The turn and the hold last until `f` ends, even if kubelet gives up.
     async fn for_volume<T: Send + 'static>(
@@ -166,14 +201,22 @@ impl Plugin {
         };
         let held = (lock.lock_owned().await, self.store.gc_guard().await);
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             let _held = held;
             f(&store)
         })
         .await
+    }
+}
+
+/// Runs `f` on a blocking thread.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, Status> {
+    tokio::task::spawn_blocking(f)
+        .await
         .map_err(|e| Status::internal(e.to_string()))?
         .map_err(|e| Status::internal(format!("{e:#}")))
-    }
 }
 
 #[tonic::async_trait]
@@ -227,7 +270,14 @@ impl Node for Plugin {
         &self,
         _: Request<NodeGetCapabilitiesRequest>,
     ) -> Result<Response<NodeGetCapabilitiesResponse>, Status> {
-        Ok(Response::new(NodeGetCapabilitiesResponse::default()))
+        let rpc = node_service_capability::Rpc {
+            r#type: node_service_capability::rpc::Type::GetVolumeStats.into(),
+        };
+        Ok(Response::new(NodeGetCapabilitiesResponse {
+            capabilities: vec![NodeServiceCapability {
+                r#type: Some(node_service_capability::Type::Rpc(rpc)),
+            }],
+        }))
     }
 
     async fn node_get_info(
@@ -256,9 +306,9 @@ impl Node for Plugin {
 
     async fn node_get_volume_stats(
         &self,
-        _: Request<NodeGetVolumeStatsRequest>,
+        request: Request<NodeGetVolumeStatsRequest>,
     ) -> Result<Response<NodeGetVolumeStatsResponse>, Status> {
-        Err(Status::unimplemented("no volume stats"))
+        self.stats(request.into_inner()).await.map(Response::new)
     }
 
     async fn node_expand_volume(

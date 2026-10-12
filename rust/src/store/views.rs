@@ -14,7 +14,7 @@ use harmonia_utils_hash::{Algorithm, HashFormat};
 use rayon::prelude::*;
 use tracing::info;
 
-use super::fs::{Scratch, remove_file, set_canonical_time};
+use super::fs::{Scratch, count_inodes, remove_file, set_canonical_time};
 use super::{Store, list_names, list_store_paths, write_synced};
 
 /// The directory in a view that links each root under its name without the
@@ -119,6 +119,25 @@ impl Store {
             .with_context(|| format!("moving {} to the trash", dir.display()))
     }
 
+    /// Measures the view of `volume`, or returns `None` if `volume` isn't
+    /// published at `target`. Views never change, so this measures each once.
+    pub fn usage(&self, volume: &str, target: &Path) -> anyhow::Result<Option<Usage>> {
+        let record = self.volumes.join(check_volume(volume)?);
+        let Some(Volume { key, .. }) = Volume::read(&record)?.filter(|v| v.target == target) else {
+            return Ok(None);
+        };
+        if let Some(&usage) = self.measured.lock().unwrap().get(&key) {
+            return Ok(Some(usage));
+        }
+        let view = self.views.join(&key);
+        let usage = Usage {
+            bytes: self.measure(&view)?,
+            inodes: count_inodes(&view).with_context(|| format!("reading {}", view.display()))?,
+        };
+        self.measured.lock().unwrap().insert(key, usage);
+        Ok(Some(usage))
+    }
+
     /// Returns the store paths that the remaining views hold.
     pub(super) fn drop_unmounted(
         &self,
@@ -140,6 +159,7 @@ impl Store {
             info!(volume = %record.display(), "forgetting a volume that isn't mounted");
             remove_file(&record)?;
         }
+        (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));
         let mut in_use = HashSet::new();
         for entry in std::fs::read_dir(&self.views)
             .with_context(|| format!("reading {}", self.views.display()))?
@@ -200,6 +220,15 @@ fn link_roots(dir: &Path, links: &BTreeMap<&str, &StorePath>) -> anyhow::Result<
     std::fs::set_permissions(dir, Permissions::from_mode(0o555))?;
     set_canonical_time(dir)?;
     Ok(())
+}
+
+/// What a view holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// The NAR size of its store objects.
+    pub bytes: u64,
+    /// Its files, directories and symlinks, with `.roots/` and the view itself.
+    pub inodes: u64,
 }
 
 /// The record of a published volume, so [`Store::collect`] can tell whether
@@ -347,6 +376,33 @@ mod tests {
             .view("v1", roots, &paths, &target, UNBOUND)
             .unwrap_err();
         assert_eq!(err.to_string(), format!("reading {}", view.display()));
+    }
+
+    #[tokio::test]
+    async fn measures_views() {
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        let view = store.view("v1", roots, &paths, &target, UNBOUND).unwrap();
+        let usage = store.usage("v1", &target).unwrap().unwrap();
+        let nar_size = |path| store.caches.local_info(path).unwrap().unwrap().nar_size();
+        assert_eq!(usage.bytes, paths.iter().map(nar_size).sum::<u64>());
+        let find = std::process::Command::new("find")
+            .arg(&view)
+            .args(["-printf", "."])
+            .output()
+            .unwrap();
+        assert_eq!(usage.inodes, u64::try_from(find.stdout.len()).unwrap());
+        assert_eq!(store.measured.lock().unwrap().len(), 1);
+        assert_eq!(store.usage("v1", &target).unwrap(), Some(usage));
+        assert_eq!(store.usage("v1", &tmp.path().join("other")).unwrap(), None);
+        assert_eq!(store.usage("v2", &target).unwrap(), None);
+
+        store.prune_views(UNBOUND).await.unwrap();
+        assert!(store.measured.lock().unwrap().is_empty());
     }
 
     #[test]

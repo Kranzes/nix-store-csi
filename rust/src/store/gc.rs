@@ -9,11 +9,10 @@ use anyhow::{Context, ensure};
 use harmonia_store_path::StorePath;
 use tokio::task::JoinHandle;
 use tracing::warn;
-use walkdir::WalkDir;
 
 use crate::closure;
 
-use super::fs::{Scratch, remove_file};
+use super::fs::{Scratch, count_inodes, remove_file};
 use super::{Store, list_store_paths};
 
 impl Store {
@@ -205,13 +204,6 @@ impl Store {
         let paths = list_store_paths(&self.dir)?;
         Ok(paths.into_iter().map(count).collect())
     }
-}
-
-/// Counts the files, directories and symlinks in the tree at `path`.
-fn count_inodes(path: &Path) -> io::Result<u64> {
-    (WalkDir::new(path).follow_root_links(false).into_iter())
-        .try_fold(0, |n, entry| entry.map(|_| n + 1))
-        .map_err(io::Error::from)
 }
 
 /// How much to free on the state dir's filesystem to meet `--ensure-free`.

@@ -32,7 +32,7 @@ use crate::store_path;
 
 pub use self::fetch::TooBig;
 pub use self::gc::{EnsureFree, Excess, parse_ensure_free, parse_size};
-pub use self::views::{check_volume, root_links};
+pub use self::views::{Usage, check_volume, root_links};
 
 /// The kernel's id for the current boot, which a reboot changes.
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
@@ -67,6 +67,9 @@ pub struct Store {
     generation: AtomicU64,
     /// A turn for each view that publishes are building, by key.
     building: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// What [`Store::usage`] measured, by view key, until no mounted volume
+    /// uses the view.
+    measured: Mutex<HashMap<String, Usage>>,
     tmp: PathBuf,
     jobs: Semaphore,
     max_jobs: usize,
@@ -165,6 +168,7 @@ impl Store {
             views_lock: Mutex::default(),
             generation: AtomicU64::default(),
             building: Mutex::default(),
+            measured: Mutex::default(),
             tmp,
             jobs: Semaphore::new(config.jobs),
             max_jobs: config.jobs,
@@ -186,7 +190,9 @@ impl Store {
         store
             .settle(&state.join("boot-id"), &state.join("generation"))
             .context("settling the paths that the last run didn't sync")?;
-        let size = store.measure().context("measuring the node store")?;
+        let size = store
+            .measure(&store.dir)
+            .context("measuring the node store")?;
         store.size.store(size, Ordering::Relaxed);
         store.metrics.init(store.caches.names());
         Ok(store)
@@ -303,9 +309,9 @@ impl Store {
         write_synced(record, boot.as_bytes())
     }
 
-    /// Adds up the NAR sizes of the paths in store/.
-    fn measure(&self) -> anyhow::Result<u64> {
-        let paths = list_store_paths(&self.dir)?;
+    /// Adds up the NAR sizes of the store paths in `dir`.
+    fn measure(&self, dir: &Path) -> anyhow::Result<u64> {
+        let paths = list_store_paths(dir)?;
         Ok(paths.iter().map(|path| self.nar_size(path)).sum())
     }
 

@@ -11,6 +11,7 @@
   writeText,
   k3s,
   curl,
+  jq,
   hello,
   busybox,
   chart,
@@ -211,6 +212,8 @@ testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
+
     plugin = "kubectl -n kube-system logs daemonset/nix-store-csi-node -c nix-store-csi"
     volumes = "grep 'kubernetes.io~csi/nix/mount' /proc/mounts"
     views = "ls /var/lib/nix-store-csi/views"
@@ -292,6 +295,19 @@ testers.runNixOSTest {
             t.assertIn(option, options)
         [mount] = machine.succeed("kubectl exec sleep -- ${busybox}/bin/grep ' /nix/store ' /proc/mounts").splitlines()
         t.assertIn("ro", mount.split()[3].split(","))
+
+    with subtest("kubelet reports the NAR size and inodes of the pod's closure"):
+        summary = "kubectl get --raw /api/v1/nodes/machine/proxy/stats/summary"
+        nix = '.pods[] | select(.podRef.name == "sleep") | .volume[]? | select(.name == "nix")'
+        machine.wait_until_succeeds(f"{summary} | ${jq}/bin/jq -e '{nix}'", timeout=180)
+        stats = json.loads(machine.succeed(f"{summary} | ${jq}/bin/jq '{nix}'"))
+        nar_size = sum(
+            int(machine.succeed(f"sed -n 's/^NarSize: //p' ${fixtures}/cache-zstd/{name[:32]}.narinfo"))
+            for name in closure
+        )
+        inodes = int(machine.succeed(f"find {target} | wc -l"))
+        t.assertEqual([stats[k] for k in ["usedBytes", "capacityBytes", "availableBytes"]], [nar_size, nar_size, 0])
+        t.assertEqual([stats[k] for k in ["inodesUsed", "inodes", "inodesFree"]], [inodes, inodes, 0])
 
     with subtest("a restarted kubelet republishes over another mount at the target"):
         machine.succeed(f"umount {target} && mkdir /tmp/other && mount --bind /tmp/other {target}")

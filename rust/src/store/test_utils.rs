@@ -15,7 +15,7 @@ pub(super) fn scratch() -> Scratch {
     Scratch::new_in(&std::env::temp_dir()).unwrap()
 }
 
-pub(super) const UNBOUND: fn(&Path, &Path) -> anyhow::Result<bool> = |_, _| Ok(false);
+pub(crate) const UNBOUND: fn(&Path, &Path) -> anyhow::Result<bool> = |_, _| Ok(false);
 
 /// Copies `src` to `dst`. The copy is writable, unlike the fixtures.
 pub(super) fn copy_cache(src: &Path, dst: &Path) {
@@ -116,6 +116,13 @@ pub(super) fn file_names(dir: impl AsRef<Path>) -> Vec<String> {
     names
 }
 
-pub(super) fn count(dir: impl AsRef<Path>) -> usize {
+pub(crate) fn count(dir: impl AsRef<Path>) -> usize {
     std::fs::read_dir(dir).unwrap().count()
 }
+
+/// An excess that makes garbage collection delete every path that nothing
+/// holds.
+pub(crate) const ALL: super::Excess = super::Excess {
+    bytes: u64::MAX,
+    inodes: u64::MAX,
+};

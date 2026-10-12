@@ -46,6 +46,7 @@ Options:
       --log-level <LEVEL>           off, error, warn, info, debug or trace [env: NIX_STORE_CSI_LOG_LEVEL=] [default: info]
       --max-closure-size <SIZE>     Refuse a volume whose closure's NARs add up to more than SIZE, like `20G`, before fetching any of it. Off unless set [env: NIX_STORE_CSI_MAX_CLOSURE_SIZE=]
       --log-format <FORMAT>         text or json [env: NIX_STORE_CSI_LOG_FORMAT=] [default: text] [possible values: text, json]
+      --prefetch-dir <DIR>          Keep the closures of the store paths listed in DIR fetched, even when `--ensure-free` needs the space. DIR, such as a mounted `ConfigMap`, holds a file for each volume attribute, `storePaths` or `storePaths.<system>`. The plugin reads it every minute. Off unless set [env: NIX_STORE_CSI_PREFETCH_DIR=]
       --max-substitution-jobs <N>   NARs to fetch at once [env: NIX_STORE_CSI_MAX_SUBSTITUTION_JOBS=] [default: 16]
   -h, --help                        Print help
 ```

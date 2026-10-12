@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use crate::mounts;
 use crate::store::{self, Store};
+use crate::store_path::{self, STORE_PATHS, system};
 
 pub mod proto {
     #![allow(clippy::all, clippy::pedantic)]
@@ -30,13 +31,6 @@ use proto::{
     NodeUnstageVolumeResponse, ProbeRequest, ProbeResponse, VolumeUsage, node_service_capability,
     volume_usage,
 };
-
-/// Space-separated store paths, or paths inside them. On a node of Nix system
-/// `<system>`, `storePaths.<system>` replaces it, so one manifest can serve
-/// multiple systems. These are the only volume attributes because pods on a
-/// node share the node store. A pod that could pick a cache or key could put
-/// its own content under any store path for every pod.
-const STORE_PATHS: &str = "storePaths";
 
 /// The name pods give as the volume's `driver`.
 pub const DRIVER: &str = "nix-store-csi";
@@ -333,26 +327,15 @@ impl Node for Plugin {
     }
 }
 
-/// The Nix system of this node. Rust and Nix use the same names for `x86_64`
-/// and `aarch64`, the architectures the plugin is built for.
-fn system() -> String {
-    format!("{}-linux", std::env::consts::ARCH)
-}
-
-/// Returns the attribute that lists the store paths for `system`, and its
-/// value.
 fn store_paths<'a>(
     context: &'a HashMap<String, String>,
     system: &str,
 ) -> Result<(String, &'a str), Status> {
-    let own = format!("{STORE_PATHS}.{system}");
-    [own.clone(), STORE_PATHS.to_owned()]
-        .into_iter()
-        .find_map(|attribute| {
-            let value = context.get(&attribute)?;
-            Some((attribute, value.as_str()))
-        })
-        .ok_or_else(|| Status::invalid_argument(format!("no {own} or {STORE_PATHS} attribute")))
+    store_path::for_system(context, system).ok_or_else(|| {
+        Status::invalid_argument(format!(
+            "no {STORE_PATHS}.{system} or {STORE_PATHS} attribute"
+        ))
+    })
 }
 
 /// The volume ID names a file in the state dir. An empty target would leave

@@ -167,6 +167,7 @@ rec {
           helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true
           helm lint --strict ${chartSrc} --set 'admissionPolicy.allowedNamespaces={default,ci}'
+          helm lint --strict ${chartSrc} --set 'prefetch.storePaths\.x86_64-linux=/nix/store/00000000000000000000000000000000-hello'
           # helm lint ignores fail, so these use helm template.
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null

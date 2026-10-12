@@ -119,6 +119,24 @@ let
         };
       }
     );
+
+  # What the plugin fetches for the pods. The fixtures also hold warm.
+  podsClosure = writeClosure [
+    hello
+    busybox
+  ];
+
+  # The test starts it with the cache down, for a closure that only the
+  # plugin's prefetch fetched.
+  warm = writeText "warm.json" (
+    builtins.toJSON (pod {
+      name = "warm";
+      args = [ "${fixtures.warm}" ];
+    })
+  );
+  prefetchWarm = writeText "prefetch.json" (
+    builtins.toJSON { data."storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}"; }
+  );
 in
 testers.runNixOSTest {
   name = "nix-store-csi-k3s";
@@ -159,6 +177,12 @@ testers.runNixOSTest {
           netrcSecret = "nix-store-csi-netrc";
           metrics.enabled = true;
           admissionPolicy.allowedNamespaces = [ "default" ];
+          # The other store path doesn't exist, so the prefetch succeeds only
+          # if the plugin picks this system's.
+          prefetch = {
+            "storePaths.${stdenv.hostPlatform.system}" = "${busybox}";
+            storePaths = "/nix/store/00000000000000000000000000000000-missing";
+          };
         };
       };
       # nginx asks for these credentials.
@@ -217,6 +241,7 @@ testers.runNixOSTest {
     plugin = "kubectl -n kube-system logs daemonset/nix-store-csi-node -c nix-store-csi"
     volumes = "grep 'kubernetes.io~csi/nix/mount' /proc/mounts"
     views = "ls /var/lib/nix-store-csi/views"
+    fetches = f"{plugin} | grep -c ' INFO .*fetching NAR' || true"
 
     def phase(pod, want):
         try:
@@ -253,8 +278,7 @@ testers.runNixOSTest {
         phase("hello", "Succeeded")
         t.assertEqual(machine.succeed("kubectl logs hello").strip(), "Hello, world!")
         phase("sleep", "Running")
-        fetched = machine.succeed(f"{plugin} | grep -c ' INFO .*fetching NAR'").strip()
-        t.assertEqual(fetched, machine.succeed("wc -l < ${fixtures}/closure").strip())
+        t.assertEqual(int(machine.succeed(fetches)), int(machine.succeed("wc -l < ${podsClosure}")))
         restarts = "{.items[0].status.containerStatuses[*].restartCount}"
         t.assertEqual(machine.succeed(f"kubectl -n kube-system get pod -l app.kubernetes.io/name=nix-store-csi -o jsonpath='{restarts}'").split(), ["0"] * 3)
 
@@ -275,7 +299,7 @@ testers.runNixOSTest {
         fetched = [line for line in metrics if line.startswith("nix_store_csi_nar_fetch_duration_seconds_count")]
         t.assertEqual(
             sum(float(line.split()[-1]) for line in fetched if 'result="ok"' in line),
-            float(machine.succeed("wc -l < ${fixtures}/closure")),
+            float(machine.succeed("wc -l < ${podsClosure}")),
         )
 
     with subtest("kubelet unpublishes hello's volume once hello exits"):
@@ -316,15 +340,28 @@ testers.runNixOSTest {
         machine.succeed(f"[ $({volumes} | wc -l) = 1 ]")
         t.assertEqual(sorted(machine.succeed(f"ls {target}").split()), closure)
 
+    with subtest("the plugin prefetches the store paths in its ConfigMap as kubelet updates it"):
+        machine.wait_until_succeeds(f"{plugin} | grep -q 'prefetched store_paths=.*-${busybox.name}'", timeout=60)
+        before = int(machine.succeed(fetches))
+        machine.succeed("kubectl -n kube-system patch configmap nix-store-csi-prefetch --type merge --patch-file ${prefetchWarm}")
+        machine.wait_until_succeeds(f"{plugin} | grep -q 'prefetched store_paths=.*-warm'", timeout=300)
+        # busybox, which warm references, is on the node already.
+        t.assertEqual(int(machine.succeed(fetches)), before + 1)
+
     with subtest("a restarted plugin publishes a closure already on the node while the cache is down"):
         machine.succeed("systemctl stop nginx")
         machine.succeed("kubectl -n kube-system delete pod -l app.kubernetes.io/name=nix-store-csi --wait")
         machine.succeed("kubectl apply -f ${offline}")
         phase("offline", "Running")
-        t.assertEqual(machine.succeed(f"{plugin} | grep -c 'fetching NAR' || true").strip(), "0")
+        t.assertEqual(int(machine.succeed(fetches)), 0)
+
+    with subtest("a pod whose closure the plugin prefetched starts while the cache is down"):
+        machine.succeed("kubectl apply -f ${warm}")
+        phase("warm", "Succeeded")
+        t.assertEqual(machine.succeed("kubectl logs warm").strip(), "warm")
 
     with subtest("deleting the pods unpublishes their volumes"):
-        machine.wait_until_succeeds("kubectl delete pod sleep offline --wait --ignore-not-found", timeout=120)
+        machine.wait_until_succeeds("kubectl delete pod sleep offline warm --wait --ignore-not-found", timeout=120)
         machine.wait_until_fails(volumes)
         machine.wait_until_succeeds(f"[ -z \"$({views})\" ]", timeout=60)
   '';

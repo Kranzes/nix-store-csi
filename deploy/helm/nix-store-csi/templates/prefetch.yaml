@@ -1,0 +1,10 @@
+{{- with .Values.prefetch }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Release.Name }}-prefetch
+  labels:
+    {{- include "nix-store-csi.labels" $ | nindent 4 }}
+data:
+  {{- toYaml . | nindent 2 }}
+{{- end }}

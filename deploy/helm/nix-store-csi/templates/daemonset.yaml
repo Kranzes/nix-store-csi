@@ -64,6 +64,9 @@ spec:
             # The plugin binds 0.0.0.0 instead on nodes without IPv6.
             - "--metrics-address=[::]:{{ .Values.metrics.port }}"
             {{- end }}
+            {{- if .Values.prefetch }}
+            - --prefetch-dir=/etc/nix-store-csi/prefetch
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -117,6 +120,13 @@ spec:
             # the Secret, so this mounts the whole directory.
             - name: credentials
               mountPath: /var/run/secrets/nix-store-csi
+              readOnly: true
+            {{- end }}
+            {{- if .Values.prefetch }}
+            # Kubelet updates the files when the list changes, so the pod
+            # template has no checksum of it that would restart the plugin.
+            - name: prefetch
+              mountPath: /etc/nix-store-csi/prefetch
               readOnly: true
             {{- end }}
         - name: registrar
@@ -179,4 +189,9 @@ spec:
                     - key: netrc
                       path: netrc
               {{- end }}
+        {{- end }}
+        {{- if .Values.prefetch }}
+        - name: prefetch
+          configMap:
+            name: {{ .Release.Name }}-prefetch
         {{- end }}

@@ -180,6 +180,33 @@ spec:
   `HELLO_AMD64 = nixpkgs.legacyPackages.x86_64-linux.hello`, and get the
   link's name from `hello.name`.
 
+## Prefetching
+
+To have closures on the nodes before pods need them, list their store paths
+in the `prefetch` value:
+
+```yaml
+# values.yaml
+prefetch:
+  storePaths.x86_64-linux: /nix/store/5z2yp3ysx8476c8g5w25b0smlgkjvaq3-hello-2.12.3
+  storePaths.aarch64-linux: /nix/store/0xy6jlccm8kfpwmhkxabz3638lchyi74-hello-2.12.3
+```
+
+The chart puts the list in a ConfigMap. Kubelet updates the mounted list
+within about a minute, and the plugin reads it every minute, so a new list
+starts fetching within two minutes, without a restart.
+
+- Garbage collection keeps prefetched closures even when `--ensure-free` needs
+  the space, so keep the list small enough to fit next to what pods use.
+- If the list can't be read or fetched, the plugin logs a warning and tries
+  again a minute later. Until then it keeps the closures it last fetched.
+
+For a rollout:
+
+1. Set `prefetch` to the new version's store paths and upgrade the chart.
+2. Wait until each node plugin logs `prefetched` with those store paths.
+3. Update the Deployment. Its new pods start without waiting for a fetch.
+
 ## Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an

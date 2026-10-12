@@ -42,6 +42,11 @@ serviceAccountToken:
 # Refuses volumes whose closure's NARs add up to more than this, like 20G,
 # where G is 1024^3 bytes. Empty means no limit.
 maxClosureSize: ""
+# Store paths whose closures every node fetches and keeps, so pods that need
+# them start without a fetch. The keys are those of a volume's attributes:
+#   storePaths.x86_64-linux: /nix/store/<hash>-hello-2.12.3
+#   storePaths.aarch64-linux: /nix/store/<hash>-hello-2.12.3
+prefetch: {}
 # More nix-store-csi flags, like --keep-recent=7d.
 extraArgs: []
 

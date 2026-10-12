@@ -24,6 +24,7 @@ mod csi;
 mod metrics;
 mod mounts;
 mod narinfo;
+mod prefetch;
 mod store;
 mod store_path;
 mod transport;
@@ -160,6 +161,13 @@ enum Command {
             value_parser = store::parse_size
         )]
         max_closure_size: Option<u64>,
+        /// Keep the closures of the store paths listed in DIR fetched, even
+        /// when `--ensure-free` needs the space. DIR, such as a mounted
+        /// `ConfigMap`, holds a file for each volume attribute, `storePaths`
+        /// or `storePaths.<system>`. The plugin reads it every minute. Off
+        /// unless set.
+        #[arg(long, value_name = "DIR", env = "NIX_STORE_CSI_PREFETCH_DIR")]
+        prefetch_dir: Option<PathBuf>,
     },
     /// Fetch the closures of store paths into the node store and print its
     /// directory, for use with `podman -v DIR:/nix/store:ro`.
@@ -237,6 +245,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             keep_recent,
             ensure_free,
             metrics_address,
+            prefetch_dir,
             ..
         } => {
             store.prune_views(mounts::is_bound).await?;
@@ -249,6 +258,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 tokio::spawn(metrics::serve(listener, metrics::registry(&store)));
             }
             tokio::spawn(collect_garbage(store.clone(), keep_recent, ensure_free));
+            if let Some(dir) = prefetch_dir {
+                tokio::spawn(prefetch::Prefetch::new(store.clone(), dir).run());
+            }
             let plugin = Arc::new(Plugin::new(node_id, store));
             serve(&endpoint, plugin).await
         }

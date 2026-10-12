@@ -5,7 +5,7 @@ mod fetch;
 mod fs;
 mod gc;
 #[cfg(test)]
-mod test_utils;
+pub(crate) mod test_utils;
 mod views;
 
 use std::collections::{HashMap, HashSet};
@@ -30,7 +30,7 @@ use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 use crate::store_path;
 
-pub use self::fetch::TooBig;
+pub use self::fetch::{Ensuring, TooBig};
 pub use self::gc::{EnsureFree, Excess, parse_ensure_free, parse_size};
 pub use self::views::{Usage, check_volume, root_links};
 

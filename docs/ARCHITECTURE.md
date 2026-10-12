@@ -55,7 +55,9 @@ Collection deletes the store paths that no mounted view, closure being fetched
 or pending sync holds, and that no pod used within `--keep-recent`. It runs
 every 10 minutes. While free space or inodes on the state dir's filesystem
 fall short of `--ensure-free`, it runs every minute and also deletes recently
-used paths, least recently used first, until it frees enough.
+used paths, least recently used first, until it frees enough. Even then it
+spares the closures that the plugin prefetches, since the plugin would fetch
+them again within a minute.
 
 ## State dir structure
 

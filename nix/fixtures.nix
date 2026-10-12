@@ -1,18 +1,25 @@
-# busybox gives the k3s test a pod that stays up.
+# busybox gives the k3s test a pod that stays up. The test prefetches warm,
+# which no pod uses until the cache is down.
 # The signing key is in the repo so the caches build reproducibly.
 {
   runCommand,
   mkBinaryCache,
   writeClosure,
+  writeScript,
   hello,
   busybox,
   nix,
 }:
 
 let
+  warm = writeScript "warm" ''
+    #!${busybox}/bin/sh
+    echo warm
+  '';
   roots = [
     hello
     busybox
+    warm
   ];
   cache =
     compression:
@@ -38,3 +45,6 @@ runCommand "nix-store-csi-fixtures" { nativeBuildInputs = [ nix ]; } ''
   echo ${hello} > $out/hello.path
   cp ${writeClosure roots} $out/closure
 ''
+// {
+  inherit warm;
+}

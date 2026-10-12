@@ -331,10 +331,6 @@ mod tests {
         bytes: 0,
         inodes: 0,
     };
-    const ALL: Excess = Excess {
-        bytes: u64::MAX,
-        inodes: u64::MAX,
-    };
 
     #[tokio::test]
     async fn collects_unused_paths() {

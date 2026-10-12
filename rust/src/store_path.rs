@@ -1,4 +1,34 @@
+use std::collections::HashMap;
+
 use harmonia_store_path::{StoreDir, StorePath};
+
+/// The volume attribute that lists space-separated store paths, or paths
+/// inside them. On a node of Nix system `<system>`, `storePaths.<system>`
+/// replaces it, so one manifest can serve multiple systems. These are the
+/// only volume attributes because pods on a node share the node store. A pod
+/// that could pick a cache or key could put its own content under any store
+/// path for every pod. The files in `--prefetch-dir` have the same names.
+pub const STORE_PATHS: &str = "storePaths";
+
+/// The Nix system of this node. Rust and Nix use the same names for `x86_64`
+/// and `aarch64`, the architectures the plugin is built for.
+pub fn system() -> String {
+    format!("{}-linux", std::env::consts::ARCH)
+}
+
+/// Returns the attribute that lists the store paths for `system`, and its
+/// value.
+pub fn for_system<'a>(
+    attributes: &'a HashMap<String, String>,
+    system: &str,
+) -> Option<(String, &'a str)> {
+    [format!("{STORE_PATHS}.{system}"), STORE_PATHS.to_owned()]
+        .into_iter()
+        .find_map(|attribute| {
+            let value = attributes.get(&attribute)?;
+            Some((attribute, value.as_str()))
+        })
+}
 
 /// Accepts a base name like `<hash>-hello`, a store path, or a path inside one.
 pub fn parse(store_dir: &StoreDir, path: &str) -> anyhow::Result<StorePath> {

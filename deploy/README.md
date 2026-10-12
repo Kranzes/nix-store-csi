@@ -293,6 +293,17 @@ pods with big closures can fill the state dir's disk.
 
 A pod gets only its own closure, on a read-only mount.
 
-To limit who can use the driver, refuse its volumes outside chosen namespaces
-with an admission policy, such as a ValidatingAdmissionPolicy that checks
-`spec.volumes[].csi.driver`.
+To allow the driver's volumes only in some namespaces, list them in
+`admissionPolicy.allowedNamespaces`:
+
+```yaml
+# values.yaml
+admissionPolicy:
+  allowedNamespaces:
+    - ci
+    - web
+```
+
+The chart then adds a ValidatingAdmissionPolicy, which needs Kubernetes 1.30
+or later. It checks pods, so the API server still accepts a Deployment in
+another namespace, and its ReplicaSet's events show why it has no pods.

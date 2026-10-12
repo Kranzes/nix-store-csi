@@ -42,6 +42,11 @@ serviceAccountToken:
 # More nix-store-csi flags, like --keep-recent=7d.
 extraArgs: []
 
+# Namespaces whose pods may use the driver's volumes. Empty allows every
+# namespace. Needs Kubernetes 1.30 or later.
+admissionPolicy:
+  allowedNamespaces: []
+
 # Prometheus metrics at /metrics on this port. With hostNetwork the port is on
 # the node, so it has to be free there.
 metrics:

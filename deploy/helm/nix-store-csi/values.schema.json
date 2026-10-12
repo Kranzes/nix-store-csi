@@ -62,6 +62,16 @@
       }
     },
     "extraArgs": { "type": "array", "items": { "type": "string" } },
+    "admissionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowedNamespaces": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 }
+        }
+      }
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,

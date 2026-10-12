@@ -1,0 +1,41 @@
+{{- with .Values.admissionPolicy.allowedNamespaces }}
+{{- $name := printf "%s-namespaces" $.Release.Name }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nix-store-csi.labels" $ | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # A pod's volumes can't change after it's created.
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+  validations:
+    - expression: >-
+        !has(object.spec.volumes) ||
+        object.spec.volumes.all(v, !has(v.csi) || v.csi.driver != "nix-store-csi")
+      reason: Forbidden
+      message: {{ printf "the chart value admissionPolicy.allowedNamespaces allows nix-store-csi volumes only in these namespaces: %s" (join ", " .) | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nix-store-csi.labels" $ | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            {{- toYaml . | nindent 12 }}
+{{- end }}

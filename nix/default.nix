@@ -157,8 +157,8 @@ rec {
       inherit advisory-db;
     };
 
-    # helm lint renders the templates, once with the default values and once
-    # with credentials set.
+    # helm lint renders the templates with the default values, and then with
+    # each optional part set.
     chart =
       pkgs.runCommand "${package.name}-chart-lint" { nativeBuildInputs = [ pkgs.kubernetes-helm ]; }
         ''
@@ -166,6 +166,7 @@ rec {
           helm lint --strict ${chartSrc}
           helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true
+          helm lint --strict ${chartSrc} --set 'admissionPolicy.allowedNamespaces={default,ci}'
           # helm lint ignores fail, so these use helm template.
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null

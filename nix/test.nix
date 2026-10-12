@@ -96,6 +96,28 @@ let
 
   # The test starts it with the cache down, for a closure already on the node.
   offline = writeText "offline.json" (builtins.toJSON (sleeper "offline"));
+
+  other = writeText "other.json" (builtins.toJSON (sleeper "other"));
+  # A pod without the driver's volumes. Without a service account token it
+  # has no volumes at all.
+  plain =
+    automountServiceAccountToken:
+    writeText "plain.json" (
+      builtins.toJSON {
+        apiVersion = "v1";
+        kind = "Pod";
+        metadata.name = "plain";
+        spec = {
+          inherit automountServiceAccountToken;
+          containers = [
+            {
+              name = "plain";
+              image = "${runner-image.imageName}:${runner-image.imageTag}";
+            }
+          ];
+        };
+      }
+    );
 in
 testers.runNixOSTest {
   name = "nix-store-csi-k3s";
@@ -135,6 +157,7 @@ testers.runNixOSTest {
           trustedPublicKeys = [ (lib.fileContents ./test-1.pub) ];
           netrcSecret = "nix-store-csi-netrc";
           metrics.enabled = true;
+          admissionPolicy.allowedNamespaces = [ "default" ];
         };
       };
       # nginx asks for these credentials.
@@ -212,6 +235,16 @@ testers.runNixOSTest {
             job = "-n kube-system job/helm-install-nix-store-csi"
             print(machine.execute(f"kubectl describe {job}; kubectl logs {job}")[1])
             raise
+
+    with subtest("the admission policy refuses the driver's volumes outside default"):
+        machine.succeed("kubectl create namespace other")
+        create = "kubectl -n other create --dry-run=server -f"
+        # Waits for the namespace's service account and for the API server to
+        # load the policy. A dry run creates nothing, so a retry can't fail on
+        # a pod that an early try created.
+        machine.wait_until_succeeds(f"({create} ${other} 2>&1 || true) | grep -q 'only in these namespaces: default'", timeout=60)
+        machine.succeed(f"{create} ${plain true}", f"{create} ${plain false}")
+        machine.succeed("kubectl create --dry-run=server -f ${other}")
 
     with subtest("both pods run, and the plugin fetches each NAR once"):
         phase("hello", "Succeeded")

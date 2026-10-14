@@ -4,7 +4,7 @@
 
 The plugin needs:
 
-- Kubernetes 1.25 or later
+- Kubernetes 1.30 or later
 - Linux nodes on x86_64 or aarch64
 - a namespace that allows privileged pods, like `kube-system`
 - `kubeletDir` set to kubelet's root directory, if it isn't `/var/lib/kubelet`
@@ -360,6 +360,6 @@ admissionPolicy:
     - web
 ```
 
-The chart then adds a ValidatingAdmissionPolicy, which needs Kubernetes 1.30
-or later. It checks pods, so the API server still accepts a Deployment in
-another namespace, and its ReplicaSet's events show why it has no pods.
+The chart then adds a ValidatingAdmissionPolicy. It checks pods, so the API
+server still accepts a Deployment in another namespace, and its ReplicaSet's
+events show why it has no pods.

@@ -62,7 +62,7 @@ nodePools: {}
 extraArgs: []
 
 # Namespaces whose pods may use the driver's volumes. Empty allows every
-# namespace. Needs Kubernetes 1.30 or later.
+# namespace.
 admissionPolicy:
   allowedNamespaces: []
 

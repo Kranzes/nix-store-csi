@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- The chart needs Kubernetes 1.30 or later, up from 1.25, so that
+  `admissionPolicy` works on every version it installs on.
+
 ### Added
 
 - The chart's `nodePools` value gives groups of nodes their own prefetch

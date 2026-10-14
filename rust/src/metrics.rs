@@ -16,7 +16,7 @@ use prometheus_client::encoding::{DescriptorEncoder, EncodeLabelSet, EncodeMetri
 use prometheus_client::metrics::MetricType;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::ConstGauge;
+use prometheus_client::metrics::gauge::{ConstGauge, Gauge};
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::{Registry, Unit};
@@ -49,6 +49,11 @@ struct CacheLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RevisionLabels {
+    revision: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct BuildLabels {
     version: &'static str,
 }
@@ -65,6 +70,7 @@ pub struct Metrics {
     collections: Histograms<ResultLabels>,
     deleted_paths: Counter,
     freed_bytes: Counter,
+    prefetched: Family<RevisionLabels, Gauge>,
 }
 
 impl Default for Metrics {
@@ -85,6 +91,7 @@ impl Default for Metrics {
             collections: Family::new_with_constructor(collections),
             deleted_paths: Counter::default(),
             freed_bytes: Counter::default(),
+            prefetched: Family::default(),
         }
     }
 }
@@ -149,6 +156,16 @@ impl Metrics {
         self.freed_bytes.inc_by(size);
     }
 
+    /// Reports whether the node store holds the closures of revision
+    /// `revision` of the prefetch list.
+    pub fn prefetched(&self, revision: &str, held: bool) {
+        self.prefetched.clear();
+        let labels = RevisionLabels {
+            revision: revision.to_owned(),
+        };
+        self.prefetched.get_or_create(&labels).set(i64::from(held));
+    }
+
     fn register(&self, registry: &mut Registry) {
         registry.register_with_unit(
             "publish_duration",
@@ -190,6 +207,11 @@ impl Metrics {
             "NAR size of the store objects that collection deleted",
             Unit::Bytes,
             self.freed_bytes.clone(),
+        );
+        registry.register(
+            "prefetched",
+            "Whether the node store holds the closures of a revision of the prefetch list",
+            self.prefetched.clone(),
         );
     }
 }

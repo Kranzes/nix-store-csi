@@ -164,7 +164,20 @@ starts fetching within two minutes, without a restart.
 For a rollout:
 
 1. Set `prefetch` to the new version's store paths and upgrade the chart.
-2. Wait until each node plugin logs `prefetched` with those store paths.
+2. Wait until every node plugin holds the new list. The chart puts a
+   `revision` of the list in its ConfigMap. With `metrics.enabled`, the
+   chart's notes print it and a Prometheus query that returns nothing once
+   every node plugin holds that revision:
+
+   ```promql
+   nix_store_csi_build_info unless on (instance) nix_store_csi_prefetched{revision="<revision>"} == 1
+   ```
+
+   The query can't see a node plugin that Prometheus doesn't scrape, so check
+   that every node runs one.
+
+   Without metrics, wait until each node plugin logs `prefetched` with those
+   store paths.
 3. Update the Deployment. Its new pods start without waiting for a fetch.
 
 ## Your own image
@@ -235,6 +248,7 @@ Every metric starts with `nix_store_csi_`:
 | `gc_duration_seconds` | histogram | `result` |
 | `gc_deleted_paths_total` | counter | |
 | `gc_freed_bytes_total` | counter | |
+| `prefetched` | gauge | `revision` |
 | `build_info` | gauge | `version` |
 
 A publish that is still fetching after 90 seconds counts as `Unavailable`, and
@@ -243,6 +257,8 @@ kubelet's retry counts again. `nar_fetched_bytes_total`,
 `closures_in_flight` counts closures still being fetched, including those
 whose publish already returned `Unavailable`. `free_inodes` is missing on a
 filesystem with no limit on inodes, like btrfs.
+`prefetched` is 1 once the node store holds the closures of that revision of
+the `prefetch` list for the node's system.
 
 ## Security
 

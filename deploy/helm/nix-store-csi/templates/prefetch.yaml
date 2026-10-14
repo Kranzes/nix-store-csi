@@ -6,5 +6,6 @@ metadata:
   labels:
     {{- include "nix-store-csi.labels" $ | nindent 4 }}
 data:
+  revision: {{ include "nix-store-csi.prefetchRevision" $ | quote }}
   {{- toYaml . | nindent 2 }}
 {{- end }}

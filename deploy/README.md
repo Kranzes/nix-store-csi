@@ -188,6 +188,13 @@ For a rollout:
    store paths.
 3. Update the Deployment. Its new pods start without waiting for a fetch.
 
+Step 2 is optional. If you update the Deployment right away, each new pod's
+node fetches the closure when it mounts the volume, and a path that the
+prefetch is already fetching downloads only once. Waiting has two benefits. If
+a store path is missing from the caches or has no trusted signature, the
+prefetch fails while the old pods still run, and no new pods wait in
+`ContainerCreating`. Also, no step of the rolling update waits for a fetch.
+
 ## Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an

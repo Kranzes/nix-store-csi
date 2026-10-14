@@ -24,8 +24,9 @@ pub struct Prefetch {
     system: String,
     /// The store paths that `dir` lists for `system`, sorted.
     roots: Vec<StorePath>,
-    /// The last ensure that succeeded, and its list. Collection spares its
-    /// closure until a new list succeeds or the list empties.
+    /// The last ensure that succeeded, and its list. Until a new list succeeds
+    /// or the list empties, collection spares its closure, and volumes don't
+    /// count it towards the limit.
     held: Option<(Vec<StorePath>, Ensuring)>,
     running: Option<Ensuring>,
 }
@@ -72,7 +73,7 @@ impl Prefetch {
             Err(e) => warn!("{e:#}; prefetching the list read before"),
         }
         if self.running.is_none() && !self.roots.is_empty() {
-            self.running = Some(self.store.ensure(&self.roots));
+            self.running = Some(self.store.prefetch(&self.roots));
         }
     }
 
@@ -160,8 +161,8 @@ mod tests {
 
     use super::*;
     use crate::narinfo::tests::{empty_cache, file_store, fixture_root, fixtures};
-    use crate::store::Config;
     use crate::store::test_utils::{ALL, UNBOUND, count};
+    use crate::store::{Config, TooBig};
 
     const A: &str = "/nix/store/xl1h9i29pgq2q5cszjhm5wpfxfbbqwyi-hello-2.12.3";
     const B: &str = "/nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3";
@@ -173,7 +174,8 @@ mod tests {
             state_dir: dir.with_extension("state"),
             jobs: 2,
             netrc_file: None,
-            max_closure_size: None,
+            // Every closure is over it, and prefetches have no limit.
+            max_closure_size: Some(1),
         });
         Prefetch::new(Arc::new(store.unwrap()), dir.to_owned())
     }
@@ -265,6 +267,7 @@ mod tests {
         let hello = fixture_root(&fixtures, "hello.path");
         std::fs::write(dir.join("storePaths"), format!("/nix/store/{hello}\n")).unwrap();
         let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
+        let volume = || store.ensure(std::slice::from_ref(&hello));
 
         prefetch.tick();
         prefetch.finish().await;
@@ -273,6 +276,8 @@ mod tests {
         assert_eq!(collect().await.unwrap(), 0);
         let paths = count(store.dir());
         assert_eq!(paths, 5);
+        // A volume doesn't count the prefetched closure towards the limit.
+        assert_eq!(volume().done().await.unwrap().len(), paths);
 
         // Each tick ensures the closure again, and the last ensure holds it
         // until the next one ends.
@@ -292,10 +297,11 @@ mod tests {
         prefetch.tick();
         assert!(prefetch.running.is_some());
 
-        // A store path that leaves the list falls back to collection by last
-        // use.
+        // A store path that leaves the list counts towards the limit again,
+        // and falls back to collection by last use.
         std::fs::write(dir.join("storePaths"), "").unwrap();
         prefetch.tick();
+        assert!(volume().done().await.unwrap_err().is::<TooBig>());
         assert_eq!(collect().await.unwrap(), paths);
     }
 }

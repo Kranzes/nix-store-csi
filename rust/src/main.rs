@@ -153,7 +153,8 @@ enum Command {
         #[arg(long, value_name = "ADDRESS", env = "NIX_STORE_CSI_METRICS_ADDRESS")]
         metrics_address: Option<SocketAddr>,
         /// Refuse a volume whose closure's NARs add up to more than SIZE, like
-        /// `20G`, before fetching any of it. Off unless set.
+        /// `20G`, before fetching any of it. Prefetched closures don't count. Off
+        /// unless set.
         #[arg(
             long,
             value_name = "SIZE",

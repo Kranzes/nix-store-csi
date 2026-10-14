@@ -49,7 +49,7 @@ pub struct Config {
     pub jobs: usize,
     /// Credentials for caches whose URLs have none.
     pub netrc_file: Option<PathBuf>,
-    /// Ensures fail for closures whose NARs add up to more than this.
+    /// The limit of [`Store::ensure`].
     pub max_closure_size: Option<u64>,
 }
 
@@ -95,11 +95,15 @@ pub struct Store {
     /// need the same path share its fetch. A fetch leaves the map when it
     /// ends, so a publish after a failure starts a new one.
     fetching: Mutex<HashMap<StorePath, (Fetch, Arc<AtomicU64>)>>,
-    /// The paths of closures under [`Store::ensure`], each with its number of
-    /// holds. Collection spares them however full the disk is.
+    /// The paths of closures under [`Store::ensure`] or [`Store::prefetch`],
+    /// each with its number of holds. Collection spares them however full the
+    /// disk is.
     ensuring: Mutex<HashMap<StorePath, usize>>,
-    /// Closures that [`Store::ensure`] is resolving or fetching, for the
-    /// metrics.
+    /// The paths of closures under [`Store::prefetch`], each with its number
+    /// of holds. They don't count towards `max_closure_size`.
+    prefetched: Mutex<HashMap<StorePath, usize>>,
+    /// Closures that [`Store::ensure`] or [`Store::prefetch`] is resolving or
+    /// fetching, for the metrics.
     ensures: AtomicUsize,
     /// Counts the fetches that wrote a narinfo.
     installs: AtomicU64,
@@ -179,6 +183,7 @@ impl Store {
             syncing: tokio::sync::Mutex::default(),
             fetching: Mutex::default(),
             ensuring: Mutex::default(),
+            prefetched: Mutex::default(),
             ensures: AtomicUsize::default(),
             installs: AtomicU64::default(),
             size: AtomicU64::default(),

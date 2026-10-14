@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, bail, ensure};
@@ -36,15 +37,26 @@ impl Store {
     /// Starts fetching the paths in the closure of `roots` that the store
     /// lacks. Resolution and the fetches run in a task of their own, so they
     /// carry on if the caller stops waiting. A closure over the store's limit
-    /// fails with [`TooBig`] before any fetch starts.
+    /// fails with [`TooBig`] before any fetch starts. Paths that a
+    /// [`Store::prefetch`] holds don't count towards the limit.
     pub fn ensure(self: &Arc<Self>, roots: &[StorePath]) -> Ensuring {
+        self.start_ensure(roots, false)
+    }
+
+    /// Like [`Store::ensure`] with no limit. Until its hold on the closure
+    /// ends, the closure doesn't count towards the limit of other ensures.
+    pub fn prefetch(self: &Arc<Self>, roots: &[StorePath]) -> Ensuring {
+        self.start_ensure(roots, true)
+    }
+
+    fn start_ensure(self: &Arc<Self>, roots: &[StorePath], prefetch: bool) -> Ensuring {
         let (this, roots) = (self.clone(), roots.to_vec());
         let progress = Arc::<OnceLock<_>>::default();
         let set = progress.clone();
         let (tx, rx) = oneshot::channel();
         self.ensures.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
-            let result = this.ensure_closure(&roots, &set).await;
+            let result = this.ensure_closure(&roots, prefetch, &set).await;
             this.ensures.fetch_sub(1, Ordering::Relaxed);
             // From here on, only the caller's hold makes collection spare the
             // closure.
@@ -62,22 +74,35 @@ impl Store {
     async fn ensure_closure(
         self: &Arc<Self>,
         roots: &[StorePath],
+        prefetch: bool,
         progress: &OnceLock<Progress>,
     ) -> anyhow::Result<Arc<[StorePath]>> {
         let installs = self.installs.load(Ordering::SeqCst);
         let closure = self.caches.resolve(roots).await?;
         let total: u64 = closure.values().map(|e| e.info.nar_size()).sum();
-        if let Some(limit) = self.max_closure_size
-            && total > limit
-        {
-            return Err(TooBig { size: total, limit }.into());
-        }
         let paths: Arc<[StorePath]> = closure.keys().cloned().collect();
         // Under the guard, a collection either sees the hold or finishes
-        // before this checks the store for the paths.
+        // before this checks the limit and the store for the paths.
         let (held, missing) = {
             let _gc = self.gc_guard().await;
-            let held = self.hold(&paths);
+            let held = self.hold(&paths, prefetch);
+            if let Some(limit) = self.max_closure_size.filter(|_| !prefetch) {
+                let counted = {
+                    let prefetched = self.prefetched.lock().unwrap();
+                    (closure.iter())
+                        .filter(|(path, _)| !prefetched.contains_key(*path))
+                        .map(|(_, e)| e.info.nar_size())
+                        .sum()
+                };
+                if counted > limit {
+                    return Err(TooBig {
+                        size: total,
+                        counted,
+                        limit,
+                    }
+                    .into());
+                }
+            }
             let (this, all) = (self.clone(), paths.clone());
             let missing = tokio::task::spawn_blocking(move || this.touch_present(&all)).await??;
             (held, missing)
@@ -131,16 +156,25 @@ impl Store {
         Ok(())
     }
 
-    /// Makes collection spare `paths` until the result drops.
-    fn hold(self: &Arc<Self>, paths: &Arc<[StorePath]>) -> Held {
-        let mut ensuring = self.ensuring.lock().unwrap();
-        for path in paths.iter() {
-            *ensuring.entry(path.clone()).or_default() += 1;
+    /// Makes collection spare `paths` until the result drops. A prefetch's
+    /// paths also don't count towards the limit until then.
+    fn hold(self: &Arc<Self>, paths: &Arc<[StorePath]>, prefetch: bool) -> Held {
+        for holds in self.holds(prefetch) {
+            let mut holds = holds.lock().unwrap();
+            for path in paths.iter() {
+                *holds.entry(path.clone()).or_default() += 1;
+            }
         }
         Held {
             store: self.clone(),
             paths: paths.clone(),
+            prefetch,
         }
+    }
+
+    /// The maps that count a hold: `ensuring`, and for a prefetch, `prefetched`.
+    fn holds(&self, prefetch: bool) -> impl Iterator<Item = &Mutex<HashMap<StorePath, usize>>> {
+        std::iter::once(&self.ensuring).chain(prefetch.then_some(&self.prefetched))
     }
 
     /// Records a use of the paths the store has, and returns the rest.
@@ -316,7 +350,8 @@ impl Drop for Leave {
     }
 }
 
-/// A closure on its way into the store, from [`Store::ensure`].
+/// A closure on its way into the store, from [`Store::ensure`] or
+/// [`Store::prefetch`].
 pub struct Ensuring {
     result: oneshot::Receiver<anyhow::Result<Arc<[StorePath]>>>,
     progress: Arc<OnceLock<Progress>>,
@@ -338,16 +373,19 @@ struct Progress {
 struct Held {
     store: Arc<Store>,
     paths: Arc<[StorePath]>,
+    prefetch: bool,
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let mut ensuring = self.store.ensuring.lock().unwrap();
-        for path in self.paths.iter() {
-            if let Some(n) = ensuring.get_mut(path) {
-                *n -= 1;
-                if *n == 0 {
-                    ensuring.remove(path);
+        for holds in self.store.holds(self.prefetch) {
+            let mut holds = holds.lock().unwrap();
+            for path in self.paths.iter() {
+                if let Some(n) = holds.get_mut(path) {
+                    *n -= 1;
+                    if *n == 0 {
+                        holds.remove(path);
+                    }
                 }
             }
         }
@@ -371,21 +409,25 @@ impl Ensuring {
     }
 }
 
-/// A closure whose NARs add up to more than the store's limit.
+/// A closure whose NARs, other than those that a prefetch holds, add up to
+/// more than the store's limit.
 #[derive(Debug)]
 pub struct TooBig {
+    /// The NAR size of the whole closure.
     pub size: u64,
+    /// The part of `size` that counts towards the limit.
+    pub counted: u64,
     pub limit: u64,
 }
 
 impl std::fmt::Display for TooBig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "the closure is {}, over the limit of {}",
-            ByteSize(self.size),
-            ByteSize(self.limit)
-        )
+        write!(f, "the closure is {}", ByteSize(self.size))?;
+        if self.counted < self.size {
+            let counted = ByteSize(self.counted);
+            write!(f, ", or {counted} without prefetched store paths")?;
+        }
+        write!(f, ", over the limit of {}", ByteSize(self.limit))
     }
 }
 
@@ -658,8 +700,8 @@ mod tests {
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
     }
 
-    /// A closure over the limit fails before any fetch starts, and the paths
-    /// the store already has count towards it.
+    /// A closure over the limit fails before any fetch starts. The paths the
+    /// store already has count towards it, unless a prefetch holds them.
     #[tokio::test]
     async fn limits_closure_size() {
         let Some(dir) = fixtures() else {
@@ -676,12 +718,30 @@ mod tests {
 
         let store = Arc::new(Store::new(limited(1)).unwrap());
         let err = ensure(&store).done().await.unwrap_err();
-        let &TooBig { size, limit } = err.downcast_ref().unwrap();
-        assert_eq!(limit, 1);
+        let &TooBig {
+            size,
+            counted,
+            limit,
+        } = err.downcast_ref().unwrap();
+        assert_eq!((counted, limit), (size, 1));
         settled(&store).await;
         assert!(store.ensuring.lock().unwrap().is_empty());
         assert_eq!(count(store.dir()), 0);
         assert_eq!(count(tmp.path().join("narinfo")), 0);
+
+        // A prefetch's closure stops counting once it is resolved, before its
+        // fetches end, and counts again once its hold ends.
+        let jobs = store.jobs.acquire_many(2).await.unwrap();
+        let glibc = store.prefetch(&[fixture_path(&dir, "glibc")]);
+        resolved(&glibc).await;
+        let err = ensure(&store).done().await.unwrap_err();
+        let too_big: &TooBig = err.downcast_ref().unwrap();
+        let (_, _, info) = fixture_narinfo(&dir, "cache-zstd", &hello);
+        assert_eq!((too_big.size, too_big.counted), (size, info.nar_size()));
+        assert!(format!("{err:#}").contains("without prefetched store paths"));
+        drop((jobs, glibc));
+        settled(&store).await;
+        assert!(store.prefetched.lock().unwrap().is_empty());
 
         let store = reopen(store, || limited(size)).await;
         assert_eq!(ensure(&store).done().await.unwrap().len(), 5);

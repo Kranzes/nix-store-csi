@@ -259,9 +259,12 @@ pods with big closures can fill the state dir's disk.
 
 `maxClosureSize`, like `20G`, limits the NAR size of each volume's closure.
 The plugin refuses a bigger closure before it fetches any of it. The pod stays
-in `ContainerCreating`, and its events show the closure's size and the limit.
-`nix path-info -S` prints the same size. Many pods with different closures
-can still fill the disk.
+in `ContainerCreating`, and its events show the limit and the closure's size,
+which `nix path-info -S` also prints. Prefetched closures don't count towards
+it, so prefetching a big closure lets pods use it. Once its store paths leave
+`prefetch`, a closure counts again. During a rollout, keep the old version's
+store paths in `prefetch` for as long as you may roll back. Many pods with
+different closures can still fill the disk.
 
 A pod gets only its own closure, on a read-only mount.
 

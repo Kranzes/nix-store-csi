@@ -37,34 +37,9 @@ kubectl logs hello
 A pod stays in `ContainerCreating` until its closure is on the node. Past 90
 seconds, its events show how much has arrived.
 
-## Private caches
+## Pod manifests
 
-Credentials for private caches go in a netrc file in a Secret, the format Nix
-uses for its `netrc-file`. The plugin reads the file for every request, so
-changes to the Secret apply without a restart. A private cache also needs its
-key among the trusted ones:
-
-```sh
-kubectl -n kube-system create secret generic nix-store-csi-netrc \
-  --from-literal=netrc="machine cache.example.com login user password secret"
-```
-
-```yaml
-# values.yaml
-substituters:
-  - https://cache.example.com
-  - https://cache.nixos.org
-trustedPublicKeys:
-  - cache.example.com-1:<key>
-  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
-netrcSecret: nix-store-csi-netrc
-```
-
-```sh
-helm upgrade --install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi -n kube-system -f values.yaml
-```
-
-## Injecting store paths into manifests
+### Injecting store paths into manifests
 
 A nixpkgs update often changes store paths, so paths copied into manifests by
 hand go stale. Instead, write a variable like
@@ -102,7 +77,7 @@ The derivation's `prefetch` output is a values file with the chart's
 own, and the manifests once the nodes hold it, as in
 [Prefetching](#prefetching).
 
-## Multiple architectures
+### Multiple architectures
 
 One manifest can serve nodes of multiple architectures. Add a
 `storePaths.<system>` attribute for each Nix system. A node uses the one for
@@ -145,7 +120,74 @@ spec:
   `HELLO_AMD64 = nixpkgs.legacyPackages.x86_64-linux.hello`, and get the
   link's name from `hello.name`.
 
-## Prefetching
+### Your own image
+
+The example runs in the runner image, which has tini as its entrypoint, an
+empty `/nix/store`, users, `/tmp` and nixpkgs' CA certificates, and runs as
+nobody. Any other image works if it meets these requirements:
+
+- Nothing in the image may need its own `/nix/store`, since the volume hides
+  it. An image without `/nix/store` is fine, because the container runtime
+  creates the mount point.
+- An init is optional if the program exits on SIGTERM and either starts no
+  child processes or reaps the ones it starts, as most servers do. Otherwise
+  deleting the pod waits out its grace period, and finished children pile up
+  as zombies. Then use the image's own init, or run tini from the closure. Put
+  it in `command`, which replaces the image's entrypoint, and in `storePaths`:
+
+  ```yaml
+  command: [${NIX_STORE_PATH_TINI}/bin/tini, -s, --]
+  args: [${NIX_STORE_PATH_HELLO}/bin/hello]
+  # ...
+  volumeAttributes:
+    storePaths: ${NIX_STORE_PATH_TINI} ${NIX_STORE_PATH_HELLO}
+  ```
+
+  Add `TINI = tini` to `storePaths` in [manifests.nix](manifests.nix).
+- The image provides what the program expects from its environment, like users
+  in `/etc/passwd`, `/tmp` and CA certificates.
+
+Keep store paths out of the image, and the program's store path only in `args`
+and `storePaths`. The image then doesn't change when the program does. The
+runner image is built this way from [base-image.nix](base-image.nix), which
+copies what it needs instead of linking into the store. To add a company CA,
+build your own with `extraCertificates = [ ./company-ca.pem ];`.
+
+To run an existing image built with `dockerTools.buildLayeredImage`, set
+`includeStorePaths = false`. The image then holds only links into `/nix/store`,
+and `storePaths` has to list the store paths it links to. Rebuild the image when
+those paths change.
+
+## Running the plugin
+
+### Private caches
+
+Credentials for private caches go in a netrc file in a Secret, the format Nix
+uses for its `netrc-file`. The plugin reads the file for every request, so
+changes to the Secret apply without a restart. A private cache also needs its
+key among the trusted ones:
+
+```sh
+kubectl -n kube-system create secret generic nix-store-csi-netrc \
+  --from-literal=netrc="machine cache.example.com login user password secret"
+```
+
+```yaml
+# values.yaml
+substituters:
+  - https://cache.example.com
+  - https://cache.nixos.org
+trustedPublicKeys:
+  - cache.example.com-1:<key>
+  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+netrcSecret: nix-store-csi-netrc
+```
+
+```sh
+helm upgrade --install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi -n kube-system -f values.yaml
+```
+
+### Prefetching
 
 To have closures on the nodes before pods need them, list their store paths
 in the `prefetch` value:
@@ -195,7 +237,7 @@ a store path is missing from the caches or has no trusted signature, the
 prefetch fails while the old pods still run, and no new pods wait in
 `ContainerCreating`. Also, no step of the rolling update waits for a fetch.
 
-## Node pools
+### Node pools
 
 Every node of a system gets the same `prefetch` list. In a cluster whose nodes
 run different workloads, like a pool of GPU nodes for training and a pool for
@@ -241,45 +283,7 @@ nix_store_csi_build_info{pool="gpu"} unless on (instance) nix_store_csi_prefetch
 Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
 pods into the metrics in your own scrape config.
 
-## Your own image
-
-The example runs in the runner image, which has tini as its entrypoint, an
-empty `/nix/store`, users, `/tmp` and nixpkgs' CA certificates, and runs as
-nobody. Any other image works if it meets these requirements:
-
-- Nothing in the image may need its own `/nix/store`, since the volume hides
-  it. An image without `/nix/store` is fine, because the container runtime
-  creates the mount point.
-- An init is optional if the program exits on SIGTERM and either starts no
-  child processes or reaps the ones it starts, as most servers do. Otherwise
-  deleting the pod waits out its grace period, and finished children pile up
-  as zombies. Then use the image's own init, or run tini from the closure. Put
-  it in `command`, which replaces the image's entrypoint, and in `storePaths`:
-
-  ```yaml
-  command: [${NIX_STORE_PATH_TINI}/bin/tini, -s, --]
-  args: [${NIX_STORE_PATH_HELLO}/bin/hello]
-  # ...
-  volumeAttributes:
-    storePaths: ${NIX_STORE_PATH_TINI} ${NIX_STORE_PATH_HELLO}
-  ```
-
-  Add `TINI = tini` to `storePaths` in [manifests.nix](manifests.nix).
-- The image provides what the program expects from its environment, like users
-  in `/etc/passwd`, `/tmp` and CA certificates.
-
-Keep store paths out of the image, and the program's store path only in `args`
-and `storePaths`. The image then doesn't change when the program does. The
-runner image is built this way from [base-image.nix](base-image.nix), which
-copies what it needs instead of linking into the store. To add a company CA,
-build your own with `extraCertificates = [ ./company-ca.pem ];`.
-
-To run an existing image built with `dockerTools.buildLayeredImage`, set
-`includeStorePaths = false`. The image then holds only links into `/nix/store`,
-and `storePaths` has to list the store paths it links to. Rebuild the image when
-those paths change.
-
-## Metrics
+### Metrics
 
 With `metrics.enabled=true`, the node plugin serves Prometheus metrics at
 `/metrics` on port 9809 (`metrics.port`).
@@ -321,7 +325,7 @@ filesystem with no limit on inodes, like btrfs.
 `prefetched` is 1 once the node store holds the closures of that revision of
 the `prefetch` list for the node's system.
 
-## Security
+### Security
 
 The CSIDriver is cluster-scoped, and every Pod Security level allows its
 volumes. So anyone who can create a pod in any namespace can mount the closure

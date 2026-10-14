@@ -67,6 +67,23 @@
       "propertyNames": { "pattern": "^storePaths(\\..+)?$" },
       "additionalProperties": { "type": "string" }
     },
+    "nodePools": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeSelector"],
+        "properties": {
+          "nodeSelector": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": { "type": "string" }
+          },
+          "prefetch": { "$ref": "#/properties/prefetch" }
+        }
+      }
+    },
     "extraArgs": { "type": "array", "items": { "type": "string" } },
     "admissionPolicy": {
       "type": "object",

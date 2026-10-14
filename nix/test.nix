@@ -188,6 +188,11 @@ testers.runNixOSTest {
             "storePaths.${stdenv.hostPlatform.system}" = "${busybox}";
             storePaths = "/nix/store/00000000000000000000000000000000-missing";
           };
+          # The test moves the node into it at the end.
+          nodePools.warm = {
+            nodeSelector.pool = "warm";
+            prefetch."storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}";
+          };
         };
       };
       # nginx asks for these credentials.
@@ -376,5 +381,16 @@ testers.runNixOSTest {
         machine.wait_until_succeeds("kubectl delete pod sleep offline warm --wait --ignore-not-found", timeout=120)
         machine.wait_until_fails(volumes)
         machine.wait_until_succeeds(f"[ -z \"$({views})\" ]", timeout=60)
+
+    with subtest("a node that joins a pool gets the pool's plugin, which prefetches the pool's list"):
+        machine.succeed("kubectl label node machine pool=warm")
+        pool = "kubectl -n kube-system get pod -l nix-store-csi/pool=warm"
+        machine.wait_until_succeeds(f"{pool} -o jsonpath='{{.items[*].status.containerStatuses[*].ready}}' | grep -qx 'true true true'", timeout=300)
+        machine.wait_until_succeeds("[ $(kubectl -n kube-system get pod -l app.kubernetes.io/name=nix-store-csi -o name | wc -l) = 1 ]", timeout=120)
+        revision = machine.succeed(
+            "kubectl -n kube-system get configmap nix-store-csi-prefetch-warm -o jsonpath='{.data.revision}'"
+        )
+        # The cache is still down, and warm is on the node already.
+        machine.wait_until_succeeds(prefetched(revision), timeout=180)
   '';
 }

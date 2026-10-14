@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The chart's `nodePools` value gives groups of nodes their own prefetch
+  lists, each with its own DaemonSet and ConfigMap. A pool's list replaces
+  `prefetch` on its nodes. The PodMonitor adds a `pool` label to the metrics.
+
 ## 0.1.3 - 2026-10-14
 
 ### Added

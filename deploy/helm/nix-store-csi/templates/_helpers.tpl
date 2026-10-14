@@ -10,7 +10,29 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{- /* Changes with the prefetch list, so a rollout can wait for every node plugin to hold it. */}}
+{{- /* Changes with a prefetch list, so a rollout can wait for every node plugin to hold it. */}}
 {{- define "nix-store-csi.prefetchRevision" -}}
-{{ toJson .Values.prefetch | sha256sum | trunc 12 }}
+{{ toJson . | sha256sum | trunc 12 }}
+{{- end }}
+
+{{- /*
+Node selector terms for the nodes that match none of a list of node selectors.
+A node is outside a selector if one of its labels differs, and NotIn also
+matches a node without the label.
+*/}}
+{{- define "nix-store-csi.outside" -}}
+{{- $terms := list (list) }}
+{{- range $selector := . }}
+{{- $next := list }}
+{{- range $term := $terms }}
+{{- range $key, $value := $selector }}
+{{- $next = append $next (append $term (dict "key" $key "operator" "NotIn" "values" (list $value))) }}
+{{- end }}
+{{- end }}
+{{- $terms = $next }}
+{{- end }}
+{{- range $terms }}
+- matchExpressions:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
 {{- end }}

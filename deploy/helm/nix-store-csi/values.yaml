@@ -48,6 +48,16 @@ maxClosureSize: ""
 #   storePaths.x86_64-linux: /nix/store/<hash>-hello-2.12.3
 #   storePaths.aarch64-linux: /nix/store/<hash>-hello-2.12.3
 prefetch: {}
+# Groups of nodes that prefetch their own lists instead of `prefetch`. A
+# closure that every node needs goes in each pool's list too. Each pool gets
+# its own DaemonSet on the nodes that match its nodeSelector and the top-level
+# one. A node that matches more than one pool goes to the first by name.
+#   gpu:
+#     nodeSelector:
+#       karpenter.sh/nodepool: gpu
+#     prefetch:
+#       storePaths.x86_64-linux: /nix/store/<hash>-trainer
+nodePools: {}
 # More nix-store-csi flags, like --keep-recent=7d.
 extraArgs: []
 

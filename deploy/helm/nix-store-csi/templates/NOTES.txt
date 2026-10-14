@@ -18,3 +18,10 @@ Pods in every namespace can use these volumes, and through them any private
 cache that the plugin has credentials for. To allow the volumes only in some
 namespaces, set admissionPolicy.allowedNamespaces.
 {{- end }}
+{{- if and .Values.prefetch .Values.metrics.enabled }}
+
+Every node plugin holds revision {{ include "nix-store-csi.prefetchRevision" . }} of the prefetch list once
+this Prometheus query returns nothing:
+
+  nix_store_csi_build_info unless on (instance) nix_store_csi_prefetched{revision="{{ include "nix-store-csi.prefetchRevision" . }}"} == 1
+{{- end }}

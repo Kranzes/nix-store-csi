@@ -18,10 +18,15 @@ use crate::store_path;
 /// The link that kubelet points at the current files of a `ConfigMap`'s volume.
 const DATA: &str = "..data";
 
+/// The file that names the list's revision, like a hash of its contents.
+const REVISION: &str = "revision";
+
 pub struct Prefetch {
     store: Arc<Store>,
     dir: PathBuf,
     system: String,
+    /// The list's `revision` file, which the metrics report.
+    revision: String,
     /// The store paths that `dir` lists for `system`, sorted.
     roots: Vec<StorePath>,
     /// The last ensure that succeeded, and its list. Until a new list succeeds
@@ -37,6 +42,7 @@ impl Prefetch {
             store,
             dir,
             system: store_path::system(),
+            revision: String::new(),
             roots: Vec::new(),
             held: None,
             running: None,
@@ -59,17 +65,21 @@ impl Prefetch {
 
     /// Reads the list again, and starts an ensure of it unless one is running.
     fn tick(&mut self) {
-        match self.read_roots() {
-            Ok(Some(roots)) if roots != self.roots => {
-                info!(store_paths = ?roots, "prefetching");
-                if roots.is_empty() {
-                    self.held = None;
+        match self.read_list() {
+            Ok(Some((revision, roots))) => {
+                if roots != self.roots {
+                    info!(store_paths = ?roots, "prefetching");
+                    if roots.is_empty() {
+                        self.held = None;
+                    }
+                    self.roots = roots;
+                    // An ensure of the old list carries on in its own task.
+                    self.running = None;
                 }
-                self.roots = roots;
-                // An ensure of the old list carries on in its own task.
-                self.running = None;
+                self.revision = revision;
+                self.report();
             }
-            Ok(_) => {}
+            Ok(None) => {}
             Err(e) => warn!("{e:#}; prefetching the list read before"),
         }
         if self.running.is_none() && !self.roots.is_empty() {
@@ -96,6 +106,7 @@ impl Prefetch {
                     info!(store_paths = ?self.roots, "prefetched");
                 }
                 self.held = Some((self.roots.clone(), done));
+                self.report();
             }
             Err(e) => {
                 warn!(store_paths = ?self.roots, "prefetching: {e:#}; trying again in a minute");
@@ -103,21 +114,30 @@ impl Prefetch {
         }
     }
 
-    /// Returns `None` while kubelet updates the directory. A node whose system
-    /// has no list gets an empty one.
-    fn read_roots(&self) -> anyhow::Result<Option<Vec<StorePath>>> {
+    /// Tells the metrics whether the node store holds the list's closures.
+    fn report(&self) {
+        let held = self.roots.is_empty()
+            || (self.held.as_ref()).is_some_and(|(roots, _)| *roots == self.roots);
+        self.store.metrics().prefetched(&self.revision, held);
+    }
+
+    /// Returns the list's revision and store paths, or `None` while kubelet
+    /// updates the directory. A node whose system has no list gets an empty
+    /// one.
+    fn read_list(&self) -> anyhow::Result<Option<(String, Vec<StorePath>)>> {
         let files = read(&self.dir).with_context(|| format!("reading {}", self.dir.display()))?;
         let Some(files) = files else {
             return Ok(None);
         };
+        let revision = files.get(REVISION).map_or("", |r| r.trim()).to_owned();
         let Some((name, list)) = store_path::for_system(&files, &self.system) else {
-            return Ok(Some(Vec::new()));
+            return Ok(Some((revision, Vec::new())));
         };
         let mut roots = (self.store.roots(list.split_whitespace()))
             .with_context(|| format!("reading {}", self.dir.join(name).display()))?;
         roots.sort();
         roots.dedup();
-        Ok(Some(roots))
+        Ok(Some((revision, roots)))
     }
 }
 
@@ -160,6 +180,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::metrics::tests::sample;
     use crate::narinfo::tests::{empty_cache, file_store, fixture_root, fixtures};
     use crate::store::test_utils::{ALL, UNBOUND, count};
     use crate::store::{Config, TooBig};
@@ -195,7 +216,7 @@ mod tests {
 
     /// The store paths that `prefetch` reads, as text.
     fn listed(prefetch: &Prefetch) -> Option<Vec<String>> {
-        let roots = prefetch.read_roots().unwrap()?;
+        let (_, roots) = prefetch.read_list().unwrap()?;
         Some(roots.iter().map(|r| format!("/nix/store/{r}")).collect())
     }
 
@@ -208,16 +229,22 @@ mod tests {
         prefetch.system = "aarch64-linux".to_owned();
 
         // A missing directory is an error, which leaves the list as it was.
-        let e = prefetch.read_roots().unwrap_err();
+        let e = prefetch.read_list().unwrap_err();
         assert!(format!("{e:#}").contains("No such file"), "{e:#}");
 
         std::fs::create_dir(&dir).unwrap();
         update(
             &dir,
             "1",
-            &[("storePaths", A), ("storePaths.aarch64-linux", B)],
+            &[
+                ("storePaths", A),
+                ("storePaths.aarch64-linux", B),
+                ("revision", "r1\n"),
+            ],
         );
         assert_eq!(listed(&prefetch), Some(vec![B.to_owned()]));
+        let (revision, _) = prefetch.read_list().unwrap().unwrap();
+        assert_eq!(revision, "r1");
         // The links next to `..data` lag behind it during an update.
         let link = dir.join("storePaths.aarch64-linux");
         std::os::unix::fs::symlink("..data/storePaths.aarch64-linux", link).unwrap();
@@ -227,7 +254,7 @@ mod tests {
         update(&dir, "3", &[("storePaths.x86_64-linux", A)]);
         assert_eq!(listed(&prefetch), Some(vec![]));
         update(&dir, "4", &[("storePaths", "not a store path")]);
-        assert!(prefetch.read_roots().is_err());
+        assert!(prefetch.read_list().is_err());
 
         // A read that an update overtakes changes nothing. The pipe holds the
         // read until the update is done.
@@ -266,11 +293,19 @@ mod tests {
         let store = prefetch.store.clone();
         let hello = fixture_root(&fixtures, "hello.path");
         std::fs::write(dir.join("storePaths"), format!("/nix/store/{hello}\n")).unwrap();
+        std::fs::write(dir.join("revision"), "r1").unwrap();
         let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
         let volume = || store.ensure(std::slice::from_ref(&hello));
+        let registry = crate::metrics::registry(&store);
+        let gauge = |revision: &str| {
+            let name = format!("nix_store_csi_prefetched{{revision=\"{revision}\"}}");
+            sample(&registry, &name)
+        };
 
         prefetch.tick();
+        assert_eq!(gauge("r1"), Some(0.0));
         prefetch.finish().await;
+        assert_eq!(gauge("r1"), Some(1.0));
         // Collection spares paths until their syncs.
         store.sync_all().await.unwrap();
         assert_eq!(collect().await.unwrap(), 0);
@@ -286,12 +321,21 @@ mod tests {
         prefetch.finish().await;
         assert_eq!(collect().await.unwrap(), 0);
 
+        // A new revision with the same store paths, like a change to another
+        // system's list, is held immediately.
+        std::fs::write(dir.join("revision"), "r1b").unwrap();
+        prefetch.tick();
+        assert_eq!((gauge("r1"), gauge("r1b")), (None, Some(1.0)));
+        prefetch.finish().await;
+
         // A new list that fails keeps the old closure until it succeeds, and
         // tries again on the next tick.
         let missing = format!("/nix/store/{}-missing", "0".repeat(32));
         std::fs::write(dir.join("storePaths"), missing).unwrap();
+        std::fs::write(dir.join("revision"), "r2").unwrap();
         prefetch.tick();
         prefetch.finish().await;
+        assert_eq!((gauge("r1b"), gauge("r2")), (None, Some(0.0)));
         assert!(prefetch.held.is_some() && prefetch.running.is_none());
         assert_eq!(collect().await.unwrap(), 0);
         prefetch.tick();
@@ -302,6 +346,8 @@ mod tests {
         std::fs::write(dir.join("storePaths"), "").unwrap();
         prefetch.tick();
         assert!(volume().done().await.unwrap_err().is::<TooBig>());
+        // A node holds an empty list as soon as it reads it.
+        assert_eq!(gauge("r2"), Some(1.0));
         assert_eq!(collect().await.unwrap(), paths);
     }
 }

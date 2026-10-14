@@ -135,7 +135,12 @@ let
     })
   );
   prefetchWarm = writeText "prefetch.json" (
-    builtins.toJSON { data."storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}"; }
+    builtins.toJSON {
+      data = {
+        "storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}";
+        revision = "warm";
+      };
+    }
   );
 in
 testers.runNixOSTest {
@@ -341,10 +346,17 @@ testers.runNixOSTest {
         t.assertEqual(sorted(machine.succeed(f"ls {target}").split()), closure)
 
     with subtest("the plugin prefetches the store paths in its ConfigMap as kubelet updates it"):
-        machine.wait_until_succeeds(f"{plugin} | grep -q 'prefetched store_paths=.*-${busybox.name}'", timeout=60)
+        def prefetched(revision):
+            line = 'nix_store_csi_prefetched{revision="' + revision + '"} 1'
+            return f"${curl}/bin/curl -sf http://127.0.0.1:9809/metrics | grep -qxF '{line}'"
+        revision = machine.succeed(
+            "kubectl -n kube-system get configmap nix-store-csi-prefetch -o jsonpath='{.data.revision}'"
+        )
+        machine.wait_until_succeeds(prefetched(revision), timeout=60)
+        machine.succeed(f"{plugin} | grep 'prefetched store_paths=.*-${busybox.name}' > /dev/null")
         before = int(machine.succeed(fetches))
         machine.succeed("kubectl -n kube-system patch configmap nix-store-csi-prefetch --type merge --patch-file ${prefetchWarm}")
-        machine.wait_until_succeeds(f"{plugin} | grep -q 'prefetched store_paths=.*-warm'", timeout=300)
+        machine.wait_until_succeeds(prefetched("warm"), timeout=300)
         # busybox, which warm references, is on the node already.
         t.assertEqual(int(machine.succeed(fetches)), before + 1)
 

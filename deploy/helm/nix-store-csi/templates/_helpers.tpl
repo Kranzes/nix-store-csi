@@ -9,3 +9,8 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
+
+{{- /* Changes with the prefetch list, so a rollout can wait for every node plugin to hold it. */}}
+{{- define "nix-store-csi.prefetchRevision" -}}
+{{ toJson .Values.prefetch | sha256sum | trunc 12 }}
+{{- end }}

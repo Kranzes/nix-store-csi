@@ -1072,13 +1072,185 @@
     },
     {
       "type": "row",
+      "title": "Prefetching",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "id": 26
+    },
+    {
+      "type": "timeseries",
+      "title": "Prefetch rollout",
+      "description": "Node plugins that fetched the closures of each revision of the prefetch list. A rollout is done once the new revision reaches the dashed line, the node plugins that Prometheus scrapes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (revision) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "legendFormat": "{{revision}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(nix_store_csi_build_info{instance=~\"$instance\"})",
+          "legendFormat": "Node plugins"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            },
+            "axisSoftMax": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Node plugins"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 41
+      },
+      "id": 27
+    },
+    {
+      "type": "table",
+      "title": "Prefetch list",
+      "description": "For each revision of the prefetch list, the node plugins that fetched its closures, out of those that have seen it. During a rollout, the old revision's row goes away once kubelet updates the ConfigMap on every node.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (revision) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count by (revision) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "revision": "Revision",
+              "Value #A": "Fetched",
+              "Value #B": "Seen"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "id": 28
+    },
+    {
+      "type": "row",
       "title": "Internals",
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 49
       },
       "panels": [
         {
@@ -1128,7 +1300,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 41,
+            "y": 50,
             "w": 8,
             "h": 8
           },
@@ -1181,7 +1353,7 @@
           },
           "gridPos": {
             "x": 8,
-            "y": 41,
+            "y": 50,
             "w": 8,
             "h": 8
           },
@@ -1217,7 +1389,7 @@
           },
           "gridPos": {
             "x": 16,
-            "y": 41,
+            "y": 50,
             "w": 8,
             "h": 8
           },

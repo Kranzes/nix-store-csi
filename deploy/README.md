@@ -97,6 +97,11 @@ CI can build the derivation and commit the result to a branch that Flux or
 Argo CD syncs. The same variables work in Helm values files and other
 text that ends up in a pod spec.
 
+The derivation's `prefetch` output is a values file with the chart's
+`prefetch` value for the same store paths. Apply it in a commit or sync of its
+own, and the manifests once the nodes hold it, as in
+[Prefetching](#prefetching).
+
 ## Multiple architectures
 
 One manifest can serve nodes of multiple architectures. Add a
@@ -164,6 +169,9 @@ starts fetching within two minutes, without a restart.
 For a rollout:
 
 1. Set `prefetch` to the new version's store paths and upgrade the chart.
+   With [manifests.nix](manifests.nix), pass its `prefetch` output to
+   `helm upgrade` with `-f`. It replaces the lists for the systems its store
+   paths are built for.
 2. Wait until every node plugin holds the new list. The chart puts a
    `revision` of the list in its ConfigMap. With `metrics.enabled`, the
    chart's notes print it and a Prometheus query that returns nothing once

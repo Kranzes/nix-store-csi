@@ -22,3 +22,4 @@ podman run --rm -v "$store":/nix/store:ro ghcr.io/kranzes/nix-store-csi-runner:0
 - [Deploying on Kubernetes](deploy/README.md)
 - [Command line](docs/CLI.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Changelog](CHANGELOG.md)

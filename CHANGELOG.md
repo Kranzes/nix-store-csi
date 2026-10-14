@@ -1,0 +1,47 @@
+# Changelog
+
+## Unreleased
+
+### Added
+
+- The `nix_store_csi_prefetched{revision}` metric, a `revision` key in the
+  chart's prefetch ConfigMap, and the Prefetch rollout and Prefetch list
+  dashboard panels, so a rollout can wait until every node holds the new
+  prefetch list.
+- `deploy/manifests.nix` writes the chart's `prefetch` value to its `prefetch`
+  output.
+
+### Changed
+
+- Prefetched closures don't count towards `--max-closure-size`, and prefetch
+  itself has no limit.
+
+## 0.1.2 - 2026-10-12
+
+### Added
+
+- `--prefetch-dir` and the chart's `prefetch` value keep closures fetched on
+  every node.
+- `--max-closure-size` and the chart's `maxClosureSize` refuse volumes whose
+  closures are bigger.
+- The plugin answers `NodeGetVolumeStats`, so kubelet reports each volume's
+  size.
+- `admissionPolicy.allowedNamespaces` limits the namespaces whose pods may use
+  the volumes.
+- `updateStrategy.rollingUpdate.maxUnavailable` sets how many node plugins the
+  chart updates at a time.
+
+### Changed
+
+- The chart refuses to install without trusted public keys.
+
+## 0.1.1 - 2026-10-09
+
+### Added
+
+- `storePaths.<system>` volume attributes and `/nix/store/.roots/<name>` links,
+  so one manifest serves several systems.
+
+## 0.1.0 - 2026-10-08
+
+First release.

@@ -4,6 +4,7 @@
 # See "Injecting store paths into manifests" in README.md.
 {
   lib,
+  stdenv,
   runCommand,
   gettext,
   hello,
@@ -15,11 +16,13 @@ let
   };
   storePath = path: builtins.unsafeDiscardStringContext "${path}";
   # A set that mixes systems, as in "Multiple architectures" in README.md, gets
-  # a list for each.
+  # a list for each. Store paths that aren't packages, like those from
+  # builtins.fetchClosure, count as the system of the calling pkgs.
+  systemOf = path: path.stdenv.hostPlatform.system or stdenv.hostPlatform.system;
   prefetch = lib.mapAttrs' (
     system: paths:
     lib.nameValuePair "storePaths.${system}" (lib.concatMapStringsSep " " storePath paths)
-  ) (lib.groupBy (path: path.stdenv.hostPlatform.system) (lib.attrValues storePaths));
+  ) (lib.groupBy systemOf (lib.attrValues storePaths));
 in
 runCommand "manifests"
   {

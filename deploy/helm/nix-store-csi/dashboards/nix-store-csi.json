@@ -50,7 +50,8 @@
           ]
         },
         "refresh": 2,
-        "sort": 1
+        "sort": 1,
+        "allValue": ".+"
       }
     ]
   },
@@ -1381,7 +1382,9 @@
             }
           ],
           "fieldConfig": {
-            "defaults": {},
+            "defaults": {
+              "unit": "none"
+            },
             "overrides": []
           },
           "options": {
@@ -1408,7 +1411,8 @@
                 }
               }
             }
-          ]
+          ],
+          "description": "The version that each node plugin runs."
         }
       ],
       "id": 22

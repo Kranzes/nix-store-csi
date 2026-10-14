@@ -1087,7 +1087,7 @@
     {
       "type": "timeseries",
       "title": "Prefetch rollout",
-      "description": "Node plugins that fetched the closures of each revision of the prefetch list. A rollout is done once the new revision reaches the dashed line, the node plugins that Prometheus scrapes.",
+      "description": "Node plugins that fetched the closures of each revision of the prefetch list. A rollout is done once the new revision reaches the dashed line, the node plugins that Prometheus scrapes. With node pools, each pool's revision reaches only the node plugins in that pool.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

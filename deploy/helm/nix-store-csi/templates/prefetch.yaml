@@ -1,11 +1,18 @@
-{{- with .Values.prefetch }}
+{{- $lists := dict "" .Values.prefetch }}
+{{- range $pool, $values := .Values.nodePools }}
+{{- $_ := set $lists $pool ($values.prefetch | default dict) }}
+{{- end }}
+{{- range $pool, $prefetch := $lists }}
+{{- if $prefetch }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $.Release.Name }}-prefetch
+  name: {{ $.Release.Name }}-prefetch{{ with $pool }}-{{ . }}{{ end }}
   labels:
     {{- include "nix-store-csi.labels" $ | nindent 4 }}
 data:
-  revision: {{ include "nix-store-csi.prefetchRevision" $ | quote }}
-  {{- toYaml . | nindent 2 }}
+  revision: {{ include "nix-store-csi.prefetchRevision" $prefetch | quote }}
+  {{- toYaml $prefetch | nindent 2 }}
+{{- end }}
 {{- end }}

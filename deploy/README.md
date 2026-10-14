@@ -195,6 +195,52 @@ a store path is missing from the caches or has no trusted signature, the
 prefetch fails while the old pods still run, and no new pods wait in
 `ContainerCreating`. Also, no step of the rolling update waits for a fetch.
 
+## Node pools
+
+Every node of a system gets the same `prefetch` list. In a cluster whose nodes
+run different workloads, like a pool of GPU nodes for training and a pool for
+web services, every node would hold every pool's closures. `nodePools` gives
+each pool its own list:
+
+```yaml
+# values.yaml
+prefetch:
+  storePaths.x86_64-linux: /nix/store/<hash>-api
+nodePools:
+  gpu:
+    nodeSelector:
+      karpenter.sh/nodepool: gpu
+    prefetch:
+      storePaths.x86_64-linux: /nix/store/<hash>-trainer
+```
+
+- Each pool gets a DaemonSet, `<release>-node-<pool>`, on the nodes that match
+  both its `nodeSelector` and the top-level one, and a ConfigMap,
+  `<release>-prefetch-<pool>`.
+- A pool's list replaces `prefetch`. Its nodes don't fetch the top-level list,
+  and a pool without `prefetch` prefetches nothing. `prefetch` is the list for
+  the nodes outside every pool.
+- A closure that every node needs, like a log shipper, goes in `prefetch` and
+  in each pool's list. The chart doesn't merge the lists. A node reads
+  `storePaths` only if its list has no key for its system, so a pool's
+  `storePaths.x86_64-linux` would hide a top-level `storePaths` from the
+  pool's x86 nodes.
+- A node that matches more than one pool goes to the first pool by name.
+- If a node's labels move it to another pool, Kubernetes replaces its plugin
+  with the other pool's. The node store stays, and mounted volumes keep
+  working.
+
+Each list has its own revision. The chart's PodMonitor puts the pool's name in
+a `pool` label, which is empty outside the pools. The chart's notes print a
+query for each list:
+
+```promql
+nix_store_csi_build_info{pool="gpu"} unless on (instance) nix_store_csi_prefetched{revision="<revision>"} == 1
+```
+
+Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
+pods into the metrics in your own scrape config.
+
 ## Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an

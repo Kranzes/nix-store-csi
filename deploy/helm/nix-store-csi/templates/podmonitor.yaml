@@ -19,4 +19,7 @@ spec:
       relabelings:
         - sourceLabels: [__meta_kubernetes_pod_node_name]
           targetLabel: instance
+        # Empty outside the node pools.
+        - sourceLabels: [__meta_kubernetes_pod_label_nix_store_csi_pool]
+          targetLabel: pool
 {{- end }}

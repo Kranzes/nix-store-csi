@@ -138,15 +138,34 @@ rec {
     # helm lint renders the templates with the default values, and then with
     # each optional part set.
     chart =
-      pkgs.runCommand "${package.name}-chart-lint" { nativeBuildInputs = [ pkgs.kubernetes-helm ]; }
+      pkgs.runCommand "${package.name}-chart-lint"
+        {
+          nativeBuildInputs = [
+            pkgs.kubernetes-helm
+            pkgs.prometheus.cli
+            pkgs.yq-go
+          ];
+        }
         ''
           export HOME=$TMPDIR
           helm lint --strict ${chartSrc}
           helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc
-          helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true
+          helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true,metrics.prometheusRule.enabled=true
+          # The alerts' rules, with each kind of alert.
+          rendered() {
+            helm template nix-store-csi ${chartSrc} --namespace default \
+              --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.prometheusRule.enabled=true \
+              --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello' \
+              --show-only "templates/$1.yaml"
+          }
+          rendered prometheusrule | yq .spec > rules.yaml
+          promtool check rules rules.yaml
+          revision=$(rendered prefetch | yq .data.revision)
+          sed "s/@revision@/$revision/g" ${./alerts-test.yaml} > alerts-test.yaml
+          promtool test rules alerts-test.yaml
           helm lint --strict ${chartSrc} --set 'admissionPolicy.allowedNamespaces={default,ci}'
           helm lint --strict ${chartSrc} --set 'prefetch.storePaths\.x86_64-linux=/nix/store/00000000000000000000000000000000-hello'
-          helm lint --strict ${chartSrc} --set metrics.enabled=true --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu","accel":"nvidia"},"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"}},"web":{"nodeSelector":{"pool":"web"}}}'
+          helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.prometheusRule.enabled=true --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu","accel":"nvidia"},"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"}},"web":{"nodeSelector":{"pool":"web"}}}'
           # helm lint ignores fail, so these use helm template.
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null

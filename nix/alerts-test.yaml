@@ -1,0 +1,239 @@
+# promtool unit tests for the chart's PrometheusRule. The chart check renders
+# the rules for release nix-store-csi in namespace default with the PodMonitor
+# and a prefetch list, and replaces @revision@ with the list's revision.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: up{job="default/nix-store-csi", instance="node-a"}
+        values: 0x20
+      - series: up{job="default/nix-store-csi", instance="node-b"}
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NixStoreCsiDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: default/nix-store-csi
+              instance: node-a
+            exp_annotations:
+              summary: Prometheus can't scrape the nix-store-csi plugin on node-a.
+              description: The plugin may have crashed, or its pod may not be ready. Pods on the node can't mount new volumes without it.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-a", grpc_code="Internal"}
+        values: 0+1x40
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-b", grpc_code="Internal"}
+        values: 0x40
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-b", grpc_code="Unavailable"}
+        values: 0+1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NixStoreCsiPublishErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: node-a
+            exp_annotations:
+              summary: Volumes fail to mount on node-a.
+              description: NodePublishVolume calls fail with Internal, so pods stay in ContainerCreating. The pods' events and the plugin's log say why, such as a store path that no cache has or a narinfo without a trusted signature.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_cache_paused{instance="node-a", cache="https://down.example/"}
+        values: 1x40
+      # Paused after one failed request a minute in five.
+      - series: nix_store_csi_cache_paused{instance="node-a", cache="https://flaky.example/"}
+        values: 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NixStoreCsiCacheUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: node-a
+              cache: https://down.example/
+            exp_annotations:
+              summary: node-a skips the cache https://down.example/ after failed requests.
+              description: Requests to the cache failed for most of the last 15 minutes, so the plugin fetches from the other caches or fails publishes. The plugin's log has the errors.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_nar_fetch_duration_seconds_count{instance="node-a", cache="https://bad.example/", result="ok"}
+        values: 0+1x40
+      - series: nix_store_csi_nar_fetch_duration_seconds_count{instance="node-a", cache="https://bad.example/", result="error"}
+        values: 0+1x40
+      - series: nix_store_csi_nar_fetch_duration_seconds_count{instance="node-a", cache="https://good.example/", result="ok"}
+        values: 0+10x40
+      - series: nix_store_csi_nar_fetch_duration_seconds_count{instance="node-a", cache="https://good.example/", result="error"}
+        values: 0x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NixStoreCsiNarFetchErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cache: https://bad.example/
+            exp_annotations:
+              summary: 50% of the NAR fetches from https://bad.example/ fail.
+              description: A failed fetch is one that failed after a minute of retries, or whose NAR didn't match its NarHash. The plugin then tries the next cache.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_unsynced_paths{instance="node-a"}
+        values: 3x30
+      - series: nix_store_csi_nar_fetches_in_flight{instance="node-a"}
+        values: 0x30
+      # Fetching all along, so syncs keep finding new paths.
+      - series: nix_store_csi_unsynced_paths{instance="node-b"}
+        values: 3x30
+      - series: nix_store_csi_nar_fetches_in_flight{instance="node-b"}
+        values: 4x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NixStoreCsiSyncStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: node-a
+            exp_annotations:
+              summary: Fetched store objects on node-a aren't synced to disk.
+              description: No fetch runs, yet 3 store paths wait for a sync, so a syncfs of the state dir's filesystem may hang. Their narinfos stay unsynced, and a reboot deletes them.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_gc_duration_seconds_count{instance="node-a", result="error"}
+        values: 0x9 1x10 2x10 3x10 4x10 5x10 6x10
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: NixStoreCsiGcErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: node-a
+              result: error
+            exp_annotations:
+              summary: Collections of the node store fail on node-a.
+              description: Unused store paths stay, and --ensure-free can't keep space free. The plugin's log has the errors.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_failed_syncs_total{instance="node-a"}
+        values: 0x9 1x30
+      - series: nix_store_csi_failed_syncs_total{instance="node-b"}
+        values: 0x40
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NixStoreCsiSyncErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: node-a
+            exp_annotations:
+              summary: Syncs of the node store fail on node-a.
+              description: A syncfs of the state dir's filesystem failed, so the plugin deleted the store paths that the sync covered. The disk may be failing, and the kernel log may say why.
+
+  - interval: 1m
+    input_series:
+      # Short of space.
+      - series: nix_store_csi_free_bytes{instance="node-a"}
+        values: 10x30
+      - series: nix_store_csi_ensure_free_bytes{instance="node-a"}
+        values: 20x30
+      - series: nix_store_csi_free_inodes{instance="node-a"}
+        values: 50x30
+      - series: nix_store_csi_ensure_free_inodes{instance="node-a"}
+        values: 20x30
+      # Short of inodes.
+      - series: nix_store_csi_free_bytes{instance="node-b"}
+        values: 50x30
+      - series: nix_store_csi_ensure_free_bytes{instance="node-b"}
+        values: 20x30
+      - series: nix_store_csi_free_inodes{instance="node-b"}
+        values: 10x30
+      - series: nix_store_csi_ensure_free_inodes{instance="node-b"}
+        values: 20x30
+      # Short of both, which makes one alert.
+      - series: nix_store_csi_free_bytes{instance="node-e"}
+        values: 10x30
+      - series: nix_store_csi_ensure_free_bytes{instance="node-e"}
+        values: 20x30
+      - series: nix_store_csi_free_inodes{instance="node-e"}
+        values: 10x30
+      - series: nix_store_csi_ensure_free_inodes{instance="node-e"}
+        values: 20x30
+      # No limit on inodes, like btrfs, and space to spare.
+      - series: nix_store_csi_free_bytes{instance="node-c"}
+        values: 50x30
+      - series: nix_store_csi_ensure_free_bytes{instance="node-c"}
+        values: 20x30
+      # Collection catches up within a minute.
+      - series: nix_store_csi_free_bytes{instance="node-d"}
+        values: 10 50x30
+      - series: nix_store_csi_ensure_free_bytes{instance="node-d"}
+        values: 20x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NixStoreCsiLowSpace
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: node-a
+            exp_annotations:
+              summary: The node store's filesystem on node-a has less free space or inodes than --ensure-free keeps.
+              description: Collection has no unused store paths older than --keep-recent left to delete, so it deletes those that pods used recently, and they have to be fetched again. Give the state dir more space or lower --ensure-free.
+          - exp_labels:
+              severity: warning
+              instance: node-b
+            exp_annotations:
+              summary: The node store's filesystem on node-b has less free space or inodes than --ensure-free keeps.
+              description: Collection has no unused store paths older than --keep-recent left to delete, so it deletes those that pods used recently, and they have to be fetched again. Give the state dir more space or lower --ensure-free.
+          - exp_labels:
+              severity: warning
+              instance: node-e
+            exp_annotations:
+              summary: The node store's filesystem on node-e has less free space or inodes than --ensure-free keeps.
+              description: Collection has no unused store paths older than --keep-recent left to delete, so it deletes those that pods used recently, and they have to be fetched again. Give the state dir more space or lower --ensure-free.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_build_info{instance="node-a", version="0.1.3"}
+        values: 1x40
+      - series: nix_store_csi_build_info{instance="node-b", version="0.1.3"}
+        values: 1x40
+      - series: nix_store_csi_build_info{instance="node-c", version="0.1.3"}
+        values: 1x40
+      # Read the list but still fetches it.
+      - series: nix_store_csi_prefetched{instance="node-a", revision="@revision@"}
+        values: 0x40
+      - series: nix_store_csi_prefetched{instance="node-b", revision="@revision@"}
+        values: 1x40
+      # Hasn't read the list yet.
+      - series: nix_store_csi_prefetched{instance="node-c", revision="000000000000"}
+        values: 1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NixStoreCsiPrefetchBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              revision: "@revision@"
+              instance: node-a
+              version: 0.1.3
+            exp_annotations:
+              summary: node-a doesn't hold revision @revision@ of its prefetch list.
+              description: The node may not have read the new list yet, or its fetch may fail. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows each node's revision.
+          - exp_labels:
+              severity: warning
+              revision: "@revision@"
+              instance: node-c
+              version: 0.1.3
+            exp_annotations:
+              summary: node-c doesn't hold revision @revision@ of its prefetch list.
+              description: The node may not have read the new list yet, or its fetch may fail. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows each node's revision.

@@ -293,6 +293,9 @@ With `metrics.enabled=true`, the node plugin serves Prometheus metrics at
 - `metrics.grafanaDashboard.enabled=true` adds a ConfigMap with a
   [Grafana dashboard](helm/nix-store-csi/dashboards/nix-store-csi.json) for
   Grafana's dashboard sidecar.
+- `metrics.prometheusRule.enabled=true` adds a PrometheusRule with the alerts
+  below. `metrics.prometheusRule.labels` adds labels to it, and
+  `metrics.prometheusRule.alertLabels` to each alert.
 
 Every metric starts with `nix_store_csi_`:
 
@@ -332,6 +335,21 @@ failed sync deletes the store paths it covered and counts in
 `failed_syncs_total`.
 `prefetched` is 1 once the node store holds the closures of that revision of
 the `prefetch` list for the node's system.
+
+Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
+`severity`:
+
+| Alert | Fires when |
+|---|---|
+| `NixStoreCsiDown` | Prometheus can't scrape a plugin. It needs the PodMonitor. |
+| `NixStoreCsiPublishErrors` | Publishes on a node fail with `Internal`, like for a store path that no cache has. |
+| `NixStoreCsiCacheUnreachable` | A node skips a cache for most of 15 minutes after failed requests. |
+| `NixStoreCsiNarFetchErrors` | More than `ratio`, 10% by default, of the NAR fetches from a cache fail. |
+| `NixStoreCsiSyncStuck` | Fetched store objects wait for a sync while no fetch runs. |
+| `NixStoreCsiSyncErrors` | A sync failed in the last hour. |
+| `NixStoreCsiGcErrors` | Collections fail. |
+| `NixStoreCsiLowSpace` | The filesystem has less free space or inodes than `--ensure-free` keeps, so collection deletes store paths used within `--keep-recent`. |
+| `NixStoreCsiPrefetchBehind` | A node doesn't hold the current revision of its prefetch list. Set `for` above the time a node takes to fetch the list. With `nodePools` it needs the `pool` label. |
 
 ### Security
 

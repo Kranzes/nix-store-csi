@@ -2,6 +2,18 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
+  "definitions": {
+    "duration": { "type": "string", "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$" },
+    "alert": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "for": { "$ref": "#/definitions/duration" },
+        "severity": { "type": "string" }
+      }
+    }
+  },
   "properties": {
     "global": { "type": "object" },
     "image": {
@@ -107,6 +119,39 @@
           "properties": {
             "enabled": { "type": "boolean" },
             "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+            "alertLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+            "alerts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "NixStoreCsiDown": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiPublishErrors": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiCacheUnreachable": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiNarFetchErrors": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "for": { "$ref": "#/definitions/duration" },
+                    "severity": { "type": "string" },
+                    "ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+                  }
+                },
+                "NixStoreCsiSyncStuck": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiSyncErrors": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiGcErrors": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiLowSpace": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiPrefetchBehind": { "$ref": "#/definitions/alert" }
+              }
+            }
           }
         },
         "grafanaDashboard": {

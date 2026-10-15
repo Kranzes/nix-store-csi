@@ -1,0 +1,92 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+{{- $alerts := .Values.metrics.prometheusRule.alerts }}
+{{- $rules := list }}
+{{- if .Values.metrics.podMonitor.enabled }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiDown"
+  "expr" (printf "up{job=\"%s/%s\"} == 0" .Release.Namespace .Release.Name)
+  "summary" "Prometheus can't scrape the nix-store-csi plugin on {{ $labels.instance }}."
+  "description" "The plugin may have crashed, or its pod may not be ready. Pods on the node can't mount new volumes without it.") }}
+{{- end }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiPublishErrors"
+  "expr" "sum by (instance) (rate(nix_store_csi_publish_duration_seconds_count{grpc_code=\"Internal\"}[15m])) > 0"
+  "summary" "Volumes fail to mount on {{ $labels.instance }}."
+  "description" "NodePublishVolume calls fail with Internal, so pods stay in ContainerCreating. The pods' events and the plugin's log say why, such as a store path that no cache has or a narinfo without a trusted signature.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiCacheUnreachable"
+  "expr" "avg_over_time(nix_store_csi_cache_paused[15m]) > 0.5"
+  "summary" "{{ $labels.instance }} skips the cache {{ $labels.cache }} after failed requests."
+  "description" "Requests to the cache failed for most of the last 15 minutes, so the plugin fetches from the other caches or fails publishes. The plugin's log has the errors.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiNarFetchErrors"
+  "expr" (printf "sum by (cache) (rate(nix_store_csi_nar_fetch_duration_seconds_count{result=\"error\"}[15m])) / sum by (cache) (rate(nix_store_csi_nar_fetch_duration_seconds_count[15m])) > %v" $alerts.NixStoreCsiNarFetchErrors.ratio)
+  "summary" "{{ $value | humanizePercentage }} of the NAR fetches from {{ $labels.cache }} fail."
+  "description" "A failed fetch is one that failed after a minute of retries, or whose NAR didn't match its NarHash. The plugin then tries the next cache.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiSyncStuck"
+  "expr" "nix_store_csi_unsynced_paths > 0 and nix_store_csi_nar_fetches_in_flight == 0"
+  "summary" "Fetched store objects on {{ $labels.instance }} aren't synced to disk."
+  "description" "No fetch runs, yet {{ $value }} store paths wait for a sync, so a syncfs of the state dir's filesystem may hang. Their narinfos stay unsynced, and a reboot deletes them.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiSyncErrors"
+  "expr" "increase(nix_store_csi_failed_syncs_total[1h]) > 0"
+  "summary" "Syncs of the node store fail on {{ $labels.instance }}."
+  "description" "A syncfs of the state dir's filesystem failed, so the plugin deleted the store paths that the sync covered. The disk may be failing, and the kernel log may say why.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiGcErrors"
+  "expr" "increase(nix_store_csi_gc_duration_seconds_count{result=\"error\"}[30m]) > 0"
+  "summary" "Collections of the node store fail on {{ $labels.instance }}."
+  "description" "Unused store paths stay, and --ensure-free can't keep space free. The plugin's log has the errors.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiLowSpace"
+  "expr" "nix_store_csi_free_bytes < nix_store_csi_ensure_free_bytes or nix_store_csi_free_inodes < nix_store_csi_ensure_free_inodes"
+  "summary" "The node store's filesystem on {{ $labels.instance }} has less free space or inodes than --ensure-free keeps."
+  "description" "Collection has no unused store paths older than --keep-recent left to delete, so it deletes those that pods used recently, and they have to be fetched again. Give the state dir more space or lower --ensure-free.") }}
+{{- $lists := dict "" .Values.prefetch }}
+{{- range $pool, $values := .Values.nodePools }}
+{{- $_ := set $lists $pool ($values.prefetch | default dict) }}
+{{- end }}
+{{- range $pool, $prefetch := $lists }}
+{{- if $prefetch }}
+{{- $revision := include "nix-store-csi.prefetchRevision" $prefetch }}
+{{- $selector := "" }}
+{{- if $.Values.nodePools }}
+{{- $selector = printf "{pool=%q}" $pool }}
+{{- end }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiPrefetchBehind"
+  "expr" (printf "nix_store_csi_build_info%s unless on (instance) nix_store_csi_prefetched{revision=%q} == 1" $selector $revision)
+  "labels" (dict "revision" $revision)
+  "summary" (printf "{{ $labels.instance }} doesn't hold revision %s of its prefetch list." $revision)
+  "description" "The node may not have read the new list yet, or its fetch may fail. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows each node's revision.") }}
+{{- end }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: nix-store-csi
+      rules:
+        {{- range $rules }}
+        {{- $alert := get $alerts .alert }}
+        {{- if $alert.enabled }}
+        - alert: {{ .alert }}
+          expr: {{ .expr | quote }}
+          for: {{ $alert.for }}
+          labels:
+            {{- $labels := merge (dict "severity" $alert.severity) (.labels | default dict) $.Values.metrics.prometheusRule.alertLabels }}
+            {{- toYaml $labels | nindent 12 }}
+          annotations:
+            summary: {{ .summary | quote }}
+            description: {{ .description | quote }}
+        {{- end }}
+        {{- end }}
+{{- end }}

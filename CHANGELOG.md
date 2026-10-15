@@ -17,6 +17,10 @@
   inodes on the node store's filesystem with `--ensure-free`, and the
   `nix_store_csi_failed_syncs_total` counter. The dashboard shows the free
   space over `--ensure-free` and the failed syncs.
+- The chart's `metrics.prometheusRule` value adds a PrometheusRule with
+  alerts for a plugin that Prometheus can't scrape, failing publishes, caches,
+  fetches and syncs, a stuck sync, failing collections, too little free space,
+  and nodes behind on their prefetch list.
 
 ## 0.1.3 - 2026-10-14
 

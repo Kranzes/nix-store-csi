@@ -1672,6 +1672,7 @@ dependencies = [
  "harmonia-utils-hash",
  "harmonia-utils-signature",
  "http-body-util",
+ "httpdate",
  "humantime",
  "hyper",
  "hyper-util",

@@ -1,6 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, bail, ensure};
 use backon::{ExponentialBuilder, Retryable};
@@ -10,7 +10,9 @@ use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::signer::{Method, Signer};
 use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE};
+use reqwest::header::{
+    CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE, RETRY_AFTER,
+};
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
@@ -156,6 +158,8 @@ const BACKOFF: ExponentialBuilder = ExponentialBuilder::new()
 struct Failure {
     error: anyhow::Error,
     transient: bool,
+    /// The response's `Retry-After`, the least time to wait before a retry.
+    retry_after: Option<Duration>,
 }
 
 impl From<reqwest::Error> for Failure {
@@ -170,6 +174,7 @@ impl From<reqwest::Error> for Failure {
                 && !failed_tls(&e),
             // retry() adds the URL.
             error: e.without_url().into(),
+            retry_after: None,
         }
     }
 }
@@ -179,6 +184,7 @@ impl From<anyhow::Error> for Failure {
         Self {
             error,
             transient: false,
+            retry_after: None,
         }
     }
 }
@@ -248,7 +254,18 @@ fn check_status(resp: &reqwest::Response) -> Result<(), Failure> {
         transient: status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT,
+        retry_after: resp.headers().get(RETRY_AFTER).and_then(retry_after),
     })
+}
+
+/// The wait that a `Retry-After` asks for, in seconds or until a date.
+fn retry_after(value: &HeaderValue) -> Option<Duration> {
+    let value = value.to_str().ok()?.trim();
+    if let Ok(secs) = value.parse() {
+        return Some(Duration::from_secs(secs));
+    }
+    let date = httpdate::parse_http_date(value).ok()?;
+    Some(date.duration_since(SystemTime::now()).unwrap_or_default())
 }
 
 /// An error that says the cache hasn't got a file.
@@ -278,7 +295,9 @@ fn is_missing(status: StatusCode) -> bool {
     )
 }
 
-/// Tries `attempt` once, or for [`RETRY_FOR`] while it fails transiently.
+/// Tries `attempt` once, or for [`RETRY_FOR`] while it fails transiently. A
+/// `Retry-After` adds to the backoff, and one that ends past [`RETRY_FOR`]
+/// ends the retries.
 async fn retry<T, F, Fut>(url: &Url, retries: bool, attempt: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
@@ -287,7 +306,11 @@ where
     let start = Instant::now();
     attempt
         .retry(BACKOFF)
-        .when(|f| retries && f.transient && start.elapsed() < RETRY_FOR)
+        .when(|f| {
+            let wait = f.retry_after.unwrap_or_default();
+            retries && f.transient && start.elapsed().saturating_add(wait) < RETRY_FOR
+        })
+        .adjust(|f, delay| Some(delay?.saturating_add(f.retry_after.unwrap_or_default())))
         .notify(|f, delay| {
             tracing::warn!("fetching {url}: {:#}; retrying in {delay:?}", f.error);
         })
@@ -912,6 +935,7 @@ pub(crate) mod tests {
                 Err::<(), _>(Failure {
                     error: anyhow::anyhow!("timed out"),
                     transient: true,
+                    retry_after: None,
                 })
             })
             .await
@@ -924,6 +948,42 @@ pub(crate) mod tests {
                 "{attempt_takes:?}: {elapsed:?}"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waits_for_retry_after() {
+        let url = Url::parse("http://host/x").unwrap();
+        for (wait, attempts) in [(20, 2), (RETRY_FOR.as_secs(), 1)] {
+            let tries = AtomicUsize::new(0);
+            let start = Instant::now();
+            let _ = retry(&url, true, || async {
+                if tries.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Ok(());
+                }
+                Err(Failure {
+                    error: anyhow::anyhow!("got 429"),
+                    transient: true,
+                    retry_after: Some(Duration::from_secs(wait)),
+                })
+            })
+            .await;
+            assert_eq!(tries.into_inner(), attempts, "{wait}");
+            if attempts > 1 {
+                assert!(start.elapsed() >= Duration::from_secs(wait));
+            }
+        }
+    }
+
+    #[test]
+    fn parses_retry_after() {
+        let parse = |s: &str| retry_after(&HeaderValue::from_str(s).unwrap());
+        assert_eq!(parse("120"), Some(Duration::from_secs(120)));
+        assert_eq!(parse(" 5 "), Some(Duration::from_secs(5)));
+        assert_eq!(parse("Wed, 21 Oct 2015 07:28:00 GMT"), Some(Duration::ZERO));
+        let soon = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(100));
+        assert!(parse(&soon).unwrap() > Duration::from_secs(90));
+        assert_eq!(parse("soon"), None);
+        assert_eq!(parse("-1"), None);
     }
 
     #[tokio::test]

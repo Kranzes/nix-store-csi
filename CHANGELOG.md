@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- When a cache answers a request with `Retry-After`, the plugin waits at least
+  that long before it retries. If the wait would run past the minute that a
+  request retries for, the request fails at once.
+
 ### Added
 
 - `s3://` substituters, with the `region`, `endpoint` and `addressing-style`

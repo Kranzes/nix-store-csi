@@ -77,6 +77,65 @@ metrics:
     # Labels that the operator's Prometheus selects monitors by, like
     # kube-prometheus-stack's `release: <its release name>`.
     labels: {}
+  # A PrometheusRule with alerts for the Prometheus Operator, whose CRDs it
+  # needs. NixStoreCsiDown needs the PodMonitor, and with nodePools,
+  # NixStoreCsiPrefetchBehind needs its pool label.
+  prometheusRule:
+    enabled: false
+    # Labels that the operator's Prometheus selects rules by.
+    labels: {}
+    # Labels for every alert, like a team to route them by.
+    alertLabels: {}
+    alerts:
+      # Prometheus can't scrape a plugin.
+      NixStoreCsiDown:
+        enabled: true
+        for: 10m
+        severity: critical
+      # Publishes fail with Internal on a node.
+      NixStoreCsiPublishErrors:
+        enabled: true
+        for: 15m
+        severity: warning
+      # A node skips a cache for most of 15 minutes after failed requests.
+      NixStoreCsiCacheUnreachable:
+        enabled: true
+        for: 15m
+        severity: warning
+      # More than this share of the NAR fetches from a cache fail.
+      NixStoreCsiNarFetchErrors:
+        enabled: true
+        for: 15m
+        severity: warning
+        ratio: 0.1
+      # Fetched store objects wait for a sync while no fetch runs.
+      NixStoreCsiSyncStuck:
+        enabled: true
+        for: 15m
+        severity: warning
+      # A sync of the node store failed in the last hour.
+      NixStoreCsiSyncErrors:
+        enabled: true
+        for: 0m
+        severity: critical
+      # Collections of the node store fail.
+      NixStoreCsiGcErrors:
+        enabled: true
+        for: 30m
+        severity: warning
+      # The node store's filesystem has less free space or inodes than
+      # --ensure-free keeps, so collection deletes store paths that pods used
+      # within --keep-recent.
+      NixStoreCsiLowSpace:
+        enabled: true
+        for: 15m
+        severity: warning
+      # A node doesn't hold the closures of the current prefetch list. Make it
+      # longer than a node takes to fetch the list.
+      NixStoreCsiPrefetchBehind:
+        enabled: true
+        for: 30m
+        severity: warning
   # A ConfigMap with the Grafana dashboard, for Grafana's dashboard sidecar.
   grafanaDashboard:
     enabled: false

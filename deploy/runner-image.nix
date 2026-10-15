@@ -1,6 +1,6 @@
 # The runner image, for pods that run a program from the volume. Override
 # extraCertificates to add a CA, like a company's. See "Your own image" in
-# README.md.
+# docs/PODS.md.
 {
   lib,
   dockerTools,

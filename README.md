@@ -34,7 +34,7 @@ image layers. nix-store-csi mounts them as a volume instead:
 - **Nothing to install on nodes.** The plugin is a DaemonSet that fetches NARs
   itself, so nodes need no containerd plugin and no Nix. That suits managed
   node pools, as long as their kernel meets the
-  [requirements](deploy/README.md#install). nix-snapshotter runs on the host
+  [requirements](docs/DEPLOY.md#install). nix-snapshotter runs on the host
   next to containerd and uses the host's Nix store.
 - **Any CRI runtime.** Kubelet mounts the volume, so the plugin doesn't depend
   on the runtime. nix-snapshotter needs containerd.
@@ -47,11 +47,12 @@ image layers. nix-store-csi mounts them as a volume instead:
   `substituters` and checks narinfo signatures against `trustedPublicKeys`.
 - Any pod that may use the volumes can make a node fetch whatever the trusted
   caches serve. `maxClosureSize` and `admissionPolicy.allowedNamespaces` can
-  limit that, see [Security](deploy/README.md#security).
+  limit that, see [Security](docs/DEPLOY.md#security).
 
 ## Documentation
 
-- [Deploying on Kubernetes](deploy/README.md)
+- [Deploying on Kubernetes](docs/DEPLOY.md)
+- [Using the driver in pods](docs/PODS.md)
 - [Command line](docs/CLI.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)

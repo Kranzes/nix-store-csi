@@ -207,7 +207,7 @@ testers.runNixOSTest {
         };
         stringData.netrc = "machine 127.0.0.1 login nix password secret";
       };
-      # deploy/README.md says the volumes pass the restricted Pod Security
+      # docs/DEPLOY.md says the volumes pass the restricted Pod Security
       # level. Enforcing it on default checks that.
       manifests.pod-security.content = {
         apiVersion = "v1";

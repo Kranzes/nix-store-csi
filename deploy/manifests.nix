@@ -1,7 +1,7 @@
 # Fills in the NIX_STORE_PATH_ variables in the manifests in ./manifests, and
 # writes the chart's prefetch value for the same store paths to its prefetch
 # output.
-# See "Injecting store paths into manifests" in README.md.
+# See "Injecting store paths into manifests" in docs/PODS.md.
 {
   lib,
   stdenv,
@@ -15,8 +15,8 @@ let
     HELLO = hello;
   };
   storePath = path: builtins.unsafeDiscardStringContext "${path}";
-  # A set that mixes systems, as in "Multiple architectures" in README.md, gets
-  # a list for each. Store paths that aren't packages, like those from
+  # A set that mixes systems, as in "Multiple architectures" in docs/PODS.md,
+  # gets a list for each. Store paths that aren't packages, like those from
   # builtins.fetchClosure, count as the system of the calling pkgs.
   systemOf = path: path.stdenv.hostPlatform.system or stdenv.hostPlatform.system;
   prefetch = lib.mapAttrs' (

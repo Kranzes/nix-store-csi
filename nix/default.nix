@@ -31,7 +31,7 @@ let
     };
 
     # Pods run this image with the volume mounted over its empty /nix/store.
-    runner-image = pkgs.callPackage ../deploy/base-image.nix {
+    runner-image = pkgs.callPackage ../deploy/runner-image.nix {
       name = "${package.name}-runner";
       tag = package.version;
     };

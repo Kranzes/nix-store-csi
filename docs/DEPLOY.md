@@ -214,6 +214,45 @@ nix_store_csi_build_info{pool="gpu"} unless on (instance) nix_store_csi_prefetch
 Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
 pods into the metrics in your own scrape config.
 
+### Security
+
+The CSIDriver is cluster-scoped, and every Pod Security level allows its
+volumes. So anyone who can create a pod in any namespace can mount the closure
+of any store path that the configured caches serve. That includes private
+caches that the plugin reaches with the netrc Secret or a service account
+token.
+
+Pods can ask for store paths whose closures are any size. A node fetches the
+closure of every pod it runs, and the fetch goes on after the pod is gone.
+Collection can't delete store paths that a fetch or a mounted view holds, so
+pods with big closures can fill the state dir's disk.
+
+`maxClosureSize`, like `20G`, limits the NAR size of each volume's closure.
+The plugin refuses a bigger closure before it fetches any of it. The pod stays
+in `ContainerCreating`, and its events show the limit and the closure's size,
+which `nix path-info -S` also prints. Prefetched closures don't count towards
+it, so prefetching a big closure lets pods use it. Once its store paths leave
+`prefetch`, a closure counts again. During a rollout, keep the old version's
+store paths in `prefetch` for as long as you may roll back. Many pods with
+different closures can still fill the disk.
+
+A pod gets only its own closure, on a read-only mount.
+
+To allow the driver's volumes only in some namespaces, list them in
+`admissionPolicy.allowedNamespaces`:
+
+```yaml
+# values.yaml
+admissionPolicy:
+  allowedNamespaces:
+    - ci
+    - web
+```
+
+The chart then adds a ValidatingAdmissionPolicy. It checks pods, so the API
+server still accepts a Deployment in another namespace, and its ReplicaSet's
+events show why it has no pods.
+
 ### Metrics
 
 With `metrics.enabled=true`, the node plugin serves Prometheus metrics at
@@ -281,42 +320,3 @@ Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 | `NixStoreCsiGcErrors` | Collections fail. |
 | `NixStoreCsiLowSpace` | The filesystem has less free space or inodes than `--ensure-free` keeps, so collection deletes store paths used within `--keep-recent`. |
 | `NixStoreCsiPrefetchBehind` | A node doesn't hold the current revision of its prefetch list. Set `for` above the time a node takes to fetch the list. With `nodePools` it needs the `pool` label. |
-
-### Security
-
-The CSIDriver is cluster-scoped, and every Pod Security level allows its
-volumes. So anyone who can create a pod in any namespace can mount the closure
-of any store path that the configured caches serve. That includes private
-caches that the plugin reaches with the netrc Secret or a service account
-token.
-
-Pods can ask for store paths whose closures are any size. A node fetches the
-closure of every pod it runs, and the fetch goes on after the pod is gone.
-Collection can't delete store paths that a fetch or a mounted view holds, so
-pods with big closures can fill the state dir's disk.
-
-`maxClosureSize`, like `20G`, limits the NAR size of each volume's closure.
-The plugin refuses a bigger closure before it fetches any of it. The pod stays
-in `ContainerCreating`, and its events show the limit and the closure's size,
-which `nix path-info -S` also prints. Prefetched closures don't count towards
-it, so prefetching a big closure lets pods use it. Once its store paths leave
-`prefetch`, a closure counts again. During a rollout, keep the old version's
-store paths in `prefetch` for as long as you may roll back. Many pods with
-different closures can still fill the disk.
-
-A pod gets only its own closure, on a read-only mount.
-
-To allow the driver's volumes only in some namespaces, list them in
-`admissionPolicy.allowedNamespaces`:
-
-```yaml
-# values.yaml
-admissionPolicy:
-  allowedNamespaces:
-    - ci
-    - web
-```
-
-The chart then adds a ValidatingAdmissionPolicy. It checks pods, so the API
-server still accepts a Deployment in another namespace, and its ReplicaSet's
-events show why it has no pods.

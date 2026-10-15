@@ -23,7 +23,7 @@ use prometheus_client::registry::{Registry, Unit};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
-use crate::store::Store;
+use crate::store::{EnsureFree, Store};
 
 const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
 
@@ -70,6 +70,7 @@ pub struct Metrics {
     collections: Histograms<ResultLabels>,
     deleted_paths: Counter,
     freed_bytes: Counter,
+    failed_syncs: Counter,
     prefetched: Family<RevisionLabels, Gauge>,
 }
 
@@ -91,6 +92,7 @@ impl Default for Metrics {
             collections: Family::new_with_constructor(collections),
             deleted_paths: Counter::default(),
             freed_bytes: Counter::default(),
+            failed_syncs: Counter::default(),
             prefetched: Family::default(),
         }
     }
@@ -156,6 +158,11 @@ impl Metrics {
         self.freed_bytes.inc_by(size);
     }
 
+    /// Counts a sync of the node store that failed.
+    pub fn failed_sync(&self) {
+        self.failed_syncs.inc();
+    }
+
     /// Reports whether the node store holds the closures of revision
     /// `revision` of the prefetch list.
     pub fn prefetched(&self, revision: &str, held: bool) {
@@ -207,6 +214,11 @@ impl Metrics {
             "NAR size of the store objects that collection deleted",
             Unit::Bytes,
             self.freed_bytes.clone(),
+        );
+        registry.register(
+            "failed_syncs",
+            "Syncs of the node store that failed, so the store paths they covered were deleted",
+            self.failed_syncs.clone(),
         );
         registry.register(
             "prefetched",
@@ -275,7 +287,10 @@ fn grpc_code_name(code: tonic::Code) -> &'static str {
 }
 
 /// Reads gauges from the store at each scrape.
-struct StoreGauges(Arc<Store>);
+struct StoreGauges {
+    store: Arc<Store>,
+    ensure_free: EnsureFree,
+}
 
 impl fmt::Debug for StoreGauges {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -285,7 +300,7 @@ impl fmt::Debug for StoreGauges {
 
 impl Collector for StoreGauges {
     fn encode(&self, mut encoder: DescriptorEncoder) -> fmt::Result {
-        let gauges = self.0.gauges();
+        let gauges = self.store.gauges(self.ensure_free);
         let mut gauge = |name, help, unit, value: Option<u64>| {
             let Some(value) = value else { return Ok(()) };
             let value = i64::try_from(value).unwrap_or(i64::MAX);
@@ -322,10 +337,28 @@ impl Collector for StoreGauges {
             gauges.views.and_then(count),
         )?;
         gauge(
+            "free",
+            "Free space on the node store's filesystem",
+            Some(&Unit::Bytes),
+            gauges.free_bytes,
+        )?;
+        gauge(
             "free_inodes",
             "Free inodes on the node store's filesystem, if it limits them",
             None,
             gauges.free_inodes,
+        )?;
+        gauge(
+            "ensure_free",
+            "Free space that collection keeps on the node store's filesystem, from --ensure-free",
+            Some(&Unit::Bytes),
+            gauges.ensure_free_bytes,
+        )?;
+        gauge(
+            "ensure_free_inodes",
+            "Free inodes that collection keeps on the node store's filesystem, if it limits them",
+            None,
+            gauges.ensure_free_inodes,
         )?;
         gauge(
             "nar_fetches_in_flight",
@@ -354,8 +387,8 @@ impl Collector for StoreGauges {
 }
 
 /// The registry that `/metrics` encodes, with every metric under
-/// `nix_store_csi_`.
-pub fn registry(store: &Arc<Store>) -> Registry {
+/// `nix_store_csi_`. The gauges compare free space with `ensure_free`.
+pub fn registry(store: &Arc<Store>, ensure_free: EnsureFree) -> Registry {
     let mut registry = Registry::with_prefix("nix_store_csi");
     store.metrics().register(&mut registry);
     registry.register(
@@ -365,7 +398,10 @@ pub fn registry(store: &Arc<Store>) -> Registry {
             version: env!("CARGO_PKG_VERSION"),
         }),
     );
-    registry.register_collector(Box::new(StoreGauges(store.clone())));
+    registry.register_collector(Box::new(StoreGauges {
+        store: store.clone(),
+        ensure_free,
+    }));
     registry
 }
 

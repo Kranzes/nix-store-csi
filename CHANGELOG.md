@@ -12,6 +12,11 @@
 - The chart's `nodePools` value gives groups of nodes their own prefetch
   lists, each with its own DaemonSet and ConfigMap. A pool's list replaces
   `prefetch` on its nodes. The PodMonitor adds a `pool` label to the metrics.
+- The `nix_store_csi_free_bytes`, `nix_store_csi_ensure_free_bytes` and
+  `nix_store_csi_ensure_free_inodes` gauges, which compare the free space and
+  inodes on the node store's filesystem with `--ensure-free`, and the
+  `nix_store_csi_failed_syncs_total` counter. The dashboard shows the free
+  space over `--ensure-free` and the failed syncs.
 
 ## 0.1.3 - 2026-10-14
 

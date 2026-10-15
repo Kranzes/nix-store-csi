@@ -224,7 +224,7 @@ impl AddAssign for Excess {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Space {
     size: u64,
-    free: u64,
+    pub(super) free: u64,
     /// 0 on a filesystem with no limit on inodes, like btrfs.
     pub(super) inodes: u64,
     pub(super) free_inodes: u64,
@@ -242,25 +242,31 @@ impl Space {
     }
 }
 
-/// Returns how many bytes and inodes to free on a filesystem with `space` to
-/// meet `ensure_free`. The inode target is the same share of the
-/// filesystem's inodes as the byte target is of its size.
+/// Returns how many bytes and inodes `ensure_free` keeps free on a filesystem
+/// with `space`. The inode target is the same share of the filesystem's
+/// inodes as the byte target is of its size.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     reason = "a share of a total is within it"
 )]
-fn excess(space: Space, ensure_free: EnsureFree) -> Excess {
+pub(super) fn target(space: Space, ensure_free: EnsureFree) -> (u64, u64) {
     let percent = |total: u64, p: f64| (total as f64 * p / 100.0) as u64;
-    let (bytes, inodes) = match ensure_free {
+    match ensure_free {
         EnsureFree::Bytes(bytes) => {
             let share = u128::from(space.inodes) * u128::from(bytes.min(space.size))
                 / u128::from(space.size.max(1));
             (bytes, share as u64)
         }
         EnsureFree::Percent(p) => (percent(space.size, p), percent(space.inodes, p)),
-    };
+    }
+}
+
+/// Returns how many bytes and inodes to free on a filesystem with `space` to
+/// meet `ensure_free`.
+fn excess(space: Space, ensure_free: EnsureFree) -> Excess {
+    let (bytes, inodes) = target(space, ensure_free);
     Excess {
         bytes: bytes.saturating_sub(space.free),
         inodes: inodes.saturating_sub(space.free_inodes),
@@ -370,12 +376,12 @@ mod tests {
         age(&store, &paths, 2);
         assert_eq!(store.collect(bound, day, NONE).await.unwrap(), 4);
         let deleted = sample(
-            &crate::metrics::registry(&store),
+            &crate::metrics::registry(&store, EnsureFree::Bytes(0)),
             "nix_store_csi_gc_deleted_paths_total",
         );
         assert_eq!(deleted, Some(4.0));
         let size = sample(
-            &crate::metrics::registry(&store),
+            &crate::metrics::registry(&store, EnsureFree::Bytes(0)),
             "nix_store_csi_store_size_bytes",
         );
         #[allow(clippy::cast_precision_loss)]
@@ -653,6 +659,7 @@ mod tests {
         // 200 of 1000 bytes is 20%.
         assert_eq!(excess(ext4, Bytes(200)), (0, 15));
         assert_eq!(excess(ext4, Bytes(5000)), (4500, 95));
+        assert_eq!(target(ext4, Bytes(200)), (200, 20));
         // `0` turns it off, even with no bytes or inodes free.
         assert_eq!(excess(space(100, 0, 100, 0), Bytes(0)), (0, 0));
     }

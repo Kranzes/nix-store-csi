@@ -257,7 +257,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .with_context(|| format!("listening on {address} for metrics"))?;
                 let address = listener.local_addr()?;
                 info!("serving metrics on http://{address}/metrics");
-                tokio::spawn(metrics::serve(listener, metrics::registry(&store)));
+                tokio::spawn(metrics::serve(
+                    listener,
+                    metrics::registry(&store, ensure_free),
+                ));
             }
             tokio::spawn(collect_garbage(store.clone(), keep_recent, ensure_free));
             if let Some(dir) = prefetch_dir {

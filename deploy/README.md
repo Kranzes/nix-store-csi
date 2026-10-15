@@ -120,6 +120,30 @@ spec:
   `HELLO_AMD64 = nixpkgs.legacyPackages.x86_64-linux.hello`, and get the
   link's name from `hello.name`.
 
+### Multiple programs on `PATH`
+
+List one
+[`buildEnv`](https://nixos.org/manual/nixpkgs/unstable/#sec-buildEnv) of the
+packages, in [manifests.nix](manifests.nix):
+
+```nix
+TOOLS = buildEnv {
+  name = "tools";
+  paths = [ hello curl ];
+};
+```
+
+and put its `bin` on `PATH`:
+
+```yaml
+env:
+  - name: PATH
+    value: ${NIX_STORE_PATH_TOOLS}/bin
+# ...
+volumeAttributes:
+  storePaths: ${NIX_STORE_PATH_TOOLS}
+```
+
 ### Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an

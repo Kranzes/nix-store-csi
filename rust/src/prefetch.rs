@@ -296,7 +296,7 @@ mod tests {
         std::fs::write(dir.join("revision"), "r1").unwrap();
         let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
         let volume = || store.ensure(std::slice::from_ref(&hello));
-        let registry = crate::metrics::registry(&store);
+        let registry = crate::metrics::registry(&store, crate::store::EnsureFree::Bytes(0));
         let gauge = |revision: &str| {
             let name = format!("nix_store_csi_prefetched{{revision=\"{revision}\"}}");
             sample(&registry, &name)

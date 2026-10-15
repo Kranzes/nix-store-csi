@@ -889,7 +889,7 @@
       "gridPos": {
         "x": 0,
         "y": 32,
-        "w": 12,
+        "w": 8,
         "h": 8
       },
       "id": 18
@@ -944,9 +944,9 @@
         "textMode": "value"
       },
       "gridPos": {
-        "x": 12,
+        "x": 16,
         "y": 32,
-        "w": 6,
+        "w": 4,
         "h": 4
       },
       "id": 19
@@ -1002,9 +1002,9 @@
         "textMode": "value"
       },
       "gridPos": {
-        "x": 18,
+        "x": 20,
         "y": 32,
-        "w": 6,
+        "w": 4,
         "h": 4
       },
       "id": 20
@@ -1064,12 +1064,124 @@
         "textMode": "value"
       },
       "gridPos": {
-        "x": 12,
+        "x": 16,
         "y": 36,
-        "w": 12,
+        "w": 4,
         "h": 4
       },
       "id": 21
+    },
+    {
+      "type": "timeseries",
+      "title": "Free space over --ensure-free",
+      "description": "Free space on the node store's filesystem above what --ensure-free keeps, by node. It stays below 0 only once collection has deleted every unused store path older than --keep-recent, and then it deletes newer ones.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance) (nix_store_csi_free_bytes{instance=~\"$instance\"} - nix_store_csi_ensure_free_bytes{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "id": 29
+    },
+    {
+      "type": "stat",
+      "title": "Failed syncs",
+      "description": "Syncs in the time range that failed. Each one deletes the store paths it covered, and points to a failing disk.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum ((last_over_time(nix_store_csi_failed_syncs_total{instance=~\"$instance\"}[$__range]) - nix_store_csi_failed_syncs_total{instance=~\"$instance\"} offset $__range >= 0) or last_over_time(nix_store_csi_failed_syncs_total{instance=~\"$instance\"}[$__range])) or vector(0)",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 36,
+        "w": 4,
+        "h": 4
+      },
+      "id": 30
     },
     {
       "type": "row",

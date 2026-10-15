@@ -127,8 +127,13 @@ pub struct Gauges {
     pub store_size: u64,
     pub unsynced_paths: usize,
     pub views: Option<usize>,
-    /// Left out on a filesystem with no limit on inodes.
+    /// The free bytes and inodes on the node store's filesystem, and what
+    /// `--ensure-free` keeps free. The inodes are left out on a filesystem
+    /// with no limit on them.
+    pub free_bytes: Option<u64>,
     pub free_inodes: Option<u64>,
+    pub ensure_free_bytes: Option<u64>,
+    pub ensure_free_inodes: Option<u64>,
     pub fetches_in_flight: usize,
     pub closures_in_flight: usize,
     /// Each cache, and whether it is paused after a failed request.
@@ -207,7 +212,7 @@ impl Store {
         &self.metrics
     }
 
-    pub fn gauges(&self) -> Gauges {
+    pub fn gauges(&self, ensure_free: EnsureFree) -> Gauges {
         let entries = |dir: &Path| {
             (std::fs::read_dir(dir).map(Iterator::count))
                 .inspect_err(|e| warn!("reading {}: {e}", dir.display()))
@@ -216,16 +221,20 @@ impl Store {
         // Inside the struct literal, the guard would hold the lock while a
         // later field reads a directory.
         let unsynced_paths = self.unsynced.lock().unwrap().len();
+        let space = (Space::of(&self.dir))
+            .inspect_err(|e| warn!("measuring the node store's filesystem: {e}"))
+            .ok();
+        let target = space.map(|space| gc::target(space, ensure_free));
+        let limits_inodes = space.is_some_and(|space| space.inodes > 0);
         Gauges {
             store_paths: entries(&self.dir),
             store_size: self.size.load(Ordering::Relaxed),
             unsynced_paths,
             views: entries(&self.views),
-            free_inodes: (Space::of(&self.dir))
-                .inspect_err(|e| warn!("measuring the node store's filesystem: {e}"))
-                .ok()
-                .filter(|space| space.inodes > 0)
-                .map(|space| space.free_inodes),
+            free_bytes: space.map(|space| space.free),
+            free_inodes: (space.filter(|_| limits_inodes)).map(|space| space.free_inodes),
+            ensure_free_bytes: target.map(|(bytes, _)| bytes),
+            ensure_free_inodes: (target.filter(|_| limits_inodes)).map(|(_, inodes)| inodes),
             fetches_in_flight: self.max_jobs - self.jobs.available_permits(),
             closures_in_flight: self.ensures.load(Ordering::Relaxed),
             paused_caches: self.caches.paused(),
@@ -395,6 +404,7 @@ impl Store {
             let synced = rustix::fs::syncfs(&this.dir_fd);
             if synced.is_err() {
                 this.failed_syncs.fetch_add(1, Ordering::SeqCst);
+                this.metrics.failed_sync();
                 // Only a restart on the same boot reads the record, and it
                 // reads it from the page cache. On a failing disk an fsync
                 // would fail and leave no record.

@@ -757,7 +757,7 @@ mod tests {
         let Some((store, _, paths)) = hello_store(tmp.path()).await else {
             return;
         };
-        let registry = crate::metrics::registry(&store);
+        let registry = crate::metrics::registry(&store, crate::store::EnsureFree::Bytes(1 << 30));
         let cache = store.caches.name(0);
         let metric = |name: &str| sample(&registry, &format!("nix_store_csi_{name}"));
         let fetched = f64::from(u32::try_from(paths.len()).unwrap());
@@ -779,6 +779,14 @@ mod tests {
         assert_eq!(metric("closures_in_flight"), Some(0.0));
         assert_eq!(metric("unsynced_paths"), Some(0.0));
         assert_eq!(metric("nar_fetches_in_flight"), Some(0.0));
+        assert_eq!(metric("failed_syncs_total"), Some(0.0));
+        assert!(metric("free_bytes").unwrap() > 0.0);
+        assert_eq!(metric("ensure_free_bytes"), Some(f64::from(1u32 << 30)));
+        // Both inode gauges are there on a filesystem that limits inodes.
+        assert_eq!(
+            metric("free_inodes").is_some(),
+            metric("ensure_free_inodes").is_some()
+        );
         assert_eq!(
             metric(&format!("cache_paused{{cache=\"{cache}\"}}")),
             Some(0.0)

@@ -308,8 +308,12 @@ Every metric starts with `nix_store_csi_`:
 | `store_paths` | gauge | |
 | `store_size_bytes` | gauge | |
 | `unsynced_paths` | gauge | |
+| `failed_syncs_total` | counter | |
 | `views` | gauge | |
+| `free_bytes` | gauge | |
 | `free_inodes` | gauge | |
+| `ensure_free_bytes` | gauge | |
+| `ensure_free_inodes` | gauge | |
 | `gc_duration_seconds` | histogram | `result` |
 | `gc_deleted_paths_total` | counter | |
 | `gc_freed_bytes_total` | counter | |
@@ -320,8 +324,12 @@ A publish that is still fetching after 90 seconds counts as `Unavailable`, and
 kubelet's retry counts again. `nar_fetched_bytes_total`,
 `gc_freed_bytes_total` and `store_size_bytes` count uncompressed NAR sizes.
 `closures_in_flight` counts closures still being fetched, including those
-whose publish already returned `Unavailable`. `free_inodes` is missing on a
-filesystem with no limit on inodes, like btrfs.
+whose publish already returned `Unavailable`. `free_bytes` and `free_inodes`
+are free on the state dir's filesystem, and `ensure_free_bytes` and
+`ensure_free_inodes` are what `--ensure-free` keeps free there. The inode
+gauges are missing on a filesystem with no limit on inodes, like btrfs. A
+failed sync deletes the store paths it covered and counts in
+`failed_syncs_total`.
 `prefetched` is 1 once the node store holds the closures of that revision of
 the `prefetch` list for the node's system.
 

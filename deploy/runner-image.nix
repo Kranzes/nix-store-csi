@@ -1,12 +1,12 @@
-# The image for pods that run a program from the volume, which the runner
-# image is built from. Pass extraCertificates to add a CA, like a company's.
-# See "Your own image" in README.md.
+# The runner image, for pods that run a program from the volume. Override
+# extraCertificates to add a CA, like a company's. See "Your own image" in
+# README.md.
 {
   lib,
   dockerTools,
   pkgsStatic,
   cacert,
-  name ? "base",
+  name ? "runner",
   tag ? null,
   extraCertificates ? [ ],
 }:

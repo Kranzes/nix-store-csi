@@ -175,7 +175,7 @@ home is `/home/nobody`. Any other image works if it meets these requirements:
 
 Keep store paths out of the image, and the program's store path only in `args`
 and `storePaths`. The image then doesn't change when the program does. The
-runner image is built this way from [base-image.nix](base-image.nix), which
+runner image is built this way from [runner-image.nix](runner-image.nix), which
 copies what it needs instead of linking into the store. To add a company CA,
 override it with PEM files:
 

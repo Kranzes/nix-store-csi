@@ -148,8 +148,9 @@ volumeAttributes:
 ### Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an
-empty `/nix/store`, users, `/tmp` and nixpkgs' CA certificates, and runs as
-nobody. Any other image works if it meets these requirements:
+empty `/nix/store`, users, `/tmp` and nixpkgs' CA certificates, with
+`SSL_CERT_FILE` and `NIX_SSL_CERT_FILE` set to them. It runs as nobody, whose
+home is `/home/nobody`. Any other image works if it meets these requirements:
 
 - Nothing in the image may need its own `/nix/store`, since the volume hides
   it. An image without `/nix/store` is fine, because the container runtime
@@ -180,8 +181,9 @@ build your own with `extraCertificates = [ ./company-ca.pem ];`.
 
 To run an existing image built with `dockerTools.buildLayeredImage`, set
 `includeStorePaths = false`. The image then holds only links into `/nix/store`,
-and `storePaths` has to list the store paths it links to. Rebuild the image when
-those paths change.
+and `storePaths` has to list the store paths it links to, and those that its
+`Env` names, like `cacert` in `SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt`.
+Rebuild the image when those paths change.
 
 ## Running the plugin
 

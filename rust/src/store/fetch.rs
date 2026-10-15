@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -220,7 +220,7 @@ impl Store {
     async fn install(
         self: &Arc<Self>,
         mut entry: Arc<Entry>,
-        bytes: &AtomicU64,
+        bytes: &Arc<AtomicU64>,
     ) -> anyhow::Result<bool> {
         let path = entry.info.path().clone();
         let _permit = self.jobs.acquire().await?;
@@ -271,7 +271,7 @@ impl Store {
         self: &Arc<Self>,
         cache: usize,
         entry: &Arc<Entry>,
-        bytes: &AtomicU64,
+        bytes: &Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
         let info = &entry.info;
         let name = self.caches.name(cache);
@@ -282,16 +282,15 @@ impl Store {
             let body = self.caches.stream(cache, &info.url).await?;
             let part = Scratch::new_in(&self.tmp)?;
             let dest = part.path().join(&base);
-            match unpack_nar(
-                body,
+            let unpacked = self.sandbox.spawn(unpack_nar(
+                relay(body),
                 info.compression,
-                &info.nar_hash(),
+                info.nar_hash(),
                 info.nar_size(),
-                &dest,
-                bytes,
-            )
-            .await
-            {
+                dest,
+                bytes.clone(),
+            ));
+            match unpacked.await.map_err(anyhow::Error::from).flatten() {
                 Ok(()) => Ok(part),
                 Err(e) => {
                     // Deleting a partly unpacked tree can take a while.
@@ -459,10 +458,10 @@ fn seal(path: &Path) -> io::Result<()> {
 async fn unpack_nar(
     body: impl AsyncBufRead + Send + Unpin + 'static,
     compression: Compression,
-    nar_hash: &Hash,
+    nar_hash: Hash,
     nar_size: u64,
-    dest: &Path,
-    bytes: &AtomicU64,
+    dest: PathBuf,
+    bytes: Arc<AtomicU64>,
 ) -> anyhow::Result<()> {
     let mut size = 0;
     // Reading one byte past the expected size catches a NAR that's too long.
@@ -479,10 +478,10 @@ async fn unpack_nar(
             // `restore` only takes its own error type, so the parser's error
             // goes in `parse_error`.
             parse_error = Some(err);
-            NarWriteError::create_file_error(dest.to_owned(), io::ErrorKind::InvalidData.into())
+            NarWriteError::create_file_error(dest.clone(), io::ErrorKind::InvalidData.into())
         })
     });
-    let restored = restore(events, dest).await;
+    let restored = restore(events, &dest).await;
     if let Some(err) = parse_error {
         return Err(anyhow::Error::from(err).context("parsing the NAR"));
     }
@@ -497,10 +496,26 @@ async fn unpack_nar(
     );
     let hash = hashed.await?;
     ensure!(
-        hash == *nar_hash,
+        hash == nar_hash,
         "NAR hash mismatch: got {hash:x}, expected {nar_hash:x}"
     );
     Ok(())
+}
+
+/// Reads `body` in a task on the caller's runtime. A sandboxed thread can't
+/// read it, since the transport may read credentials and resume the
+/// download.
+fn relay(body: impl AsyncRead + Send + Unpin + 'static) -> impl AsyncBufRead + Send + Unpin {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(body, 256 * 1024));
+        while let Some(chunk) = chunks.next().await {
+            if tx.send(chunk).await.is_err() {
+                break;
+            }
+        }
+    });
+    StreamReader::new(ReceiverStream::new(rx))
 }
 
 /// Reads `decoded` in one task and hashes it in another, so decompression,
@@ -542,8 +557,6 @@ fn decode_apart(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::metrics::tests::sample;
     use crate::narinfo::tests::{
@@ -584,7 +597,8 @@ mod tests {
         let tmp = scratch();
         let dest = tmp.path().join("out");
         let body = std::io::Cursor::new(compressed.to_vec());
-        unpack_nar(body, compression, hash, size, &dest, &AtomicU64::default()).await?;
+        let bytes = Arc::default();
+        unpack_nar(body, compression, *hash, size, dest.clone(), bytes).await?;
         Ok((tmp, dest))
     }
 

@@ -24,6 +24,18 @@ flowchart LR
     caches --> plugin
 ```
 
+## Unpacking
+
+A NAR comes from the network, and the plugin checks its NarHash only after
+unpacking it into `tmp/`. The decompressor, the NAR parser and the writes run
+on threads that Landlock confines to `tmp/`, where they can create directories,
+files and symlinks and write to files they create. A bug that follows a
+symlink in the NAR, or joins a bad name, then fails instead of writing outside
+`tmp/`. The threads share the plugin's memory, so this doesn't contain code
+that a crafted NAR manages to run. The transport reads the NAR on other
+threads, since it reads credentials and may request the rest of a broken
+download.
+
 ## Syncing
 
 A store path has to be on disk before the plugin can trust it after a reboot.

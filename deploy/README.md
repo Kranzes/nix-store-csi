@@ -5,7 +5,8 @@
 The plugin needs:
 
 - Kubernetes 1.30 or later
-- Linux nodes on x86_64 or aarch64
+- Linux 6.2 or later on x86_64 or aarch64 nodes, with `landlock` in the
+  kernel's `lsm=` list (`/sys/kernel/security/lsm`)
 - a namespace that allows privileged pods, like `kube-system`
 - `kubeletDir` set to kubelet's root directory, if it isn't `/var/lib/kubelet`
 - disk space in `stateDir`, `/var/lib/nix-store-csi` by default, for the
@@ -183,6 +184,10 @@ and `storePaths` has to list the store paths it links to. Rebuild the image when
 those paths change.
 
 ## Running the plugin
+
+The plugin unpacks NARs on one thread per CPU, up to `--max-substitution-jobs`
+(16 by default). A CPU limit in `resources.limits` counts as whole CPUs,
+so `2500m` gives 2 threads.
 
 ### Private caches
 

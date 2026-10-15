@@ -4,6 +4,7 @@
 mod fetch;
 mod fs;
 mod gc;
+mod sandbox;
 #[cfg(test)]
 pub(crate) mod test_utils;
 mod views;
@@ -25,6 +26,7 @@ use tracing::{info, warn};
 use self::fetch::Fetch;
 use self::fs::{Scratch, remove_file, remove_tree};
 use self::gc::Space;
+use self::sandbox::Sandbox;
 use crate::closure::{self, Caches};
 use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
@@ -71,6 +73,8 @@ pub struct Store {
     /// uses the view.
     measured: Mutex<HashMap<String, Usage>>,
     tmp: PathBuf,
+    /// Unpacks NARs into tmp/.
+    sandbox: Sandbox,
     jobs: Semaphore,
     max_jobs: usize,
     max_closure_size: Option<u64>,
@@ -178,6 +182,7 @@ impl Store {
             generation: AtomicU64::default(),
             building: Mutex::default(),
             measured: Mutex::default(),
+            sandbox: Sandbox::new(&tmp, config.jobs)?,
             tmp,
             jobs: Semaphore::new(config.jobs),
             max_jobs: config.jobs,

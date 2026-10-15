@@ -6,6 +6,10 @@
 
 - The chart needs Kubernetes 1.30 or later, up from 1.25, so that
   `admissionPolicy` works on every version it installs on.
+- The plugin unpacks NARs on threads that Landlock confines to the state dir's
+  `tmp/`, so a bug in unpacking can't write elsewhere. It needs Linux 6.2 or
+  later with `landlock` in the kernel's `lsm=` list, and fails at start-up
+  without it.
 
 ### Added
 

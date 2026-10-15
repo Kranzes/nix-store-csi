@@ -26,7 +26,7 @@ usual `securityContext`, as in [hello-pod.yaml](../deploy/hello-pod.yaml).
 
 Mounted volumes keep working while a node's plugin restarts, as in a rollout.
 
-[PODS.md](PODS.md) shows how pods use the volumes.
+[PODS.md](PODS.md) shows how pods use the driver.
 
 ## Running the plugin
 

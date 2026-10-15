@@ -35,6 +35,9 @@ trustedPublicKeys:
 # A Secret whose netrc key holds the caches' credentials in netrc format:
 #   machine cache.example.com login user password secret
 netrcSecret: ""
+# A Secret whose keys the plugin gets as environment variables, for s3://
+# caches that take keys, like AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+s3CredentialsSecret: ""
 # Mounts a token with this audience for caches that take one, like niks3:
 #   http://niks3.niks3.svc?bearer-token-file=/var/run/secrets/nix-store-csi/token
 serviceAccountToken:

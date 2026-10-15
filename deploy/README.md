@@ -226,6 +226,63 @@ netrcSecret: nix-store-csi-netrc
 helm upgrade --install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi -n kube-system -f values.yaml
 ```
 
+### S3
+
+An `s3://` substituter reads a bucket like Nix's S3 store does, with its
+`region`, `endpoint` and `addressing-style` settings. The plugin takes its
+credentials from EKS Pod Identity, IRSA, the keys in `s3CredentialsSecret`, or
+the node's instance role. With Pod Identity, give the plugin's ServiceAccount,
+which the chart names after the release, a role that can `s3:GetObject` on
+the bucket. Without `s3:ListBucket`, S3 answers 403 for a missing file, which
+the plugin treats like a 404.
+
+```yaml
+# values.yaml
+substituters:
+  - s3://my-cache?region=eu-west-1
+  - https://cache.nixos.org
+trustedPublicKeys:
+  - my-cache-1:<key>
+  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+```
+
+#### GCS
+
+For GCS, set `endpoint` to `https://storage.googleapis.com`. Without keys in
+`s3CredentialsSecret`, the plugin reads the bucket with a token from GKE
+Workload Identity. Grant `roles/storage.objectViewer` on the bucket to the plugin's
+ServiceAccount, as the principal
+`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/kube-system/sa/nix-store-csi`.
+Workload Identity doesn't serve pods on the host network, so `hostNetwork`
+must stay `false`.
+
+```yaml
+# values.yaml
+substituters:
+  - s3://my-cache?endpoint=https://storage.googleapis.com
+  - https://cache.nixos.org
+trustedPublicKeys:
+  - my-cache-1:<key>
+  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+```
+
+#### Other S3 services
+
+Services like Cloudflare R2 take an `endpoint`, the `region` they sign with,
+and keys. `s3CredentialsSecret` names a Secret with `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`, which the plugin gets as environment variables.
+
+```yaml
+# values.yaml
+substituters:
+  - s3://my-cache?endpoint=https://<account-id>.r2.cloudflarestorage.com&region=auto
+  - https://cache.nixos.org
+trustedPublicKeys:
+  - my-cache-1:<key>
+  - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+s3CredentialsSecret: r2-credentials
+```
+
 ### Prefetching
 
 To have closures on the nodes before pods need them, list their store paths

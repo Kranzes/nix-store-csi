@@ -120,6 +120,11 @@ spec:
               value: {{ join " " $.Values.substituters | quote }}
             - name: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS
               value: {{ join " " $.Values.trustedPublicKeys | quote }}
+          {{- with $.Values.s3CredentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
           ports:
             - name: healthz
               containerPort: {{ $.Values.livenessProbe.port }}

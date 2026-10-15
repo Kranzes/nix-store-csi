@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `s3://` substituters, with the `region`, `endpoint` and `addressing-style`
+  settings of Nix's S3 store. `endpoint` takes a URL, like
+  `http://localhost:9000`. The plugin presigns each request with credentials
+  from the environment: AWS keys, IRSA, EKS Pod Identity or the instance role.
+  With `endpoint=https://storage.googleapis.com` and no AWS keys, it reads
+  GCS with a token from GKE Workload Identity.
+- The chart's `s3CredentialsSecret` value, a Secret whose keys the plugin gets
+  as environment variables, for `s3://` caches that take keys, like R2.
+
 ## 0.1.4 - 2026-10-15
 
 ### Changed

@@ -1,7 +1,7 @@
 # Installs the chart on a one-node k3s cluster so a real kubelet publishes the
 # volumes.
-# The VM has no internet, so nginx serves the fixture caches and every image
-# is preloaded.
+# The VM has no internet, so nginx serves the fixture caches, versitygw serves
+# them as S3 buckets, and every image is preloaded.
 {
   lib,
   stdenv,
@@ -12,8 +12,10 @@
   k3s,
   curl,
   jq,
+  versitygw,
   hello,
   busybox,
+  nix-store-csi,
   chart,
   csi-image,
   runner-image,
@@ -236,6 +238,15 @@ testers.runNixOSTest {
         })
       ];
     };
+    systemd.services.versitygw = {
+      wantedBy = [ "multi-user.target" ];
+      environment = {
+        ROOT_ACCESS_KEY = "nix";
+        ROOT_SECRET_KEY = "secret";
+      };
+      # versitygw keeps metadata in xattrs, which the VM's store lacks.
+      serviceConfig.ExecStart = "${lib.getExe versitygw} --port 127.0.0.1:9000 posix --nometa ${fixtures}";
+    };
     services.nginx = {
       enable = true;
       virtualHosts.localhost = {
@@ -367,6 +378,17 @@ testers.runNixOSTest {
         machine.wait_until_succeeds(prefetched("warm"), timeout=300)
         # busybox, which warm references, is on the node already.
         t.assertEqual(int(machine.succeed(fetches)), before + 1)
+
+    with subtest("the plugin fetches a closure from an S3 bucket"):
+        machine.wait_for_open_port(9000)
+        store = machine.succeed(
+            "AWS_ACCESS_KEY_ID=nix AWS_SECRET_ACCESS_KEY=secret ${lib.getExe nix-store-csi}"
+            " --substituters 's3://cache-zstd?endpoint=http://127.0.0.1:9000'"
+            " --trusted-public-keys \"$(cat ${fixtures}/public.key)\""
+            " --state-dir /tmp/s3 unpack ${hello}"
+        ).strip()
+        machine.succeed(f"diff -r {store}/${baseNameOf hello} ${hello}")
+        t.assertEqual(int(machine.succeed("ls /tmp/s3/store | wc -l")), int(machine.succeed("wc -l < ${writeClosure [ hello ]}")))
 
     with subtest("a restarted plugin publishes a closure already on the node while the cache is down"):
         machine.succeed("systemctl stop nginx")

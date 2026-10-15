@@ -66,6 +66,7 @@
       "items": { "type": "string", "pattern": "^[^:]+:" }
     },
     "netrcSecret": { "type": "string" },
+    "s3CredentialsSecret": { "type": "string" },
     "serviceAccountToken": {
       "type": "object",
       "additionalProperties": false,

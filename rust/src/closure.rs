@@ -436,8 +436,9 @@ impl Cache {
     /// It tries once, because lookups wait for it and [`Cache::open`] tries
     /// again later.
     async fn read_info(&self, store_dir: &StoreDir) -> anyhow::Result<i32> {
+        // S3 answers 403 both for a missing file and for wrong credentials.
         let Some(text) = self.transport.get_once("nix-cache-info").await? else {
-            bail!("no nix-cache-info, so it isn't a binary cache");
+            bail!("no nix-cache-info, or no access to it");
         };
         let info: CacheInfo = String::from_utf8_lossy(&text).parse()?;
         if let Some(dir) = &info.store_dir

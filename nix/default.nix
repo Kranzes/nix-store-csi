@@ -149,7 +149,7 @@ rec {
         ''
           export HOME=$TMPDIR
           helm lint --strict ${chartSrc}
-          helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc
+          helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc,s3CredentialsSecret=s3
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true,metrics.prometheusRule.enabled=true
           # The alerts' rules, with each kind of alert.
           rendered() {
@@ -185,7 +185,12 @@ rec {
 
     nixos-test = pkgs.callPackage ./test.nix {
       inherit fixtures;
-      inherit (packages) chart csi-image runner-image;
+      inherit (packages)
+        nix-store-csi
+        chart
+        csi-image
+        runner-image
+        ;
     };
   };
 }

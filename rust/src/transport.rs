@@ -5,13 +5,16 @@ use std::time::Duration;
 use anyhow::{Context, bail, ensure};
 use backon::{ExponentialBuilder, Retryable};
 use futures::StreamExt;
+use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
+use object_store::signer::{Method, Signer};
 use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE};
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
-use url::Url;
+use url::{Position, Url};
 
 use crate::narinfo::Compression;
 
@@ -38,19 +41,30 @@ enum Auth {
     /// The `--netrc-file` entry for the cache's host, or its `default` entry.
     /// Each request reads the file, so an updated Secret takes effect immediately.
     Netrc(PathBuf),
+    /// Credentials that `object_store` finds in the environment, from
+    /// `AWS_ACCESS_KEY_ID`, IRSA, EKS Pod Identity or the node's instance
+    /// role. Each request goes to a URL presigned with them.
+    S3(AmazonS3),
+    /// A token from GKE Workload Identity, the node's service account or
+    /// another of Google's application default credentials, for the bucket's
+    /// objects under `objects`.
+    Gcs {
+        token: GcpCredentialProvider,
+        objects: Url,
+    },
 }
 
 impl Http {
-    fn request(&self, url: &Url) -> anyhow::Result<reqwest::RequestBuilder> {
-        let request = self.client.get(url.clone());
+    async fn request(&self, url: &Url) -> anyhow::Result<reqwest::RequestBuilder> {
+        let request = || self.client.get(url.clone());
         Ok(match &self.auth {
-            None => request,
-            Some(Auth::Basic(user, password)) => request.basic_auth(user, password.as_ref()),
+            None => request(),
+            Some(Auth::Basic(user, password)) => request().basic_auth(user, password.as_ref()),
             // A projected token is on a tmpfs, so the read doesn't block for long.
             Some(Auth::Bearer(file)) => {
                 let token = std::fs::read_to_string(file)
                     .with_context(|| format!("reading {}", file.display()))?;
-                request.bearer_auth(token.trim())
+                request().bearer_auth(token.trim())
             }
             Some(Auth::Netrc(file)) => {
                 let text = std::fs::read_to_string(file)
@@ -61,10 +75,20 @@ impl Http {
                     .map_err(|_| anyhow::anyhow!("{} isn't in netrc format", file.display()))?;
                 match netrc_entry(&netrc, url.host_str().unwrap_or_default()) {
                     Some(m) => {
-                        request.basic_auth(&m.login, Some(&m.password).filter(|p| !p.is_empty()))
+                        request().basic_auth(&m.login, Some(&m.password).filter(|p| !p.is_empty()))
                     }
-                    None => request,
+                    None => request(),
                 }
+            }
+            Some(Auth::S3(s3)) => {
+                let key = object_store::path::Path::from_url_path(url.path())?;
+                let signed = s3.signed_url(Method::GET, &key, PRESIGN_FOR).await?;
+                self.client.get(signed)
+            }
+            Some(Auth::Gcs { token, objects }) => {
+                let token = token.get_credential().await?;
+                let object = objects.join(url.path().trim_start_matches('/'))?;
+                self.client.get(object).bearer_auth(&token.bearer)
             }
         })
     }
@@ -78,7 +102,7 @@ impl Http {
         range: Option<(u64, &HeaderValue)>,
     ) -> anyhow::Result<reqwest::Response> {
         retry(url, true, || async {
-            let mut request = self.request(url)?;
+            let mut request = self.request(url).await?;
             if let Some((from, validator)) = range {
                 request =
                     (request.header(RANGE, format!("bytes={from}-"))).header(IF_RANGE, validator);
@@ -114,6 +138,10 @@ const FILE_BUF: usize = 256 * 1024;
 /// How long a request keeps retrying. backon's total delay counts only the
 /// sleeps, so a cache that times out on every attempt would retry far longer.
 const RETRY_FOR: Duration = Duration::from_mins(1);
+
+/// S3 checks a presigned URL when the request arrives, and each request gets
+/// a new one.
+const PRESIGN_FOR: Duration = Duration::from_mins(5);
 
 /// Before jitter, which adds up to as much again.
 const MAX_DELAY: Duration = Duration::from_secs(5);
@@ -314,15 +342,16 @@ impl Transport {
         // `Caches` reads `priority` from the URL itself.
         base.set_query(None);
         base.set_fragment(None);
+        ensure!(
+            token_file.is_none() || matches!(base.scheme(), "http" | "https"),
+            "bearer-token-file needs http(s)://"
+        );
         Ok(match base.scheme() {
-            "file" => {
-                ensure!(token_file.is_none(), "bearer-token-file needs http(s)://");
-                Self::File(
-                    base.to_file_path()
-                        .ok()
-                        .context("not an absolute local file URL")?,
-                )
-            }
+            "file" => Self::File(
+                base.to_file_path()
+                    .ok()
+                    .context("not an absolute local file URL")?,
+            ),
             "http" | "https" => {
                 let decode = |s: &str| percent_decode_str(s).decode_utf8_lossy().into_owned();
                 let basic = (!base.username().is_empty() || base.password().is_some())
@@ -338,7 +367,12 @@ impl Transport {
                     auth,
                 })
             }
-            scheme => bail!("unsupported scheme {scheme}: expected http(s):// or file://"),
+            "s3" => Self::Http(Http {
+                auth: Some(s3(url, s3_env())?),
+                base,
+                client: client()?,
+            }),
+            scheme => bail!("unsupported scheme {scheme}: expected http(s)://, s3:// or file://"),
         })
     }
 
@@ -366,7 +400,7 @@ impl Transport {
             Self::Http(http) => {
                 let url = request_url(&http.base, path)?;
                 retry(&url, retries, || async {
-                    let mut resp = http.request(&url)?.send().await?;
+                    let mut resp = http.request(&url).await?.send().await?;
                     if is_missing(resp.status()) {
                         return Ok(None);
                     }
@@ -416,6 +450,104 @@ impl Transport {
             Self::Http(http) => request_url(&http.base, path).map(drop),
         }
     }
+}
+
+/// What [`AmazonS3Builder::from_env`] reads, except the endpoint, which only
+/// the URL sets, as in Nix.
+fn s3_env() -> AmazonS3Builder {
+    let mut builder = AmazonS3Builder::new();
+    for (key, value) in std::env::vars_os() {
+        let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+            continue;
+        };
+        if !key.starts_with("AWS_") {
+            continue;
+        }
+        match key.to_ascii_lowercase().parse() {
+            Ok(AmazonS3ConfigKey::Endpoint | AmazonS3ConfigKey::S3Endpoint) | Err(_) => {}
+            Ok(key) => builder = builder.with_config(key, value),
+        }
+    }
+    builder
+}
+
+/// The host that takes S3 requests for GCS.
+const GCS: &str = "storage.googleapis.com";
+
+/// Access to the bucket of `url`, with the store settings that Nix's S3 store
+/// takes: `region`, and `endpoint` and `addressing-style` for other
+/// S3-compatible services. The rest comes from `builder`.
+fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
+    ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "s3:// takes credentials from the environment, not the URL"
+    );
+    ensure!(
+        matches!(url.path(), "" | "/"),
+        "s3:// takes a bucket, not a path in it"
+    );
+    let bucket = url.host_str().context("no bucket")?;
+    builder = builder.with_bucket_name(bucket);
+    let (mut endpoint, mut style) = (None, "auto".to_owned());
+    for (key, value) in url.query_pairs() {
+        match &*key {
+            "region" => builder = builder.with_region(value),
+            // Without a scheme, `Url` would read `host:9000` as scheme `host`.
+            "endpoint" => {
+                let parsed = Url::parse(&value).ok().filter(Url::has_host);
+                endpoint = Some(parsed.with_context(|| {
+                    format!("endpoint {value:?} isn't a URL like https://host")
+                })?);
+            }
+            "addressing-style" => style = value.into_owned(),
+            "scheme" => bail!("give the scheme in the endpoint, like endpoint=http://host:9000"),
+            "profile" => bail!("profile needs ~/.aws/config, which nix-store-csi doesn't read"),
+            _ => {}
+        }
+    }
+    // Like Nix, `auto` puts the bucket in the host name only on AWS. A bucket
+    // name with a dot would put two labels where a TLS wildcard matches one.
+    let virtual_hosted = match &*style {
+        "auto" => endpoint.is_none() && !bucket.contains('.'),
+        "path" => false,
+        "virtual" => {
+            ensure!(
+                !bucket.contains('.'),
+                "addressing-style=virtual needs a bucket name without dots"
+            );
+            true
+        }
+        _ => bail!("addressing-style is {style:?}, not auto, path or virtual"),
+    };
+    if let Some(mut endpoint) = endpoint {
+        // GCS takes S3 requests signed with an HMAC key. Without one, the
+        // plugin reads it with a bearer token, like the one GKE Workload
+        // Identity gives, which S3 requests can't carry.
+        let gcs_token = endpoint.host_str() == Some(GCS)
+            && (builder.get_config_value(&AmazonS3ConfigKey::AccessKeyId)).is_none();
+        if virtual_hosted {
+            let host = format!("{bucket}.{}", endpoint.host_str().unwrap_or_default());
+            endpoint.set_host(Some(&host))?;
+        }
+        if gcs_token {
+            let gcs = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+            if !virtual_hosted {
+                (endpoint.path_segments_mut())
+                    .map_err(|()| anyhow::anyhow!("endpoint can't have a path"))?
+                    .pop_if_empty()
+                    .extend([bucket, ""]);
+            }
+            return Ok(Auth::Gcs {
+                token: gcs.build()?.credentials().clone(),
+                objects: endpoint,
+            });
+        }
+        builder = builder
+            .with_allow_http(endpoint.scheme() == "http")
+            .with_endpoint(endpoint.as_str().trim_end_matches('/'));
+    }
+    let s3 = builder.with_virtual_hosted_style_request(virtual_hosted);
+    Ok(Auth::S3(s3.build()?))
 }
 
 struct Resuming<S> {
@@ -530,8 +662,10 @@ fn request_url(base: &Url, path: &str) -> anyhow::Result<Url> {
         dir.set_path(&format!("{}/", dir.path()));
     }
     let url = dir.join(path)?;
+    // Unlike `Url::origin`, this works for s3:// too.
     ensure!(
-        url.origin() == dir.origin() && url.path().starts_with(dir.path()),
+        url[..Position::BeforePath] == dir[..Position::BeforePath]
+            && url.path().starts_with(dir.path()),
         "bad path in binary cache: {path:?}"
     );
     Ok(url)
@@ -602,7 +736,12 @@ pub(crate) mod tests {
         }
         let path = request_line.split(' ').nth(1).unwrap();
         // Serves the same files under `/prefix`, for bases with a path.
-        let path = path.strip_prefix("/prefix").unwrap_or(path).to_owned();
+        let path = path.strip_prefix("/prefix").unwrap_or(path);
+        // Serves them under `/bucket` too, to presigned path-style S3 requests.
+        let path = (path.strip_prefix("/bucket"))
+            .and_then(|p| p.split_once("?X-Amz-"))
+            .map_or(path, |(p, _)| p)
+            .to_owned();
         let (mut authorization, mut if_range, mut range) = (String::new(), String::new(), None);
         loop {
             let mut line = String::new();
@@ -900,6 +1039,113 @@ pub(crate) mod tests {
         }
     }
 
+    /// A path-style bucket at `endpoint`, with keys in place of the
+    /// environment's credentials.
+    fn open_s3(endpoint: &str) -> Transport {
+        let url = format!("s3://bucket?region=eu-west-1&endpoint={endpoint}");
+        Transport::Http(Http {
+            base: "s3://bucket".parse().unwrap(),
+            client: client().unwrap(),
+            auth: Some(s3(&url.parse().unwrap(), keys()).unwrap()),
+        })
+    }
+
+    #[tokio::test]
+    async fn gcs_bearer_token() {
+        let base = server(Mode::Normal).await;
+        let token = object_store::StaticCredentialProvider::new(object_store::gcp::GcpCredential {
+            bearer: "token".to_owned(),
+        });
+        let t = Transport::Http(Http {
+            base: "s3://bucket".parse().unwrap(),
+            client: client().unwrap(),
+            auth: Some(Auth::Gcs {
+                token: Arc::new(token),
+                objects: format!("{base}/prefix/").parse().unwrap(),
+            }),
+        });
+        assert_eq!(t.get("whoami").await.unwrap().unwrap(), b"Bearer token");
+    }
+
+    fn keys() -> AmazonS3Builder {
+        AmazonS3Builder::new()
+            .with_access_key_id("id")
+            .with_secret_access_key("secret")
+    }
+
+    /// Where a request for `x` in the bucket of `url` goes, without the query.
+    async fn object_url(url: &str, builder: AmazonS3Builder) -> String {
+        let url = match s3(&url.parse().unwrap(), builder).unwrap() {
+            Auth::S3(s3) => (s3.signed_url(Method::GET, &"x".into(), PRESIGN_FOR))
+                .await
+                .unwrap(),
+            Auth::Gcs { objects, .. } => objects.join("x").unwrap(),
+            _ => unreachable!(),
+        };
+        url.as_str().split('?').next().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn s3_addressing_styles() {
+        for (url, object) in [
+            (
+                "s3://cache?region=eu-west-1",
+                "https://cache.s3.eu-west-1.amazonaws.com/x",
+            ),
+            (
+                "s3://my.cache?region=eu-west-1",
+                "https://s3.eu-west-1.amazonaws.com/my.cache/x",
+            ),
+            (
+                "s3://cache?endpoint=https://s3.example.com",
+                "https://s3.example.com/cache/x",
+            ),
+            (
+                "s3://cache?endpoint=http://localhost:9000&addressing-style=virtual",
+                "http://cache.localhost:9000/x",
+            ),
+        ] {
+            assert_eq!(object_url(url, keys()).await, object, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn gcs_takes_a_token_without_keys() {
+        let url = "s3://cache?endpoint=https://storage.googleapis.com";
+        let gcs = s3(&url.parse().unwrap(), AmazonS3Builder::new()).unwrap();
+        assert!(matches!(gcs, Auth::Gcs { .. }));
+        assert!(matches!(
+            s3(&url.parse().unwrap(), keys()).unwrap(),
+            Auth::S3(_)
+        ));
+        for (url, object) in [
+            (url, "https://storage.googleapis.com/cache/x"),
+            (
+                "s3://cache?endpoint=https://storage.googleapis.com&addressing-style=virtual",
+                "https://cache.storage.googleapis.com/x",
+            ),
+            (
+                "s3://cache?endpoint=https://storage.googleapis.com/proxy",
+                "https://storage.googleapis.com/proxy/cache/x",
+            ),
+        ] {
+            assert_eq!(object_url(url, AmazonS3Builder::new()).await, object);
+        }
+    }
+
+    #[tokio::test]
+    async fn s3_presigns() {
+        let t = open_s3(&server(Mode::Normal).await);
+        assert_eq!(t.get("obj").await.unwrap().unwrap(), BODY);
+        // A resume gets a URL of its own.
+        let breaks = Mode::BreaksOnce {
+            ranges: true,
+            short: false,
+        };
+        let t = open_s3(&server(breaks).await);
+        assert_eq!(read_all(&t, "obj").await.unwrap(), BODY);
+    }
+
     #[test]
     fn matches_netrc_hosts() {
         let netrc: netrc::Netrc = "machine Cache.Example.com login a password b\ndefault login c"
@@ -940,9 +1186,16 @@ pub(crate) mod tests {
     fn rejected_urls() {
         for url in [
             "file://host/x",
-            "s3://bucket?region=eu-west-1",
             "file:///x?bearer-token-file=/t",
             "https://user:pw@host?bearer-token-file=/t",
+            "s3://bucket?bearer-token-file=/t",
+            "s3://key:secret@bucket",
+            "s3://bucket/prefix",
+            "s3://bucket?profile=default",
+            "s3://bucket?endpoint=http://host&scheme=http",
+            "s3://bucket?endpoint=host:9000",
+            "s3://bucket?addressing-style=other",
+            "s3://my.bucket?addressing-style=virtual",
         ] {
             assert!(open(url).is_err(), "{url}");
         }

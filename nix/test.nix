@@ -330,6 +330,9 @@ testers.runNixOSTest {
         [mount] = machine.succeed("kubectl exec sleep -- ${busybox}/bin/grep ' /nix/store ' /proc/mounts").splitlines()
         t.assertIn("ro", mount.split()[3].split(","))
 
+    with subtest("the runner image gives nobody a home it can write to"):
+        machine.succeed("kubectl exec sleep -- ${busybox}/bin/sh -c 'test \"$HOME\" = /home/nobody && ${busybox}/bin/touch \"$HOME\"/x'")
+
     with subtest("kubelet reports the NAR size and inodes of the pod's closure"):
         summary = "kubectl get --raw /api/v1/nodes/machine/proxy/stats/summary"
         nix = '.pods[] | select(.podRef.name == "sleep") | .volume[]? | select(.name == "nix")'

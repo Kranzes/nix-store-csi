@@ -10,6 +10,9 @@
   `tmp/`, so a bug in unpacking can't write elsewhere. It needs Linux 6.2 or
   later with `landlock` in the kernel's `lsm=` list, and fails at start-up
   without it.
+- The runner image gives nobody a home it can write to, `/home/nobody`, in
+  place of `/var/empty`, and sets `SSL_CERT_FILE` and `NIX_SSL_CERT_FILE` to
+  its CA certificates.
 
 ### Added
 

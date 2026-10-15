@@ -45,7 +45,7 @@ image layers. nix-store-csi mounts them as a volume instead:
   `storePaths`. Scan an SBOM of the closure instead, e.g. from
   [bombon](https://github.com/nikstur/bombon). The plugin fetches only from
   `substituters` and checks narinfo signatures against `trustedPublicKeys`.
-- Any pod that may use the volumes can make a node fetch whatever the trusted
+- Any pod that may use the driver can make a node fetch whatever the trusted
   caches serve. `maxClosureSize` and `admissionPolicy.allowedNamespaces` can
   limit that, see [Security](docs/DEPLOY.md#security).
 

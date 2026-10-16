@@ -11,8 +11,8 @@
       flake = false;
     };
     bombon = {
-      # Until nikstur/bombon#224 merges.
-      url = "github:Kranzes/bombon/buildtime-context";
+      # Until nikstur/bombon#224 and nikstur/bombon#225 merge.
+      url = "github:Kranzes/bombon/combined";
       flake = false;
     };
   };

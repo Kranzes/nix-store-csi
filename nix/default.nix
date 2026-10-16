@@ -15,7 +15,12 @@ let
     image.overrideAttrs (
       finalAttrs: prev: {
         passthru = prev.passthru // {
-          sbom = bombonLib.buildBom finalAttrs.finalPackage { inherit extraPaths; };
+          sbom = bombonLib.buildBom finalAttrs.finalPackage {
+            inherit extraPaths;
+            # zstd under pkgsStatic propagates the bash that its scripts use,
+            # but the images don't contain it.
+            excludes = [ "-bash-static-" ];
+          };
         };
       }
     );

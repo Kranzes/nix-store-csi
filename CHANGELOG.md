@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The images' SBOMs list the libraries linked into their static binaries:
+  musl in both images, and xz and zstd in the CSI image.
+
 ## 0.1.5 - 2026-10-16
 
 ### Changed

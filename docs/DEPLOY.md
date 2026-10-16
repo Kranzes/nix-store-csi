@@ -253,6 +253,64 @@ The chart then adds a ValidatingAdmissionPolicy. It checks pods, so the API
 server still accepts a Deployment in another namespace, and its ReplicaSet's
 events show why it has no pods.
 
+### Image signatures
+
+CI signs both images with Sigstore. Each image's index has SLSA build
+provenance, and each platform's image has a CycloneDX SBOM. The signer of a
+release is the CI workflow at its tag,
+`https://github.com/Kranzes/nix-store-csi/.github/workflows/ci.yml@refs/tags/v<version>`.
+The signatures cover the images, not the store paths that the driver mounts
+in pods, which the plugin checks against `trustedPublicKeys`.
+
+To check an image, and to save the SBOM of its amd64 image:
+
+```sh
+image=ghcr.io/kranzes/nix-store-csi:<version>
+gh attestation verify "oci://$image" --repo Kranzes/nix-store-csi
+digest=$(regctl image digest --platform linux/amd64 "$image")
+gh attestation verify "oci://${image%:*}@$digest" --repo Kranzes/nix-store-csi \
+  --predicate-type https://cyclonedx.org/bom \
+  --format json --jq '.[0].verificationResult.statement.predicate' > nix-store-csi.cdx.json
+```
+
+Admission controllers that verify Sigstore bundles, like
+[Kyverno](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/sigstore/)
+or the Sigstore
+[policy-controller](https://docs.sigstore.dev/policy-controller/overview/),
+can admit only signed releases. Their policy checks the signer above and the
+SLSA provenance on the image's index. With policy-controller, add this
+ClusterImagePolicy:
+
+```yaml
+apiVersion: policy.sigstore.dev/v1alpha1
+kind: ClusterImagePolicy
+metadata:
+  name: nix-store-csi
+spec:
+  images:
+    - glob: ghcr.io/kranzes/nix-store-csi**
+  authorities:
+    - keyless:
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: https://token.actions.githubusercontent.com
+            subjectRegExp: ^https://github\.com/Kranzes/nix-store-csi/\.github/workflows/ci\.yml@refs/tags/v
+      ctlog:
+        url: https://rekor.sigstore.dev
+      signatureFormat: bundle
+      attestations:
+        - name: provenance
+          predicateType: https://slsa.dev/provenance/v1
+```
+
+Then label the plugin's namespace, and those of pods that use the runner
+image, with `policy.sigstore.dev/include=true`. Images there that no policy
+matches are rejected, so the sidecars in `registrar.image` and
+`livenessProbe.image` need a policy too, like one for
+[Kubernetes' signatures](https://kubernetes.io/docs/tasks/administer-cluster/verify-signed-artifacts/).
+The controller pins each image to the digest it checked, so `values.yaml` and
+pod specs can keep tags.
+
 ### Metrics
 
 With `metrics.enabled=true`, the node plugin serves Prometheus metrics at

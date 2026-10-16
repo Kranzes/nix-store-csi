@@ -19,15 +19,16 @@
     "bombon": {
       "flake": false,
       "locked": {
-        "lastModified": 1792061031,
-        "narHash": "sha256-JA3HijUhH7SAmtWh7hUqmgq1r5x9Sew+OD0l2W29Ivs=",
-        "owner": "nikstur",
+        "lastModified": 1792112884,
+        "narHash": "sha256-Z6GaLjeG30UKThAJZdSGnRY5co4SDqZRRANVA6bOiY4=",
+        "owner": "Kranzes",
         "repo": "bombon",
-        "rev": "88aea1068cb6e939b74655c39f33606a8201922c",
+        "rev": "e2b6b27b56b523ef2541d87be6944cd3c240fa4b",
         "type": "github"
       },
       "original": {
-        "owner": "nikstur",
+        "owner": "Kranzes",
+        "ref": "buildtime-context",
         "repo": "bombon",
         "type": "github"
       }

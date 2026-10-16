@@ -9,7 +9,10 @@
   dockerTools,
   writeClosure,
   writeText,
+  runCommand,
   k3s,
+  skopeo,
+  zstd,
   curl,
   jq,
   versitygw,
@@ -23,6 +26,25 @@
 }:
 
 let
+  # One image from k3s's airgap images. Kubelet starts only once k3s imports
+  # the pause image, and the whole tarball takes longer.
+  airgapImage =
+    name:
+    runCommand "k3s-airgap-${name}.tar"
+      {
+        nativeBuildInputs = [
+          jq
+          skopeo
+          zstd
+        ];
+      }
+      ''
+        zstd -d ${k3s.airgap-images} -o images.tar
+        tar -xf images.tar manifest.json
+        tag=$(jq -r '.[].RepoTags[] | select(contains("/${name}:"))' manifest.json)
+        skopeo --insecure-policy copy docker-archive:images.tar:"$tag" docker-archive:$out:docker.io/"$tag"
+      '';
+
   registrar = dockerTools.pullImage {
     imageName = "registry.k8s.io/sig-storage/csi-node-driver-registrar";
     imageDigest = "sha256:b7fefd08651f00ac4df1a196ed4c621c2451fbb899297fe9fad9e36c667af0c0";
@@ -149,10 +171,18 @@ testers.runNixOSTest {
   name = "nix-store-csi-k3s";
 
   nodes.machine = {
-    # The airgap images don't fit the default 1 GB.
+    # The images don't fit the default 1 GB.
     virtualisation.diskSize = 4096;
+    virtualisation.cores = 4;
+    virtualisation.memorySize = 2048;
     services.k3s = {
       enable = true;
+      # Kubelet updates the mounted ConfigMaps when it syncs a pod, and the
+      # volume stats every period, both a minute by default.
+      extraFlags = [
+        "--kubelet-arg=sync-frequency=5s"
+        "--kubelet-arg=volume-stats-agg-period=5s"
+      ];
       disable = [
         "coredns"
         "local-storage"
@@ -160,9 +190,9 @@ testers.runNixOSTest {
         "servicelb"
         "traefik"
       ];
-      # The airgap images hold k3s's pause image and its Helm installer.
       images = [
-        k3s.airgap-images
+        (airgapImage "mirrored-pause")
+        (airgapImage "klipper-helm")
         registrar
         livenessprobe
         csi-image
@@ -171,6 +201,9 @@ testers.runNixOSTest {
       autoDeployCharts.nix-store-csi = {
         package = chart;
         targetNamespace = "kube-system";
+        # Runs the Helm job on the node's network, so it doesn't wait for
+        # flannel.
+        extraFieldDefinitions.spec.bootstrap = true;
         values = {
           image = {
             repository = csi-image.imageName;
@@ -375,7 +408,7 @@ testers.runNixOSTest {
         machine.succeed(f"{plugin} | grep 'prefetched store_paths=.*-${busybox.name}' > /dev/null")
         before = int(machine.succeed(fetches))
         machine.succeed("kubectl -n kube-system patch configmap nix-store-csi-prefetch --type merge --patch-file ${prefetchWarm}")
-        machine.wait_until_succeeds(prefetched("warm"), timeout=300)
+        machine.wait_until_succeeds(prefetched("warm"), timeout=60)
         # busybox, which warm references, is on the node already.
         t.assertEqual(int(machine.succeed(fetches)), before + 1)
 

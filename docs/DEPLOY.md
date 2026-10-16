@@ -36,14 +36,21 @@ so `2500m` gives 2 threads.
 
 ### Private caches
 
-Credentials for private caches go in a netrc file in a Secret, the format Nix
-uses for its `netrc-file`. The plugin reads the file for every request, so
-changes to the Secret apply without a restart. A private cache also needs its
-key among the trusted ones:
+Credentials for private caches go in a netrc file, the format Nix uses for its
+`netrc-file`, under the `netrc` key of a Secret in the plugin's namespace.
+Create it however you manage secrets. The plugin reads the file for every
+request, so changes to the Secret apply without a restart. A private cache
+also needs its key among the trusted ones:
 
-```sh
-kubectl -n kube-system create secret generic nix-store-csi-netrc \
-  --from-literal=netrc="machine cache.example.com login user password secret"
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nix-store-csi-netrc
+  namespace: kube-system
+stringData:
+  netrc: |
+    machine cache.example.com password <token>
 ```
 
 ```yaml
@@ -55,10 +62,6 @@ trustedPublicKeys:
   - cache.example.com-1:<key>
   - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 netrcSecret: nix-store-csi-netrc
-```
-
-```sh
-helm upgrade --install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi -n kube-system -f values.yaml
 ```
 
 ### S3
@@ -146,9 +149,9 @@ as soon as it changes, without a restart.
 For a rollout:
 
 1. Set `prefetch` to the new version's store paths and upgrade the chart.
-   With [manifests.nix](../deploy/manifests.nix), pass its `prefetch` output to
-   `helm upgrade` with `-f`. It replaces the lists for the systems its store
-   paths are built for.
+   With [manifests.nix](../deploy/manifests.nix), pass its `prefetch` output
+   as a values file. It replaces the lists for the systems its store paths are
+   built for.
 2. Wait until every node plugin holds the new list. The chart puts a
    `revision` of the list in its ConfigMap. With `metrics.enabled`, the
    chart's notes print it and a Prometheus query that returns nothing once

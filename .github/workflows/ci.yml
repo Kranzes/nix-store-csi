@@ -165,6 +165,10 @@ jobs:
           regctl index create ocidir://images:index "${refs[@]}"
           regctl registry login ghcr.io --user "$GITHUB_ACTOR" --pass-stdin <<< "$GITHUB_TOKEN"
           regctl image copy ocidir://images:index "ghcr.io/kranzes/$name:$TAG"
+          # Only releases are signed. An image that didn't change keeps its
+          # digest, so signing every push would pile up signatures on it,
+          # which admission controllers check one by one.
+          [[ "$GITHUB_REF_TYPE" == tag ]] || exit 0
           cosign() { nix shell --inputs-from . nixpkgs#cosign -c cosign "$@"; }
           cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GITHUB_TOKEN"
           digest=$(regctl image digest "ghcr.io/kranzes/$name:$TAG")
@@ -182,7 +186,7 @@ jobs:
           done
       # Pushes with the credentials that `cosign login` wrote. Private repos
       # need GitHub Enterprise Cloud for attestations.
-      - if: ${{ !github.event.repository.private }}
+      - if: ${{ !github.event.repository.private && github.ref_type == 'tag' }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.push.outputs.name }}
@@ -190,7 +194,7 @@ jobs:
           push-to-registry: true
           # Storage records need an organization-owned repo.
           create-storage-record: false
-      - if: ${{ !github.event.repository.private }}
+      - if: ${{ !github.event.repository.private && github.ref_type == 'tag' }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.push.outputs.name }}
@@ -198,7 +202,7 @@ jobs:
           sbom-path: ${{ steps.push.outputs.sbom-amd64 }}
           push-to-registry: true
           create-storage-record: false
-      - if: ${{ !github.event.repository.private }}
+      - if: ${{ !github.event.repository.private && github.ref_type == 'tag' }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.push.outputs.name }}
@@ -230,11 +234,13 @@ jobs:
           helm package deploy/helm/nix-store-csi --version "$CHART" --app-version "$TAG"
           helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GITHUB_TOKEN"
           digest=$(helm push "nix-store-csi-$CHART.tgz" oci://ghcr.io/kranzes/charts 2>&1 | sed -n 's/^Digest: //p')
+          # Only releases are signed, like the images.
+          [[ "$GITHUB_REF_TYPE" == tag ]] || exit 0
           cosign() { nix shell --inputs-from . nixpkgs#cosign -c cosign "$@"; }
           cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GITHUB_TOKEN"
           cosign sign --yes "ghcr.io/kranzes/charts/nix-store-csi@$digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - if: ${{ !github.event.repository.private }}
+      - if: ${{ !github.event.repository.private && github.ref_type == 'tag' }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ghcr.io/kranzes/charts/nix-store-csi

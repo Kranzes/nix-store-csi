@@ -15,44 +15,6 @@ kubectl logs hello
 A pod stays in `ContainerCreating` until its closure is on the node. Past 90
 seconds, its events show how much has arrived.
 
-## Injecting store paths into manifests
-
-A nixpkgs update often changes store paths, so paths copied into manifests by
-hand go stale. Instead, write a variable like
-`${NIX_STORE_PATH_HELLO}` where a path goes and let Nix fill it in. In a pod
-for one system, that changes two lines:
-
-```yaml
-args: [${NIX_STORE_PATH_HELLO}/bin/hello]
-# ...
-volumeAttributes:
-  storePaths: ${NIX_STORE_PATH_HELLO}
-```
-
-[manifests.nix](../deploy/manifests.nix) fills in the variables. Each name in its
-`storePaths` set becomes a `NIX_STORE_PATH_` variable.
-
-- `unsafeDiscardStringContext` drops the derivation's dependency on the
-  packages, so the build neither builds nor fetches them. The nodes fetch
-  them, so they have to be in a cache the plugin uses.
-- `envsubst` replaces only `NIX_STORE_PATH_` variables. Others in the
-  manifests, like those in a shell script or Nix's own `NIX_PATH`, stay as
-  they are. The build fails on a `NIX_STORE_PATH_` variable that `storePaths`
-  doesn't set.
-- The store paths match the system of the `pkgs` that calls the derivation.
-  Pin pods to that architecture with a `nodeSelector` on
-  `kubernetes.io/arch`, or list store paths for each system as in
-  [Multiple architectures](#multiple-architectures).
-
-CI can build the derivation and commit the result to a branch that Flux or
-Argo CD syncs. The same variables work in Helm values files and other
-text that ends up in a pod spec.
-
-The derivation's `prefetch` output is a values file with the chart's
-`prefetch` value for the same store paths. Apply it in a commit or sync of its
-own, and the manifests once the nodes hold it, as in
-[Prefetching](DEPLOY.md#prefetching).
-
 ## Multiple architectures
 
 One manifest can serve nodes of multiple architectures. Add a
@@ -92,9 +54,47 @@ spec:
 - Two store paths in one list can't have the same name, since they would need
   the same link.
 - The name has the version in it, so `args` changes when the version does. To
-  inject the paths, add a variable for each system, like
-  `HELLO_AMD64 = nixpkgs.legacyPackages.x86_64-linux.hello`, and get the
-  link's name from `hello.name`.
+  [inject the paths](#injecting-store-paths-into-manifests), add a variable for
+  each system, like `HELLO_AMD64 = nixpkgs.legacyPackages.x86_64-linux.hello`,
+  and get the link's name from `hello.name`.
+
+## Injecting store paths into manifests
+
+A nixpkgs update often changes store paths, so paths copied into manifests by
+hand go stale. Instead, write a variable like
+`${NIX_STORE_PATH_HELLO}` where a path goes and let Nix fill it in. In a pod
+for one system, that changes two lines:
+
+```yaml
+args: [${NIX_STORE_PATH_HELLO}/bin/hello]
+# ...
+volumeAttributes:
+  storePaths: ${NIX_STORE_PATH_HELLO}
+```
+
+[manifests.nix](../deploy/manifests.nix) fills in the variables. Each name in its
+`storePaths` set becomes a `NIX_STORE_PATH_` variable.
+
+- `unsafeDiscardStringContext` drops the derivation's dependency on the
+  packages, so the build neither builds nor fetches them. The nodes fetch
+  them, so they have to be in a cache the plugin uses.
+- `envsubst` replaces only `NIX_STORE_PATH_` variables. Others in the
+  manifests, like those in a shell script or Nix's own `NIX_PATH`, stay as
+  they are. The build fails on a `NIX_STORE_PATH_` variable that `storePaths`
+  doesn't set.
+- The store paths match the system of the `pkgs` that calls the derivation.
+  Pin pods to that architecture with a `nodeSelector` on
+  `kubernetes.io/arch`, or list store paths for each system as in
+  [Multiple architectures](#multiple-architectures).
+
+CI can build the derivation and commit the result to a branch that Flux or
+Argo CD syncs. The same variables work in Helm values files and other
+text that ends up in a pod spec.
+
+The derivation's `prefetch` output is a values file with the chart's
+`prefetch` value for the same store paths. Apply it in a commit or sync of its
+own, and the manifests once the nodes hold it, as in
+[Prefetching](DEPLOY.md#prefetching).
 
 ## Multiple programs on `PATH`
 

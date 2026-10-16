@@ -46,15 +46,23 @@ jobs:
             nix run --inputs-from . nixpkgs#nix-eval-jobs -- \
               --flake . --force-recurse --check-cache-status --select '
                 outputs: {
-                  # default duplicates nix-store-csi.
-                  packages = builtins.mapAttrs (_: ps: removeAttrs ps [ "default" ]) outputs.packages;
+                  # default duplicates nix-store-csi. The SBOMs are passthru, so
+                  # they get keys that jq turns into their flake attribute paths.
+                  packages = builtins.mapAttrs (
+                    _: ps:
+                    removeAttrs ps [ "default" ]
+                    // {
+                      "csi-image.sbom" = ps.csi-image.sbom;
+                      "runner-image.sbom" = ps.runner-image.sbom;
+                    }
+                  ) outputs.packages;
                   devShells = builtins.mapAttrs (_: ds: removeAttrs ds [ "default" ]) outputs.devShells;
                   checks = outputs.checks // {
                     # The arm runners have no KVM for the VM test.
                     aarch64-linux = removeAttrs outputs.checks.aarch64-linux [ "nixos-test" ];
                   };
                 }' \
-              | jq -cs 'map({attr, system, isCached})'
+              | jq -cs 'map({attr: (.attrPath | join(".")), system, isCached})'
           )
           echo "derivations=$derivations" >> "$GITHUB_OUTPUT"
 
@@ -163,6 +171,15 @@ jobs:
           cosign sign --yes "ghcr.io/kranzes/$name@$digest"
           echo "name=ghcr.io/kranzes/$name" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          # Each platform's image gets the SBOM of its own build.
+          for platform in amd64:x86_64-linux arm64:aarch64-linux; do
+            arch=${platform%%:*}
+            system=${platform#*:}
+            sbom=$(nix build --print-out-paths ".#packages.$system.$IMAGE.sbom")
+            platform_digest=$(regctl image digest --platform "linux/$arch" "ghcr.io/kranzes/$name:$TAG")
+            echo "sbom-$arch=$sbom" >> "$GITHUB_OUTPUT"
+            echo "digest-$arch=$platform_digest" >> "$GITHUB_OUTPUT"
+          done
       # Pushes with the credentials that `cosign login` wrote. Private repos
       # need GitHub Enterprise Cloud for attestations.
       - if: ${{ !github.event.repository.private }}
@@ -172,6 +189,22 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
           # Storage records need an organization-owned repo.
+          create-storage-record: false
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest-amd64 }}
+          sbom-path: ${{ steps.push.outputs.sbom-amd64 }}
+          push-to-registry: true
+          create-storage-record: false
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest-arm64 }}
+          sbom-path: ${{ steps.push.outputs.sbom-arm64 }}
+          push-to-registry: true
           create-storage-record: false
 
   publish-chart:

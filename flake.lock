@@ -16,6 +16,22 @@
         "type": "github"
       }
     },
+    "bombon": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792061031,
+        "narHash": "sha256-JA3HijUhH7SAmtWh7hUqmgq1r5x9Sew+OD0l2W29Ivs=",
+        "owner": "nikstur",
+        "repo": "bombon",
+        "rev": "88aea1068cb6e939b74655c39f33606a8201922c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nikstur",
+        "repo": "bombon",
+        "type": "github"
+      }
+    },
     "crane": {
       "locked": {
         "lastModified": 1790899423,
@@ -70,6 +86,7 @@
     "root": {
       "inputs": {
         "advisory-db": "advisory-db",
+        "bombon": "bombon",
         "crane": "crane",
         "flake-parts": "flake-parts",
         "nixpkgs": "nixpkgs"

@@ -31,6 +31,12 @@ dockerTools.buildLayeredImage {
   fakeRootCommands = ''
     chown 65534:65534 home/nobody
   '';
+  # The packages extraCommands copies from, for the SBOM.
+  passthru.copiedPaths = [
+    pkgsStatic.tini
+    dockerTools.fakeNss
+    cacert
+  ];
   config = {
     # nixpkgs builds OpenSSL to look in its own store path, which the volume
     # hides, and patches it, GnuTLS, curl and certifi to read NIX_SSL_CERT_FILE.

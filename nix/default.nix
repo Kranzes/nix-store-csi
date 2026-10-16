@@ -3,10 +3,22 @@
   lib,
   crane,
   advisory-db,
+  bombon,
 }:
 
 let
   craneLib = crane.mkLib pkgs;
+  bombonLib = import bombon { inherit pkgs; };
+  # The images copy their contents in, so the SBOM names them as extraPaths.
+  withSbom =
+    extraPaths: image:
+    image.overrideAttrs (
+      finalAttrs: prev: {
+        passthru = prev.passthru // {
+          sbom = bombonLib.buildBom finalAttrs.finalPackage { inherit extraPaths; };
+        };
+      }
+    );
   inherit (lib.importTOML ../rust/Cargo.toml) package;
   inherit (packages.nix-store-csi) commonArgs cargoArtifacts;
   chartSrc = ../deploy/helm/nix-store-csi;
@@ -16,25 +28,42 @@ let
 
     # Linked statically against musl, so the plugin's image needs only the
     # binary and CA certificates.
-    nix-store-csi-static = pkgs.pkgsStatic.callPackage ./package.nix {
-      craneLib = crane.mkLib pkgs.pkgsStatic;
-    };
+    # The vendored SBOM lists the crates in the SBOM of csi-image.
+    nix-store-csi-static =
+      let
+        package = pkgs.pkgsStatic.callPackage ./package.nix {
+          craneLib = crane.mkLib pkgs.pkgsStatic;
+        };
+      in
+      bombonLib.passthruVendoredSbom.rust package { pkgs = pkgs.pkgsStatic; };
 
-    csi-image = pkgs.dockerTools.buildLayeredImage {
-      inherit (package) name;
-      tag = package.version;
-      contents = [ pkgs.dockerTools.caCertificates ];
-      config.Entrypoint = [
-        (lib.getExe packages.nix-store-csi-static)
-        "csi"
-      ];
-    };
+    csi-image =
+      withSbom
+        [
+          packages.nix-store-csi-static
+          pkgs.dockerTools.caCertificates
+        ]
+        (
+          pkgs.dockerTools.buildLayeredImage {
+            inherit (package) name;
+            tag = package.version;
+            contents = [ pkgs.dockerTools.caCertificates ];
+            config.Entrypoint = [
+              (lib.getExe packages.nix-store-csi-static)
+              "csi"
+            ];
+          }
+        );
 
     # Pods run this image with the volume mounted over its empty /nix/store.
-    runner-image = pkgs.callPackage ../deploy/runner-image.nix {
-      name = "${package.name}-runner";
-      tag = package.version;
-    };
+    runner-image =
+      let
+        image = pkgs.callPackage ../deploy/runner-image.nix {
+          name = "${package.name}-runner";
+          tag = package.version;
+        };
+      in
+      withSbom image.copiedPaths image;
 
     chart =
       pkgs.runCommand "${package.name}-chart.tgz" { nativeBuildInputs = [ pkgs.kubernetes-helm ]; }

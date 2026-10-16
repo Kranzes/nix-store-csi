@@ -10,6 +10,10 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
+    bombon = {
+      url = "github:nikstur/bombon";
+      flake = false;
+    };
   };
 
   outputs =

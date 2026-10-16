@@ -18,6 +18,9 @@
   GCS with a token from GKE Workload Identity.
 - The chart's `s3CredentialsSecret` value, a Secret whose keys the plugin gets
   as environment variables, for `s3://` caches that take keys, like R2.
+- CycloneDX SBOMs for the images, built with bombon, as the `sbom` attribute
+  of `csi-image` and `runner-image`. The CSI image's SBOM lists the crates in
+  the binary. CI attests each platform's image with its SBOM.
 
 ## 0.1.4 - 2026-10-15
 

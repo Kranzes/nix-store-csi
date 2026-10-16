@@ -131,8 +131,8 @@ prefetch:
 ```
 
 The chart puts the list in a ConfigMap. Kubelet updates the mounted list
-within about a minute, and the plugin reads it every minute, so a new list
-starts fetching within two minutes, without a restart.
+within about a minute and a half, and the plugin starts fetching a new list
+as soon as it changes, without a restart.
 
 - Garbage collection keeps prefetched closures even when `--ensure-free` needs
   the space, so keep the list small enough to fit next to what pods use.

@@ -9,7 +9,7 @@
     let
       nix = import ./. {
         inherit pkgs lib;
-        inherit (inputs) crane advisory-db;
+        inherit (inputs) crane advisory-db bombon;
       };
     in
     {

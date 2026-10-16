@@ -4,11 +4,14 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
 use harmonia_store_path::StorePath;
+use rustix::fs::inotify;
+use tokio::io::unix::AsyncFd;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
@@ -49,15 +52,25 @@ impl Prefetch {
         }
     }
 
-    /// Reads `dir` every minute and ensures the closure again each time. That
-    /// fetches what a failed sync deleted, and counts as a use, so a closure
-    /// that leaves the list stays for `--keep-recent`.
+    /// Reads `dir` when it changes and every minute, and ensures the closure
+    /// again each time. That fetches what a failed sync deleted, and counts as
+    /// a use, so a closure that leaves the list stays for `--keep-recent`.
     pub async fn run(mut self) {
         let mut ticks = tokio::time::interval(crate::MINUTE);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let dir = self.dir.display().to_string();
+        let unwatched = |e: io::Error| warn!("watching {dir}: {e}; reading it every minute");
+        let mut watch = watch(&self.dir).map_err(unwatched).ok();
         loop {
             tokio::select! {
                 _ = ticks.tick() => self.tick(),
+                changed = changed(watch.as_ref()) => match changed {
+                    Ok(()) => self.tick(),
+                    Err(e) => {
+                        unwatched(e);
+                        watch = None;
+                    }
+                },
                 () = self.finish() => {}
             }
         }
@@ -138,6 +151,36 @@ impl Prefetch {
         roots.sort();
         roots.dedup();
         Ok(Some((revision, roots)))
+    }
+}
+
+/// Watches `dir` for kubelet's rename of `..data`, and for files written or
+/// deleted in a plain directory.
+fn watch(dir: &Path) -> io::Result<AsyncFd<OwnedFd>> {
+    let fd = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC)?;
+    let events = inotify::WatchFlags::MOVED_TO
+        | inotify::WatchFlags::CLOSE_WRITE
+        | inotify::WatchFlags::DELETE;
+    inotify::add_watch(&fd, dir, events)?;
+    AsyncFd::new(fd)
+}
+
+/// Waits for events on `watch`, and discards them.
+async fn changed(watch: Option<&AsyncFd<OwnedFd>>) -> io::Result<()> {
+    let Some(watch) = watch else {
+        return std::future::pending().await;
+    };
+    let mut ready = watch.readable().await?;
+    let mut events = [0; 4096];
+    loop {
+        match rustix::io::read(ready.get_inner(), &mut events) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::AGAIN) => {
+                ready.clear_ready();
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 
@@ -279,6 +322,17 @@ mod tests {
         std::fs::create_dir(&prefetch.dir).unwrap();
         std::fs::write(prefetch.dir.join("storePaths"), A).unwrap();
         assert_eq!(listed(&prefetch), Some(vec![A.to_owned()]));
+    }
+
+    #[tokio::test]
+    async fn wakes_on_kubelets_updates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let watch = watch(tmp.path()).unwrap();
+        let changed = || tokio::time::timeout(Duration::from_secs(5), changed(Some(&watch)));
+        update(tmp.path(), "1", &[("storePaths", A)]);
+        changed().await.unwrap().unwrap();
+        std::fs::write(tmp.path().join("revision"), "r1").unwrap();
+        changed().await.unwrap().unwrap();
     }
 
     #[tokio::test]

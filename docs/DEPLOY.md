@@ -64,12 +64,16 @@ helm upgrade --install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi 
 ### S3
 
 An `s3://` substituter reads a bucket like Nix's S3 store does, with its
-`region`, `endpoint` and `addressing-style` settings. The plugin takes its
-credentials from EKS Pod Identity, IRSA, the keys in `s3CredentialsSecret`, or
-the node's instance role. With Pod Identity, give the plugin's ServiceAccount,
-which the chart names after the release, a role that can `s3:GetObject` on
-the bucket. Without `s3:ListBucket`, S3 answers 403 for a missing file, which
-the plugin treats like a 404.
+`region`, `endpoint` and `addressing-style` settings. The services below
+differ in those settings and in where the plugin gets credentials.
+
+#### AWS
+
+The plugin takes its credentials from EKS Pod Identity, IRSA, the keys in
+`s3CredentialsSecret`, or the node's instance role. With Pod Identity, give the
+plugin's ServiceAccount, which the chart names after the release, a role that
+can `s3:GetObject` on the bucket. Without `s3:ListBucket`, S3 answers 403 for a
+missing file, which the plugin treats like a 404.
 
 ```yaml
 # values.yaml
@@ -85,11 +89,11 @@ trustedPublicKeys:
 
 For GCS, set `endpoint` to `https://storage.googleapis.com`. Without keys in
 `s3CredentialsSecret`, the plugin reads the bucket with a token from GKE
-Workload Identity. Grant `roles/storage.objectViewer` on the bucket to the plugin's
-ServiceAccount, as the principal
-`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/kube-system/sa/nix-store-csi`.
-Workload Identity doesn't serve pods on the host network, so `hostNetwork`
-must stay `false`.
+Workload Identity. Grant `roles/storage.objectViewer` on the bucket to the
+plugin's ServiceAccount, as the principal
+`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/<namespace>/sa/<release>`,
+since the chart names the ServiceAccount after the release. Workload Identity
+doesn't serve pods on the host network, so `hostNetwork` must stay `false`.
 
 ```yaml
 # values.yaml

@@ -307,7 +307,7 @@ impl Store {
         .with_context(|| format!("fetching {} from {name}", info.url))?;
 
         let unpacked = part.path().join(&base);
-        let unsynced = self.caches.local_unsynced(info.path());
+        let unsynced = self.narinfos.unsynced(info.path());
         let text = info.to_text();
         let dest = self.unpacked(info.path());
         (self.unsynced.lock().unwrap()).insert(info.path().clone(), failed_syncs);
@@ -709,7 +709,7 @@ mod tests {
         let store = reopen(store, || config(&dir, &cache, &state)).await;
         let mut info = fixture_narinfo(&dir, "cache-zstd", &hello);
         info.check_signatures(&[]);
-        let stored = std::fs::read(store.caches.local_narinfo(&hello)).unwrap();
+        let stored = std::fs::read(store.narinfos.synced(&hello)).unwrap();
         assert_eq!(stored, info.to_text());
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
     }
@@ -913,7 +913,7 @@ mod tests {
             .unwrap();
         settled(&store).await;
         assert_eq!(count(store.dir()), paths.len());
-        let narinfo = std::fs::read_to_string(store.caches.local_narinfo(&hello)).unwrap();
+        let narinfo = std::fs::read_to_string(store.narinfos.synced(&hello)).unwrap();
         assert!(narinfo.contains("Compression: zstd"), "{narinfo}");
         assert_eq!(count(state.join("tmp")), 0);
     }

@@ -4,6 +4,7 @@
 mod fetch;
 mod fs;
 mod gc;
+mod narinfos;
 mod sandbox;
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -27,13 +28,14 @@ use self::fetch::Fetch;
 use self::fs::{Scratch, remove_file, remove_tree};
 use self::gc::Space;
 use self::sandbox::Sandbox;
-use crate::closure::{self, Caches};
+use crate::closure::Caches;
 use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 use crate::store_path;
 
 pub use self::fetch::{Ensuring, TooBig};
 pub use self::gc::{EnsureFree, Excess, parse_ensure_free, parse_size};
+pub use self::narinfos::Narinfos;
 pub use self::views::{Usage, check_volume, root_links};
 
 /// The kernel's id for the current boot, which a reboot changes.
@@ -57,6 +59,7 @@ pub struct Config {
 
 pub struct Store {
     caches: Caches,
+    narinfos: Narinfos,
     dir: PathBuf,
     views: PathBuf,
     volumes: PathBuf,
@@ -165,6 +168,7 @@ impl Store {
         for d in [&dir, &narinfos, &views, &volumes, &tmp] {
             std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
         }
+        let narinfos = Narinfos::new(narinfos);
         let dir_fd =
             std::fs::File::open(&dir).with_context(|| format!("opening {}", dir.display()))?;
         let store = Self {
@@ -172,9 +176,10 @@ impl Store {
                 &config.stores,
                 StoreDir::default(),
                 config.trusted_keys,
-                narinfos,
+                narinfos.clone(),
                 config.netrc_file.as_deref(),
             )?,
+            narinfos,
             dir,
             views,
             volumes,
@@ -260,14 +265,14 @@ impl Store {
             .inspect_err(|e| warn!("syncing the node store: {e}"))
             .is_ok();
         let synced = same_boot && !self.failed_record.exists() && flushed;
-        let narinfos = self.caches.local_dir();
+        let narinfos = self.narinfos.dir();
         let mut durable = HashSet::new();
         let mut unsynced = Vec::new();
         for entry in std::fs::read_dir(narinfos)
             .with_context(|| format!("reading {}", narinfos.display()))?
         {
             let entry = entry?;
-            match closure::local_name(&entry.file_name()) {
+            match narinfos::parse_name(&entry.file_name()) {
                 Some((path, true)) => {
                     durable.insert(path);
                 }
@@ -278,10 +283,10 @@ impl Store {
         }
         let (mut kept, mut dropped) = (0, 0);
         for path in unsynced {
-            let file = self.caches.local_unsynced(&path);
+            let file = self.narinfos.unsynced(&path);
             // A fetch writes the narinfo before it moves the path in.
             if synced && self.present(&path) {
-                std::fs::rename(&file, self.caches.local_narinfo(&path))
+                std::fs::rename(&file, self.narinfos.synced(&path))
                     .with_context(|| format!("renaming {}", file.display()))?;
                 durable.insert(path);
                 kept += 1;
@@ -439,8 +444,8 @@ impl Store {
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
             for (path, _) in &batch {
-                let file = this.caches.local_unsynced(path);
-                let narinfo = this.caches.local_narinfo(path);
+                let file = this.narinfos.unsynced(path);
+                let narinfo = this.narinfos.synced(path);
                 match std::fs::rename(&file, &narinfo) {
                     // An earlier sync renamed it but failed before it
                     // removed the mark.
@@ -448,7 +453,7 @@ impl Store {
                     result => result.with_context(|| format!("renaming {}", file.display()))?,
                 }
             }
-            sync_dir(this.caches.local_dir())?;
+            sync_dir(this.narinfos.dir())?;
             let mut unsynced = this.unsynced.lock().unwrap();
             for (path, _) in &batch {
                 unsynced.remove(path);
@@ -526,7 +531,7 @@ impl Store {
             last_modification: now,
         };
         for path in paths {
-            for file in self.caches.local_files(path) {
+            for file in self.narinfos.files(path) {
                 match utimensat(CWD, &file, &times, AtFlags::empty()) {
                     Ok(()) => break,
                     Err(rustix::io::Errno::NOENT) => {}
@@ -541,12 +546,12 @@ impl Store {
 
     /// Deletes the narinfo of `path`, under either name.
     fn remove_narinfo(&self, path: &StorePath) -> anyhow::Result<()> {
-        (self.caches.local_files(path).iter()).try_for_each(|file| remove_file(file))
+        (self.narinfos.files(path).iter()).try_for_each(|file| remove_file(file))
     }
 
     /// Returns when [`Store::touch`] last recorded a use of `path`.
     fn last_use(&self, path: &StorePath) -> SystemTime {
-        (self.caches.local_files(path).iter())
+        (self.narinfos.files(path).iter())
             .find_map(|file| std::fs::metadata(file).and_then(|m| m.modified()).ok())
             .unwrap_or(SystemTime::UNIX_EPOCH)
     }
@@ -657,12 +662,12 @@ mod tests {
             return;
         };
         let ghost = ghost();
-        let ghost_file = store.caches.local_unsynced(&ghost);
+        let ghost_file = store.narinfos.unsynced(&ghost);
         std::fs::write(&ghost_file, "").unwrap();
         store.unsynced.lock().unwrap().insert(ghost.clone(), 0);
         unsync(&store, &hello);
         store.sync(&hello).await.unwrap();
-        assert!(store.caches.local_narinfo(&hello).exists());
+        assert!(store.narinfos.synced(&hello).exists());
         assert!(ghost_file.exists());
         let marked = store.unsynced.lock().unwrap().clone();
         assert_eq!(marked, [(ghost, 0)].into());
@@ -688,7 +693,7 @@ mod tests {
         store.sync(&hello).await.unwrap();
         for path in [&hello, renamed] {
             assert!(!store.present(path));
-            assert!(store.caches.local_files(path).iter().all(|f| !f.exists()));
+            assert!(store.narinfos.files(path).iter().all(|f| !f.exists()));
         }
         assert!(store.unsynced.lock().unwrap().is_empty());
 
@@ -747,7 +752,7 @@ mod tests {
         };
         unsync(&store, &hello);
         store.sync_all().await.unwrap();
-        assert!(store.caches.local_narinfo(&hello).exists());
+        assert!(store.narinfos.synced(&hello).exists());
         assert!(store.unsynced.lock().unwrap().is_empty());
         store.failed_syncs.store(1, Ordering::SeqCst);
         assert!(store.sync_all().await.is_err());
@@ -771,9 +776,9 @@ mod tests {
         // A crash after writing a narinfo and before moving its path in
         // leaves this.
         let ghost = ghost();
-        std::fs::write(store.caches.local_unsynced(&ghost), "").unwrap();
+        std::fs::write(store.narinfos.unsynced(&ghost), "").unwrap();
         // Start-up deletes a path with no narinfo in any case.
-        remove_file(&store.caches.local_narinfo(&others[2])).unwrap();
+        remove_file(&store.narinfos.synced(&others[2])).unwrap();
         // It also deletes a temporary file that a crash left half written.
         std::fs::write(narinfos.join(".tmpAbC123"), "").unwrap();
 

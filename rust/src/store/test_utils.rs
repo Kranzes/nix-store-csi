@@ -104,7 +104,7 @@ pub(super) async fn reopen(store: Arc<Store>, config: impl Fn() -> Config) -> Ar
 pub(super) fn age(store: &Store, paths: &[StorePath], days: u64) {
     let old = SystemTime::now() - Duration::from_hours(24 * days);
     for path in paths {
-        let file = (store.caches.local_files(path).iter())
+        let file = (store.narinfos.files(path).iter())
             .find_map(|file| std::fs::File::open(file).ok())
             .unwrap();
         file.set_modified(old).unwrap();
@@ -113,8 +113,8 @@ pub(super) fn age(store: &Store, paths: &[StorePath], days: u64) {
 
 /// Puts `path` back as its fetch left it, before its sync.
 pub(super) fn unsync(store: &Store, path: &StorePath) {
-    let narinfo = store.caches.local_narinfo(path);
-    std::fs::rename(narinfo, store.caches.local_unsynced(path)).unwrap();
+    let narinfo = store.narinfos.synced(path);
+    std::fs::rename(narinfo, store.narinfos.unsynced(path)).unwrap();
     store.unsynced.lock().unwrap().insert(path.clone(), 0);
 }
 

@@ -10,9 +10,8 @@ use harmonia_store_path::StorePath;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::closure;
-
 use super::fs::{Scratch, count_inodes, remove_file};
+use super::narinfos;
 use super::{Store, list_store_paths};
 
 impl Store {
@@ -162,14 +161,14 @@ impl Store {
         // A crash can leave a narinfo without its path. A fetch marks its path
         // unsynced before writing the narinfo, so with `unsynced` locked, an
         // unmarked narinfo without its path is safe to delete.
-        let narinfos = self.caches.local_dir();
+        let narinfos = self.narinfos.dir();
         for entry in std::fs::read_dir(narinfos)
             .with_context(|| format!("reading {}", narinfos.display()))?
         {
             let entry = entry?;
             // Any other name is the temporary file of a narinfo being
             // written. Start-up deletes the ones a crash left.
-            let Some((path, _)) = closure::local_name(&entry.file_name()) else {
+            let Some((path, _)) = narinfos::parse_name(&entry.file_name()) else {
                 continue;
             };
             if in_use.contains(&path) {
@@ -613,12 +612,12 @@ mod tests {
 
         // Collection deletes narinfos without their paths once they're old.
         let ghost = ghost();
-        for file in store.caches.local_files(&ghost) {
+        for file in store.narinfos.files(&ghost) {
             std::fs::write(file, "").unwrap();
         }
         assert_eq!(store.collect(UNBOUND, day, NONE).await.unwrap(), 0);
         assert_eq!(count(&narinfos), 2);
-        for file in store.caches.local_files(&ghost) {
+        for file in store.narinfos.files(&ghost) {
             let old = SystemTime::now() - 2 * day;
             std::fs::File::open(file)
                 .unwrap()

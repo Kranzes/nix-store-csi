@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::OsStr;
 use std::fmt::{Display, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +15,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use crate::narinfo::{NarInfo, PublicKey};
+use crate::store::Narinfos;
 use crate::transport::{self, Transport};
 
 /// Nix's priority for a cache whose `nix-cache-info` sets none.
@@ -27,22 +27,6 @@ const LOOKUPS: usize = 32;
 /// How long a cache is skipped after a request to it fails.
 const PAUSE: Duration = Duration::from_mins(1);
 
-/// The suffix of a narinfo in the node store whose path isn't durable yet. A
-/// durable path's narinfo ends in `.narinfo` instead. Both suffixes fit in a
-/// file name for the longest store paths.
-const UNSYNCED: &str = ".unsynced";
-
-/// The store path whose narinfo the node store keeps in file `name`, and
-/// whether the path is durable.
-pub fn local_name(name: &OsStr) -> Option<(StorePath, bool)> {
-    let name = name.to_str()?;
-    let (base, durable) = match name.strip_suffix(".narinfo") {
-        Some(base) => (base, true),
-        None => (name.strip_suffix(UNSYNCED)?, false),
-    };
-    Some((StorePath::from_base_path(base).ok()?, durable))
-}
-
 pub struct Caches {
     /// In the order given.
     list: Vec<Arc<Cache>>,
@@ -50,7 +34,7 @@ pub struct Caches {
     trusted_keys: Option<Vec<PublicKey>>,
     /// The directory with the narinfos of the paths in the node store. The
     /// node store comes before any cache.
-    local: PathBuf,
+    local: Narinfos,
 }
 
 struct Cache {
@@ -80,7 +64,7 @@ impl Caches {
         urls: &[String],
         store_dir: StoreDir,
         trusted_keys: Option<Vec<PublicKey>>,
-        local: PathBuf,
+        local: Narinfos,
         netrc: Option<&Path>,
     ) -> anyhow::Result<Self> {
         let list = urls
@@ -148,29 +132,6 @@ impl Caches {
                 (cache.name.to_string(), unopened || failed)
             })
             .collect()
-    }
-
-    pub fn local_dir(&self) -> &Path {
-        &self.local
-    }
-
-    /// Where the node store keeps the narinfo of `path`, once the path is
-    /// durable.
-    pub fn local_narinfo(&self, path: &StorePath) -> PathBuf {
-        self.local.join(format!("{path}.narinfo"))
-    }
-
-    /// Where the node store keeps the narinfo of `path` until the path is
-    /// durable.
-    pub fn local_unsynced(&self, path: &StorePath) -> PathBuf {
-        self.local.join(format!("{path}{UNSYNCED}"))
-    }
-
-    /// The files that may hold the node store's narinfo of `path`. A sync
-    /// renames the first to the second, so trying them in this order can't
-    /// miss both.
-    pub fn local_files(&self, path: &StorePath) -> [PathBuf; 2] {
-        [self.local_unsynced(path), self.local_narinfo(path)]
     }
 
     /// Waits for each cache's first read of `nix-cache-info`, then groups the
@@ -305,7 +266,7 @@ impl Caches {
     /// when it fetched the path, so a change of trusted keys only affects new
     /// paths. A blocking read is fine, since the file is small.
     pub fn local_info(&self, path: &StorePath) -> anyhow::Result<Option<NarInfo>> {
-        for file in self.local_files(path) {
+        for file in self.local.files(path) {
             match std::fs::read(&file) {
                 Ok(text) => return self.parse(text, path, file.display()).map(Some),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -513,7 +474,14 @@ mod tests {
 
     fn with_local(stores: &[String], trusted_key: Option<&str>, local: &Path) -> Caches {
         let keys = trusted_key.map(|k| vec![k.parse().unwrap()]);
-        Caches::new(stores, StoreDir::default(), keys, local.to_owned(), None).unwrap()
+        Caches::new(
+            stores,
+            StoreDir::default(),
+            keys,
+            Narinfos::new(local.to_owned()),
+            None,
+        )
+        .unwrap()
     }
 
     async fn resolve_err(caches: &Caches, roots: &[StorePath]) -> String {
@@ -569,15 +537,18 @@ mod tests {
         let roots = [fixture_root(&dir, "hello.path")];
         let local = tempfile::tempdir().unwrap();
         // No caches. The node store's narinfos need no trusted signature.
-        let only_local = with_local(&[], Some(NIXOS_KEY), local.path());
+        let narinfos = Narinfos::new(local.path().to_owned());
         for (file, _, info) in fixture_narinfos(&dir, "cache-none") {
-            std::fs::copy(file, only_local.local_narinfo(info.path())).unwrap();
+            std::fs::copy(file, narinfos.synced(info.path())).unwrap();
         }
         // A path that isn't synced yet counts too.
         let glibc = fixture_path(&dir, "glibc");
-        let unsynced = only_local.local_unsynced(&glibc);
-        std::fs::rename(only_local.local_narinfo(&glibc), &unsynced).unwrap();
-        let closure = only_local.resolve(&roots).await.unwrap();
+        let unsynced = narinfos.unsynced(&glibc);
+        std::fs::rename(narinfos.synced(&glibc), &unsynced).unwrap();
+        let closure = with_local(&[], Some(NIXOS_KEY), local.path())
+            .resolve(&roots)
+            .await
+            .unwrap();
         assert_eq!(closure.len(), 5);
         assert_eq!(sources(&closure), [None].into());
 
@@ -598,36 +569,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(from_cache.cache, Some(0));
-    }
-
-    #[test]
-    fn names_local_narinfos() {
-        let name = format!("{}-hello-2.12.3", "0".repeat(32));
-        let path = StorePath::from_base_path(&name).unwrap();
-        for (file, want) in [
-            (format!("{name}.narinfo"), Some((path.clone(), true))),
-            (format!("{name}.unsynced"), Some((path, false))),
-            (name.clone(), None),
-            // The last suffix decides, so a name that ends in `.narinfo` works.
-            (
-                format!("{name}.narinfo.unsynced"),
-                Some((
-                    StorePath::from_base_path(&format!("{name}.narinfo")).unwrap(),
-                    false,
-                )),
-            ),
-        ] {
-            assert_eq!(local_name(OsStr::new(&file)), want, "{file}");
-        }
-
-        // Store path names are at most 211 bytes, and file names 255.
-        let longest = format!("{}-{}", "0".repeat(32), "a".repeat(211));
-        let path = StorePath::from_base_path(&longest).unwrap();
-        for file in caches(&[], None).local_files(&path) {
-            let name = file.file_name().unwrap();
-            assert!(name.len() <= 255, "{}", name.len());
-            assert_eq!(local_name(name).unwrap().0, path);
-        }
     }
 
     #[tokio::test]

@@ -238,6 +238,7 @@ mod tests {
             netrc_file: None,
             // Every closure is over it, and prefetches have no limit.
             max_closure_size: Some(1),
+            ensure_free: crate::store::EnsureFree::Bytes(0),
         });
         Prefetch::new(Arc::new(store.unwrap()), dir.to_owned())
     }
@@ -348,7 +349,7 @@ mod tests {
         std::fs::write(dir.join("revision"), "r1").unwrap();
         let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
         let volume = || store.ensure(std::slice::from_ref(&hello));
-        let registry = crate::metrics::registry(&store, crate::store::EnsureFree::Bytes(0));
+        let registry = crate::metrics::registry(&store);
         let gauge = |revision: &str| {
             let name = format!("nix_store_csi_prefetched{{revision=\"{revision}\"}}");
             sample(&registry, &name)

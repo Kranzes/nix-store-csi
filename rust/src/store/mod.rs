@@ -55,6 +55,8 @@ pub struct Config {
     pub netrc_file: Option<PathBuf>,
     /// The limit of [`Store::ensure`].
     pub max_closure_size: Option<u64>,
+    /// The free space that collection keeps.
+    pub ensure_free: EnsureFree,
 }
 
 pub struct Store {
@@ -81,6 +83,7 @@ pub struct Store {
     jobs: Semaphore,
     max_jobs: usize,
     max_closure_size: Option<u64>,
+    ensure_free: EnsureFree,
     /// Paths whose narinfos wait for a sync to get their final names, each
     /// with the number of failed syncs when its fetch began writing it. A
     /// fetch adds its path before it writes the narinfo, and collection
@@ -192,6 +195,7 @@ impl Store {
             jobs: Semaphore::new(config.jobs),
             max_jobs: config.jobs,
             max_closure_size: config.max_closure_size,
+            ensure_free: config.ensure_free,
             unsynced: Mutex::default(),
             failed_syncs: AtomicU64::default(),
             failed_record: state.join("sync-failed"),
@@ -222,7 +226,7 @@ impl Store {
         &self.metrics
     }
 
-    pub fn gauges(&self, ensure_free: EnsureFree) -> Gauges {
+    pub fn gauges(&self) -> Gauges {
         let entries = |dir: &Path| {
             (std::fs::read_dir(dir).map(Iterator::count))
                 .inspect_err(|e| warn!("reading {}: {e}", dir.display()))
@@ -234,7 +238,7 @@ impl Store {
         let space = (Space::of(&self.dir))
             .inspect_err(|e| warn!("measuring the node store's filesystem: {e}"))
             .ok();
-        let target = space.map(|space| gc::target(space, ensure_free));
+        let target = space.map(|space| gc::target(space, self.ensure_free));
         let limits_inodes = space.is_some_and(|space| space.inodes > 0);
         Gauges {
             store_paths: entries(&self.dir),
@@ -636,6 +640,7 @@ mod tests {
             jobs: 1,
             netrc_file: None,
             max_closure_size: None,
+            ensure_free: EnsureFree::Bytes(0),
         };
         let new = tmp.path().join("new");
         drop(Store::new(config(&new)).unwrap());

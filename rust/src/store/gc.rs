@@ -60,9 +60,9 @@ impl Store {
     }
 
     /// Returns how many bytes and inodes to free for the store's filesystem
-    /// to have `ensure_free` available.
-    pub fn excess(&self, ensure_free: EnsureFree) -> io::Result<Excess> {
-        Ok(excess(Space::of(&self.dir)?, ensure_free))
+    /// to have `--ensure-free` available.
+    pub fn excess(&self) -> io::Result<Excess> {
+        Ok(excess(Space::of(&self.dir)?, self.ensure_free))
     }
 
     /// Runs `f` with no publish or unpublish under way. Returns the result of
@@ -375,12 +375,12 @@ mod tests {
         age(&store, &paths, 2);
         assert_eq!(store.collect(bound, day, NONE).await.unwrap(), 4);
         let deleted = sample(
-            &crate::metrics::registry(&store, EnsureFree::Bytes(0)),
+            &crate::metrics::registry(&store),
             "nix_store_csi_gc_deleted_paths_total",
         );
         assert_eq!(deleted, Some(4.0));
         let size = sample(
-            &crate::metrics::registry(&store, EnsureFree::Bytes(0)),
+            &crate::metrics::registry(&store),
             "nix_store_csi_store_size_bytes",
         );
         #[allow(clippy::cast_precision_loss)]

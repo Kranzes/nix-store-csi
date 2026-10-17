@@ -218,11 +218,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if stores.is_empty() {
         bail!("no substituters given");
     }
-    let max_closure_size = match cli.command {
+    let (max_closure_size, ensure_free) = match cli.command {
         Command::Csi {
-            max_closure_size, ..
-        } => max_closure_size,
-        Command::Unpack { .. } => None,
+            max_closure_size,
+            ensure_free,
+            ..
+        } => (max_closure_size, ensure_free),
+        Command::Unpack { .. } => (None, EnsureFree::Bytes(0)),
     };
     let store = Arc::new(Store::new(Config {
         stores,
@@ -231,6 +233,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         jobs: cli.max_substitution_jobs.get(),
         netrc_file: cli.netrc_file,
         max_closure_size,
+        ensure_free,
     })?);
 
     match cli.command {
@@ -245,7 +248,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             node_id,
             keep_recent,
-            ensure_free,
             metrics_address,
             prefetch_dir,
             ..
@@ -257,12 +259,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .with_context(|| format!("listening on {address} for metrics"))?;
                 let address = listener.local_addr()?;
                 info!("serving metrics on http://{address}/metrics");
-                tokio::spawn(metrics::serve(
-                    listener,
-                    metrics::registry(&store, ensure_free),
-                ));
+                tokio::spawn(metrics::serve(listener, metrics::registry(&store)));
             }
-            tokio::spawn(collect_garbage(store.clone(), keep_recent, ensure_free));
+            tokio::spawn(collect_garbage(store.clone(), keep_recent));
             if let Some(dir) = prefetch_dir {
                 tokio::spawn(prefetch::Prefetch::new(store.clone(), dir).run());
             }
@@ -311,9 +310,9 @@ fn raise_open_files_limit() {
 }
 
 /// Collects every 10 minutes, and also every minute while free space or
-/// inodes are below `ensure_free`. If a collection deletes nothing while they
+/// inodes are below `--ensure-free`. If a collection deletes nothing while they
 /// are short, the per-minute collections wait for the next 10-minute one.
-async fn collect_garbage(store: Arc<Store>, keep_recent: Duration, ensure_free: EnsureFree) {
+async fn collect_garbage(store: Arc<Store>, keep_recent: Duration) {
     // `run` prunes the views right before serving, so the first tick waits a
     // full period.
     let every = |period| {
@@ -325,7 +324,7 @@ async fn collect_garbage(store: Arc<Store>, keep_recent: Duration, ensure_free: 
     let mut futile = false;
     loop {
         let measure = || {
-            store.excess(ensure_free).unwrap_or_else(|e| {
+            store.excess().unwrap_or_else(|e| {
                 warn!("measuring the node store's filesystem: {e}");
                 Excess::default()
             })

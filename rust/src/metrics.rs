@@ -23,7 +23,7 @@ use prometheus_client::registry::{Registry, Unit};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
-use crate::store::{EnsureFree, Store};
+use crate::store::Store;
 
 const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
 
@@ -289,7 +289,6 @@ fn grpc_code_name(code: tonic::Code) -> &'static str {
 /// Reads gauges from the store at each scrape.
 struct StoreGauges {
     store: Arc<Store>,
-    ensure_free: EnsureFree,
 }
 
 impl fmt::Debug for StoreGauges {
@@ -300,7 +299,7 @@ impl fmt::Debug for StoreGauges {
 
 impl Collector for StoreGauges {
     fn encode(&self, mut encoder: DescriptorEncoder) -> fmt::Result {
-        let gauges = self.store.gauges(self.ensure_free);
+        let gauges = self.store.gauges();
         let mut gauge = |name, help, unit, value: Option<u64>| {
             let Some(value) = value else { return Ok(()) };
             let value = i64::try_from(value).unwrap_or(i64::MAX);
@@ -387,8 +386,8 @@ impl Collector for StoreGauges {
 }
 
 /// The registry that `/metrics` encodes, with every metric under
-/// `nix_store_csi_`. The gauges compare free space with `ensure_free`.
-pub fn registry(store: &Arc<Store>, ensure_free: EnsureFree) -> Registry {
+/// `nix_store_csi_`.
+pub fn registry(store: &Arc<Store>) -> Registry {
     let mut registry = Registry::with_prefix("nix_store_csi");
     store.metrics().register(&mut registry);
     registry.register(
@@ -400,7 +399,6 @@ pub fn registry(store: &Arc<Store>, ensure_free: EnsureFree) -> Registry {
     );
     registry.register_collector(Box::new(StoreGauges {
         store: store.clone(),
-        ensure_free,
     }));
     registry
 }

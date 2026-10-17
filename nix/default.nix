@@ -7,7 +7,12 @@
 }:
 
 let
-  craneLib = crane.mkLib pkgs;
+  craneLibFor =
+    pkgs:
+    (crane.mkLib pkgs).overrideScope (
+      _: _: { stdenvSelector = p: p.stdenvAdapters.useMoldLinker p.stdenv; }
+    );
+  craneLib = craneLibFor pkgs;
   bombonLib = import bombon { inherit pkgs; };
   # The images copy their contents in, so the SBOM names them as extraPaths.
   withSbom =
@@ -37,7 +42,7 @@ let
     nix-store-csi-static =
       let
         package = pkgs.pkgsStatic.callPackage ./package.nix {
-          craneLib = crane.mkLib pkgs.pkgsStatic;
+          craneLib = craneLibFor pkgs.pkgsStatic;
         };
       in
       bombonLib.passthruVendoredSbom.rust package { pkgs = pkgs.pkgsStatic; };
@@ -81,7 +86,7 @@ in
 rec {
   inherit packages;
 
-  devShells.nix-store-csi = pkgs.mkShell {
+  devShells.nix-store-csi = pkgs.mkShell.override { stdenv = craneLib.stdenvSelector pkgs; } {
     inherit (package) name;
     inputsFrom = [ packages.nix-store-csi ];
     env = {

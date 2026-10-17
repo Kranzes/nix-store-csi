@@ -534,8 +534,7 @@ mod tests {
             return;
         };
         let hello = fixture_root(&dir, "hello.path");
-        let store =
-            Arc::new(Store::new(config(&dir, &dir.join("cache-zstd"), tmp.path())).unwrap());
+        let store = Arc::new(Store::new(zstd_config(&dir, tmp.path())).unwrap());
         let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
         let turn = store.syncing.lock().await;
         let paths = store
@@ -613,7 +612,7 @@ mod tests {
         assert_eq!(count(&narinfos), 0);
 
         // Collection deletes narinfos without their paths once they're old.
-        let ghost = StorePath::from_base_path(&format!("{}-ghost-1", "0".repeat(32))).unwrap();
+        let ghost = ghost();
         for file in store.caches.local_files(&ghost) {
             std::fs::write(file, "").unwrap();
         }

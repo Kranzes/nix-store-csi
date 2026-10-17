@@ -568,20 +568,16 @@ mod tests {
         let Some(dir) = fixtures() else { return };
         let roots = [fixture_root(&dir, "hello.path")];
         let local = tempfile::tempdir().unwrap();
+        // No caches. The node store's narinfos need no trusted signature.
+        let only_local = with_local(&[], Some(NIXOS_KEY), local.path());
         for (file, _, info) in fixture_narinfos(&dir, "cache-none") {
-            let local = local.path().join(format!("{}.narinfo", info.path()));
-            std::fs::copy(file, local).unwrap();
+            std::fs::copy(file, only_local.local_narinfo(info.path())).unwrap();
         }
         // A path that isn't synced yet counts too.
         let glibc = fixture_path(&dir, "glibc");
-        let narinfo = local.path().join(format!("{glibc}.narinfo"));
-        let unsynced = local.path().join(format!("{glibc}.unsynced"));
-        std::fs::rename(&narinfo, &unsynced).unwrap();
-        // No caches. The node store's narinfos need no trusted signature.
-        let closure = with_local(&[], Some(NIXOS_KEY), local.path())
-            .resolve(&roots)
-            .await
-            .unwrap();
+        let unsynced = only_local.local_unsynced(&glibc);
+        std::fs::rename(only_local.local_narinfo(&glibc), &unsynced).unwrap();
+        let closure = only_local.resolve(&roots).await.unwrap();
         assert_eq!(closure.len(), 5);
         assert_eq!(sources(&closure), [None].into());
 

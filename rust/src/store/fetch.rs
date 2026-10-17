@@ -18,6 +18,7 @@ use harmonia_utils_hash::{Algorithm, Hash};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::bytes::Bytes;
 use tokio_util::io::{InspectReader, ReaderStream, StreamReader};
 use tracing::{info, warn};
 
@@ -506,16 +507,7 @@ async fn unpack_nar(
 /// read it, since the transport may read credentials and resume the
 /// download.
 fn relay(body: impl AsyncRead + Send + Unpin + 'static) -> impl AsyncBufRead + Send + Unpin {
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    tokio::spawn(async move {
-        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(body, 256 * 1024));
-        while let Some(chunk) = chunks.next().await {
-            if tx.send(chunk).await.is_err() {
-                break;
-            }
-        }
-    });
-    StreamReader::new(ReceiverStream::new(rx))
+    pump(body, None)
 }
 
 /// Reads `decoded` in one task and hashes it in another, so decompression,
@@ -529,8 +521,7 @@ fn decode_apart(
     impl AsyncBufRead + Send + Unpin,
     tokio::task::JoinHandle<Hash>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    let (to_hash, mut hashing) = tokio::sync::mpsc::channel::<tokio_util::bytes::Bytes>(4);
+    let (to_hash, mut hashing) = tokio::sync::mpsc::channel::<Bytes>(4);
     let hashed = tokio::spawn(async move {
         let mut hasher = harmonia_utils_hash::Context::new(Algorithm::SHA256);
         while let Some(chunk) = hashing.recv().await {
@@ -538,11 +529,21 @@ fn decode_apart(
         }
         hasher.finish()
     });
+    (pump(decoded, Some(to_hash)), hashed)
+}
+
+/// Reads `src` in a task, and sends each chunk to the returned reader and to
+/// `tee`.
+fn pump(
+    src: impl AsyncRead + Send + 'static,
+    tee: Option<tokio::sync::mpsc::Sender<Bytes>>,
+) -> impl AsyncBufRead + Send + Unpin {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
-        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(decoded, 256 * 1024));
+        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(src, 256 * 1024));
         while let Some(chunk) = chunks.next().await {
-            if let Ok(chunk) = &chunk
-                && to_hash.send(chunk.clone()).await.is_err()
+            if let (Some(tee), Ok(chunk)) = (&tee, &chunk)
+                && tee.send(chunk.clone()).await.is_err()
             {
                 break;
             }
@@ -551,8 +552,7 @@ fn decode_apart(
             }
         }
     });
-    let body = StreamReader::new(ReceiverStream::new(rx));
-    (body, hashed)
+    StreamReader::new(ReceiverStream::new(rx))
 }
 
 #[cfg(test)]
@@ -707,7 +707,7 @@ mod tests {
         // A new instance needs no cache for the paths it has.
         std::fs::remove_dir_all(&cache).unwrap();
         let store = reopen(store, || config(&dir, &cache, &state)).await;
-        let (_, _, mut info) = fixture_narinfo(&dir, "cache-zstd", &hello);
+        let mut info = fixture_narinfo(&dir, "cache-zstd", &hello);
         info.check_signatures(&[]);
         let stored = std::fs::read(store.caches.local_narinfo(&hello)).unwrap();
         assert_eq!(stored, info.to_text());
@@ -724,7 +724,7 @@ mod tests {
         let tmp = scratch();
         let hello = fixture_root(&dir, "hello.path");
         let limited = |limit| {
-            let mut config = config(&dir, &dir.join("cache-zstd"), tmp.path());
+            let mut config = zstd_config(&dir, tmp.path());
             config.max_closure_size = Some(limit);
             config
         };
@@ -750,7 +750,7 @@ mod tests {
         resolved(&glibc).await;
         let err = ensure(&store).done().await.unwrap_err();
         let too_big: &TooBig = err.downcast_ref().unwrap();
-        let (_, _, info) = fixture_narinfo(&dir, "cache-zstd", &hello);
+        let info = fixture_narinfo(&dir, "cache-zstd", &hello);
         assert_eq!((too_big.size, too_big.counted), (size, info.nar_size()));
         assert!(format!("{err:#}").contains("without prefetched store paths"));
         drop((jobs, glibc));
@@ -821,8 +821,7 @@ mod tests {
         let tmp = scratch();
         let hello = fixture_root(&dir, "hello.path");
         let glibc = fixture_path(&dir, "glibc");
-        let store =
-            Arc::new(Store::new(config(&dir, &dir.join("cache-zstd"), tmp.path())).unwrap());
+        let store = Arc::new(Store::new(zstd_config(&dir, tmp.path())).unwrap());
         let jobs = store.jobs.acquire_many(2).await.unwrap();
         let mut a = store.ensure(std::slice::from_ref(&hello));
         let mut b = store.ensure(std::slice::from_ref(&glibc));
@@ -853,8 +852,7 @@ mod tests {
         };
         let tmp = scratch();
         let hello = fixture_root(&dir, "hello.path");
-        let store =
-            Arc::new(Store::new(config(&dir, &dir.join("cache-zstd"), tmp.path())).unwrap());
+        let store = Arc::new(Store::new(zstd_config(&dir, tmp.path())).unwrap());
         // The caller leaves before the closure is resolved. A big closure can
         // take longer to resolve than kubelet waits.
         drop(store.ensure(&[fixture_path(&dir, "glibc")]));
@@ -896,7 +894,7 @@ mod tests {
         let hello = fixture_root(&dir, "hello.path");
         let corrupt = tmp.path().join("corrupt");
         copy_cache(&dir.join("cache-none"), &corrupt);
-        let (_, _, info) = fixture_narinfo(&dir, "cache-none", &hello);
+        let info = fixture_narinfo(&dir, "cache-none", &hello);
         let nar = corrupt.join(&info.url);
         let mut bytes = std::fs::read(&nar).unwrap();
         let middle = bytes.len() / 2;
@@ -920,8 +918,6 @@ mod tests {
         assert_eq!(count(state.join("tmp")), 0);
     }
 
-    /// Ensures share one log of what fetches install. It keeps what the
-    /// oldest running ensure may check, and nothing while no ensure runs.
     /// An ensure that joins another ensure's fetch, started from a narinfo
     /// with different references, fails rather than leave out what the store
     /// object needs.
@@ -947,7 +943,7 @@ mod tests {
 
         // Another ensure's fetch gets hello from the narinfo with references.
         let jobs = store.jobs.acquire_many(2).await.unwrap();
-        let (_, _, info) = fixture_narinfo(&dir, "cache-zstd", &hello);
+        let info = fixture_narinfo(&dir, "cache-zstd", &hello);
         let (fetch, _) = store.fetch_shared(Arc::new(Entry {
             cache: Some(1),
             info,

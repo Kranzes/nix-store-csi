@@ -193,13 +193,10 @@ Sig: test-1:uLy+NsnprYjac4dL2b/QKAqXkcZ2kMJmSWAGrfdHnRb4ycbZsCv7MMXVqp4aPJci0GM6
         infos
     }
 
-    pub fn fixture_narinfo(
-        dir: &Path,
-        cache: &str,
-        path: &StorePath,
-    ) -> (PathBuf, String, NarInfo) {
+    pub fn fixture_narinfo(dir: &Path, cache: &str, path: &StorePath) -> NarInfo {
         (fixture_narinfos(dir, cache).into_iter())
-            .find(|(_, _, info)| info.path() == path)
+            .map(|(_, _, info)| info)
+            .find(|info| info.path() == path)
             .unwrap()
     }
 

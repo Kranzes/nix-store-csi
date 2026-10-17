@@ -45,12 +45,22 @@ pub(super) fn config(fixtures: &Path, cache: &Path, state: &Path) -> Config {
     }
 }
 
+/// A config for the fixtures' zstd cache.
+pub(super) fn zstd_config(fixtures: &Path, state: &Path) -> Config {
+    config(fixtures, &fixtures.join("cache-zstd"), state)
+}
+
+/// A store path that no cache has.
+pub(super) fn ghost() -> StorePath {
+    StorePath::from_base_path(&format!("{}-ghost-1", "0".repeat(32))).unwrap()
+}
+
 /// Returns a store that holds hello's closure from the fixtures, along with
 /// hello's store path and the closure.
 pub(super) async fn hello_store(state: &Path) -> Option<(Arc<Store>, StorePath, Arc<[StorePath]>)> {
     let dir = fixtures()?;
     let hello = fixture_root(&dir, "hello.path");
-    let store = Arc::new(Store::new(config(&dir, &dir.join("cache-zstd"), state)).unwrap());
+    let store = Arc::new(Store::new(zstd_config(&dir, state)).unwrap());
     let paths = store
         .ensure(std::slice::from_ref(&hello))
         .done()

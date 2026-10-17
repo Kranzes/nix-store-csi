@@ -106,9 +106,7 @@ impl Prefetch {
             return std::future::pending().await;
         };
         let result = running.done().await;
-        let Some(done) = self.running.take() else {
-            return;
-        };
+        let done = self.running.take().expect("running until it finishes");
         match result {
             Ok(_) => {
                 if self

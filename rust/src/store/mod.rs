@@ -656,7 +656,7 @@ mod tests {
         let Some((store, hello, _)) = hello_store(tmp.path()).await else {
             return;
         };
-        let ghost = StorePath::from_base_path(&format!("{}-ghost-1", "0".repeat(32))).unwrap();
+        let ghost = ghost();
         let ghost_file = store.caches.local_unsynced(&ghost);
         std::fs::write(&ghost_file, "").unwrap();
         store.unsynced.lock().unwrap().insert(ghost.clone(), 0);
@@ -703,7 +703,7 @@ mod tests {
         let path = other.iter().find(|&p| *p != hello).unwrap();
         unsync(&store, path);
         std::fs::write(&store.failed_record, "").unwrap();
-        let store = reopen(store, || config(&dir, &dir.join("cache-zstd"), tmp.path())).await;
+        let store = reopen(store, || zstd_config(&dir, tmp.path())).await;
         assert!(!store.present(path));
         assert!(!store.failed_record.exists());
     }
@@ -770,14 +770,14 @@ mod tests {
         unsync(&store, &others[1]);
         // A crash after writing a narinfo and before moving its path in
         // leaves this.
-        let ghost = StorePath::from_base_path(&format!("{}-ghost-1", "0".repeat(32))).unwrap();
+        let ghost = ghost();
         std::fs::write(store.caches.local_unsynced(&ghost), "").unwrap();
         // Start-up deletes a path with no narinfo in any case.
         remove_file(&store.caches.local_narinfo(&others[2])).unwrap();
         // It also deletes a temporary file that a crash left half written.
         std::fs::write(narinfos.join(".tmpAbC123"), "").unwrap();
 
-        let store = reopen(store, || config(&dir, &dir.join("cache-zstd"), tmp.path())).await;
+        let store = reopen(store, || zstd_config(&dir, tmp.path())).await;
         assert!(store.present(&others[0]) && store.present(&others[1]));
         assert!(!store.present(&others[2]));
         let mut names: Vec<_> = (paths.iter())
@@ -791,7 +791,7 @@ mod tests {
 
         unsync(&store, &others[0]);
         std::fs::write(&record, "another boot\n").unwrap();
-        let store = reopen(store, || config(&dir, &dir.join("cache-zstd"), tmp.path())).await;
+        let store = reopen(store, || zstd_config(&dir, tmp.path())).await;
         assert!(!store.present(&others[0]));
         assert_eq!(count(store.dir()), paths.len() - 2);
         assert_eq!(count(&narinfos), paths.len() - 2);
@@ -800,7 +800,7 @@ mod tests {
         // Start-up also deletes them when the boot id record is missing.
         unsync(&store, &others[1]);
         std::fs::remove_file(&record).unwrap();
-        let store = reopen(store, || config(&dir, &dir.join("cache-zstd"), tmp.path())).await;
+        let store = reopen(store, || zstd_config(&dir, tmp.path())).await;
         assert!(!store.present(&others[1]));
         assert_eq!(count(store.dir()), paths.len() - 3);
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);

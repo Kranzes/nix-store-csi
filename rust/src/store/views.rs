@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(store.view("v1", roots, &paths, &t1, UNBOUND).unwrap(), new);
 
         std::fs::write(&store.failed_record, "").unwrap();
-        let config = || config(&dir, &dir.join("cache-zstd"), tmp.path());
+        let config = || zstd_config(&dir, tmp.path());
         let store = reopen(store, config).await;
         let after = store
             .view("v3", roots, &paths, &target("t3"), UNBOUND)

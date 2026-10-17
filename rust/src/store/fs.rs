@@ -96,19 +96,27 @@ pub(super) fn remove_file(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Sets the modification time to 1, which Nix gives every file in the store.
+/// The modification time 1, which Nix gives every file in the store, with the
+/// access time left as it is.
+pub(super) const CANONICAL_TIME: Timestamps = Timestamps {
+    last_access: Timespec {
+        tv_sec: 0,
+        tv_nsec: UTIME_OMIT,
+    },
+    last_modification: Timespec {
+        tv_sec: 1,
+        tv_nsec: 0,
+    },
+};
+
+/// Sets [`CANONICAL_TIME`] on `path`, or on the symlink itself if it is one.
 pub(super) fn set_canonical_time(path: &Path) -> io::Result<()> {
-    let times = Timestamps {
-        last_access: Timespec {
-            tv_sec: 0,
-            tv_nsec: UTIME_OMIT,
-        },
-        last_modification: Timespec {
-            tv_sec: 1,
-            tv_nsec: 0,
-        },
-    };
-    Ok(utimensat(CWD, path, &times, AtFlags::SYMLINK_NOFOLLOW)?)
+    Ok(utimensat(
+        CWD,
+        path,
+        &CANONICAL_TIME,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)
 }
 
 /// Counts the files, directories and symlinks in the tree at `path`.

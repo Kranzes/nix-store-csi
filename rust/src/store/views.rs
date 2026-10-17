@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsStr;
-use std::fs::{FileType, Permissions};
+use std::ffi::{CStr, CString, OsStr};
+use std::fs::Permissions;
 use std::io;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,9 +13,12 @@ use anyhow::{Context, bail, ensure};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, HashFormat};
 use rayon::prelude::*;
+use rustix::fs::{
+    AtFlags, Dir, FileType, Mode, OFlags, fchmod, futimens, linkat, mkdirat, openat, statat,
+};
 use tracing::info;
 
-use super::fs::{Scratch, count_inodes, remove_file, set_canonical_time};
+use super::fs::{CANONICAL_TIME, Scratch, count_inodes, remove_file, set_canonical_time};
 use super::{Store, list_names, list_store_paths, write_synced};
 
 /// The directory in a view that links each root under its name without the
@@ -71,13 +75,14 @@ impl Store {
         let view = part.path().join(&volume.key);
         std::fs::create_dir(&view)?;
         std::fs::set_permissions(&view, Permissions::from_mode(0o755))?;
+        let view_dir = std::fs::File::open(&view)?;
         // Uses all cores, since a big closure has tens of thousands of files.
         paths.par_iter().try_for_each(|path| {
-            let src = self.unpacked(path);
-            let kind = std::fs::symlink_metadata(&src)
-                .with_context(|| format!("reading {}", src.display()))?
-                .file_type();
-            link_tree(&src, &view.join(path.to_string()), kind)
+            let name = CString::new(path.to_string())?;
+            let kind = statat(&self.dir_fd, &name, AtFlags::SYMLINK_NOFOLLOW)
+                .with_context(|| format!("reading {}", self.unpacked(path).display()))?;
+            let kind = FileType::from_raw_mode(kind.st_mode);
+            link_tree(&self.dir_fd, &view_dir, &name, kind)
                 .with_context(|| format!("linking {path} into the view"))
         })?;
         link_roots(&view.join(ROOTS), &links)?;
@@ -269,28 +274,34 @@ pub fn check_volume(volume: &str) -> anyhow::Result<&str> {
     Ok(volume)
 }
 
-/// Copies the tree at `src` to `dst` with hard links for files and symlinks,
-/// so the view shares inodes and page cache with the node store.
-fn link_tree(src: &Path, dst: &Path, kind: FileType) -> anyhow::Result<()> {
-    if kind.is_dir() {
-        std::fs::create_dir(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            link_tree(
-                &entry.path(),
-                &dst.join(entry.file_name()),
-                entry.file_type()?,
-            )?;
-        }
-        // The mode every sealed directory has.
-        std::fs::set_permissions(dst, Permissions::from_mode(0o555))?;
-        set_canonical_time(dst)?;
-    } else {
-        // On Linux this links a symlink itself, not its target.
-        std::fs::hard_link(src, dst)
-            .with_context(|| format!("linking {} to {}", dst.display(), src.display()))?;
+/// Copies the tree `name` in `src_dir` to `dst_dir` with hard links for files
+/// and symlinks, so the view shares inodes and page cache with the node store.
+/// Working in directory fds, each call looks up one name, not a whole path.
+fn link_tree(
+    src_dir: impl AsFd,
+    dst_dir: impl AsFd,
+    name: &CStr,
+    kind: FileType,
+) -> io::Result<()> {
+    if kind != FileType::Directory {
+        // This links a symlink itself, not its target.
+        return Ok(linkat(src_dir, name, dst_dir, name, AtFlags::empty())?);
     }
-    Ok(())
+    mkdirat(&dst_dir, name, Mode::RWXU)?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut entries = Dir::new(openat(&src_dir, name, flags, Mode::empty())?)?;
+    let dst = openat(&dst_dir, name, flags, Mode::empty())?;
+    while let Some(entry) = entries.read() {
+        let entry = entry?;
+        let child = entry.file_name();
+        if child == c"." || child == c".." {
+            continue;
+        }
+        link_tree(entries.fd()?, &dst, child, entry.file_type())?;
+    }
+    // The mode every sealed directory has.
+    fchmod(&dst, Mode::from_raw_mode(0o555))?;
+    Ok(futimens(&dst, &CANONICAL_TIME)?)
 }
 
 #[cfg(test)]
@@ -420,15 +431,17 @@ mod tests {
     #[test]
     fn links_symlinks() {
         let tmp = scratch();
-        let src = tmp.path().join("src");
-        std::fs::create_dir(&src).unwrap();
-        std::os::unix::fs::symlink("/nix/store/missing", src.join("link")).unwrap();
-        let dst = tmp.path().join("dst");
-        link_tree(&src, &dst, std::fs::metadata(&src).unwrap().file_type()).unwrap();
-        let meta = |p: &Path| std::fs::symlink_metadata(p.join("link")).unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        std::fs::create_dir_all(src.join("tree")).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        std::os::unix::fs::symlink("/nix/store/missing", src.join("tree/link")).unwrap();
+        let open = |dir: &Path| std::fs::File::open(dir).unwrap();
+        let tree = FileType::Directory;
+        link_tree(open(&src), open(&dst), c"tree", tree).unwrap();
+        let meta = |p: &Path| std::fs::symlink_metadata(p.join("tree/link")).unwrap();
         assert_eq!(meta(&dst).ino(), meta(&src).ino());
         assert_eq!(
-            std::fs::read_link(dst.join("link")).unwrap(),
+            std::fs::read_link(dst.join("tree/link")).unwrap(),
             Path::new("/nix/store/missing")
         );
     }

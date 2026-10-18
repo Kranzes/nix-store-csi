@@ -70,6 +70,10 @@ An `s3://` substituter reads a bucket like Nix's S3 store does, with its
 `region`, `endpoint` and `addressing-style` settings. The services below
 differ in those settings and in where the plugin gets credentials.
 
+For a public bucket, set `AWS_SKIP_SIGNATURE=true`, for example in
+`s3CredentialsSecret`. The plugin then reads every `s3://` cache without
+credentials.
+
 #### AWS
 
 The plugin takes its credentials from EKS Pod Identity, IRSA, the keys in

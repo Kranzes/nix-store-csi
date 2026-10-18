@@ -18,6 +18,8 @@
   `AccessDenied`. Others, like `SignatureDoesNotMatch` or
   `RequestTimeTooSkewed`, are errors, so wrong credentials no longer look
   like cache misses.
+- With `AWS_SKIP_SIGNATURE=true`, `s3://` caches read public buckets without
+  credentials. Before, the plugin looked for credentials anyway and failed.
 
 ### Added
 

@@ -45,8 +45,10 @@ enum Auth {
     Netrc(PathBuf),
     /// Credentials that `object_store` finds in the environment, from
     /// `AWS_ACCESS_KEY_ID`, IRSA, EKS Pod Identity or the node's instance
-    /// role. Each request goes to a URL presigned with them.
-    S3(AmazonS3),
+    /// role. Each request goes to a URL presigned with them. With
+    /// `AWS_SKIP_SIGNATURE=true`, for a public bucket, the keys are
+    /// placeholders and requests drop the signature.
+    S3 { s3: AmazonS3, unsigned: bool },
     /// A token from GKE Workload Identity, the node's service account or
     /// another of Google's application default credentials, for the bucket's
     /// objects under `objects`.
@@ -82,10 +84,13 @@ impl Http {
                     None => request(),
                 }
             }
-            Some(Auth::S3(s3)) => {
+            Some(Auth::S3 { s3, unsigned }) => {
                 let key = object_store::path::Path::from_url_path(url.path())?;
-                let signed = s3.signed_url(Method::GET, &key, PRESIGN_FOR).await?;
-                self.client.get(signed)
+                let mut object = s3.signed_url(Method::GET, &key, PRESIGN_FOR).await?;
+                if *unsigned {
+                    object.set_query(None);
+                }
+                self.client.get(object)
             }
             Some(Auth::Gcs { token, objects }) => {
                 let token = token.get_credential().await?;
@@ -587,6 +592,17 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
     );
     let bucket = url.host_str().context("no bucket")?;
     builder = builder.with_bucket_name(bucket);
+    // object_store only presigns with credentials, and would otherwise look
+    // for them all the way to the instance metadata service.
+    let unsigned = (builder.get_config_value(&AmazonS3ConfigKey::SkipSignature)).is_some_and(|v| {
+        // The values that object_store reads as true.
+        matches!(&*v.to_ascii_lowercase(), "1" | "true" | "on" | "yes" | "y")
+    });
+    if unsigned {
+        builder = builder
+            .with_access_key_id("unsigned")
+            .with_secret_access_key("unsigned");
+    }
     let (mut endpoint, mut style) = (None, "auto".to_owned());
     for (key, value) in url.query_pairs() {
         match &*key {
@@ -645,8 +661,8 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
             .with_allow_http(endpoint.scheme() == "http")
             .with_endpoint(endpoint.as_str().trim_end_matches('/'));
     }
-    let s3 = builder.with_virtual_hosted_style_request(virtual_hosted);
-    Ok(Auth::S3(s3.build()?))
+    let s3 = (builder.with_virtual_hosted_style_request(virtual_hosted)).build()?;
+    Ok(Auth::S3 { s3, unsigned })
 }
 
 struct Resuming<S> {
@@ -840,8 +856,9 @@ pub(crate) mod tests {
         // Serves the same files under `/prefix`, for bases with a path.
         let path = path.strip_prefix("/prefix").unwrap_or(path);
         // Serves them under `/bucket` too, to presigned path-style S3 requests.
-        let path = (path.strip_prefix("/bucket"))
-            .and_then(|p| p.split_once("?X-Amz-"))
+        let path = path.strip_prefix("/bucket").unwrap_or(path);
+        let path = path
+            .split_once("?X-Amz-")
             .map_or(path, |(p, _)| p)
             .to_owned();
         let (mut authorization, mut if_range, mut range) = (String::new(), String::new(), None);
@@ -1304,7 +1321,7 @@ pub(crate) mod tests {
     /// Where a request for `x` in the bucket of `url` goes, without the query.
     async fn object_url(url: &str, builder: AmazonS3Builder) -> String {
         let url = match s3(&url.parse().unwrap(), builder).unwrap() {
-            Auth::S3(s3) => (s3.signed_url(Method::GET, &"x".into(), PRESIGN_FOR))
+            Auth::S3 { s3, .. } => (s3.signed_url(Method::GET, &"x".into(), PRESIGN_FOR))
                 .await
                 .unwrap(),
             Auth::Gcs { objects, .. } => objects.join("x").unwrap(),
@@ -1344,7 +1361,7 @@ pub(crate) mod tests {
         assert!(matches!(gcs, Auth::Gcs { .. }));
         assert!(matches!(
             s3(&url.parse().unwrap(), keys()).unwrap(),
-            Auth::S3(_)
+            Auth::S3 { .. }
         ));
         for (url, object) in [
             (url, "https://storage.googleapis.com/cache/x"),
@@ -1359,6 +1376,26 @@ pub(crate) mod tests {
         ] {
             assert_eq!(object_url(url, AmazonS3Builder::new()).await, object);
         }
+    }
+
+    #[tokio::test]
+    async fn s3_skips_signature() {
+        let endpoint = server(Mode::Normal).await;
+        let url = format!("s3://bucket?endpoint={endpoint}");
+        let builder = AmazonS3Builder::new().with_config(AmazonS3ConfigKey::SkipSignature, "true");
+        let http = Http {
+            base: "s3://bucket".parse().unwrap(),
+            client: client().unwrap(),
+            auth: Some(s3(&url.parse().unwrap(), builder).unwrap()),
+        };
+        let request = (http.request(&"s3://bucket/obj".parse().unwrap()).await)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().as_str(), format!("{endpoint}/bucket/obj"));
+        assert!(request.headers().is_empty(), "{:?}", request.headers());
+        let t = Transport::Http(http);
+        assert_eq!(t.get("obj").await.unwrap().unwrap(), BODY);
     }
 
     #[tokio::test]

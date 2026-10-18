@@ -6,6 +6,9 @@
 
 - Requests fail at once on 501, 505 and 511 responses instead of retrying
   for a minute, as in Nix.
+- Error messages quote a cache's error response. For S3 and GCS they give
+  the error's code and message, like `SignatureDoesNotMatch`. For a plain
+  text body they give its first 200 characters.
 
 ### Added
 

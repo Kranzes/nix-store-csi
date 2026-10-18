@@ -110,10 +110,10 @@ impl Http {
                     (request.header(RANGE, format!("bytes={from}-"))).header(IF_RANGE, validator);
             }
             let resp = request.send().await?;
-            if !(range.is_some() && resp.status() == StatusCode::PARTIAL_CONTENT) {
-                check_status(&resp)?;
+            if range.is_some() && resp.status() == StatusCode::PARTIAL_CONTENT {
+                return Ok(resp);
             }
-            Ok(resp)
+            check_status(resp).await
         })
         .await
     }
@@ -237,14 +237,36 @@ async fn decode(body: Vec<u8>, encoding: Compression) -> anyhow::Result<Vec<u8>>
     Ok(data)
 }
 
-fn check_status(resp: &reqwest::Response) -> Result<(), Failure> {
+/// How much of an error's body [`check_status`] reads.
+const MAX_ERROR_BODY: usize = 16 * 1024;
+
+/// How much of a body that isn't XML an error message quotes.
+const ERROR_SNIPPET: usize = 200;
+
+async fn check_status(mut resp: reqwest::Response) -> Result<reqwest::Response, Failure> {
     let status = resp.status();
     if status == StatusCode::OK {
-        return Ok(());
+        return Ok(resp);
     }
+    let retry_after = resp.headers().get(RETRY_AFTER).and_then(retry_after);
+    let mut body = Vec::new();
+    while body.len() < MAX_ERROR_BODY
+        && let Ok(Some(chunk)) = resp.chunk().await
+    {
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&body);
+    let s3 = quick_xml::de::from_str::<S3Error>(&body).ok();
     // The message leaves out the URL, which after a redirect can hold a
     // signature.
-    let msg = format!("got {status}");
+    let msg = match s3
+        .as_ref()
+        .map(S3Error::to_string)
+        .or_else(|| snippet(&body))
+    {
+        Some(detail) => format!("got {status}: {detail}"),
+        None => format!("got {status}"),
+    };
     Err(Failure {
         error: if is_missing(status) {
             Missing(msg).into()
@@ -252,7 +274,7 @@ fn check_status(resp: &reqwest::Response) -> Result<(), Failure> {
             anyhow::anyhow!(msg)
         },
         transient: is_transient(status),
-        retry_after: resp.headers().get(RETRY_AFTER).and_then(retry_after),
+        retry_after,
     })
 }
 
@@ -266,6 +288,34 @@ fn is_transient(status: StatusCode) -> bool {
         | StatusCode::NETWORK_AUTHENTICATION_REQUIRED => false,
         _ => status.is_server_error(),
     }
+}
+
+/// The error in an S3 or GCS XML body. It keeps only the code and message,
+/// since the rest can hold the access key ID and what was signed.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct S3Error {
+    code: String,
+    message: Option<String>,
+}
+
+impl std::fmt::Display for S3Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.code)?;
+        match &self.message {
+            Some(message) => write!(f, ": {message}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A text body on one line, cut short. XML and HTML ones say little.
+fn snippet(body: &str) -> Option<String> {
+    if body.trim_start().starts_with('<') {
+        return None;
+    }
+    let line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then(|| line.chars().take(ERROR_SNIPPET).collect())
 }
 
 /// The wait that a `Retry-After` asks for, in seconds or until a date.
@@ -411,33 +461,36 @@ impl Transport {
 
     /// A small file like a narinfo, or `None` if the cache hasn't got it.
     pub async fn get(&self, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        self.get_with(path, true).await
+        match self.get_with(path, true).await {
+            Err(e) if lacks_file(&e) => Ok(None),
+            result => result.map(Some),
+        }
     }
 
-    /// Like [`Transport::get`], without retrying.
-    pub async fn get_once(&self, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    /// Like [`Transport::get`], without retrying. A missing file is an error
+    /// that [`lacks_file`] matches, and it keeps what the cache said.
+    pub async fn get_once(&self, path: &str) -> anyhow::Result<Vec<u8>> {
         self.get_with(path, false).await
     }
 
-    async fn get_with(&self, path: &str, retries: bool) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_with(&self, path: &str, retries: bool) -> anyhow::Result<Vec<u8>> {
         match self {
             Self::File(base) => {
                 let file = file_path(base, path)?;
                 match tokio::fs::read(&file).await {
-                    Ok(data) => Ok(Some(data)),
+                    Ok(data) => Ok(data),
                     // A missing cache directory is an error, not a missing file.
-                    Err(e) if e.kind() == io::ErrorKind::NotFound && base.is_dir() => Ok(None),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound && base.is_dir() => {
+                        Err(Missing(format!("no {}", file.display())).into())
+                    }
                     Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
                 }
             }
             Self::Http(http) => {
                 let url = request_url(&http.base, path)?;
                 retry(&url, retries, || async {
-                    let mut resp = http.request(&url).await?.send().await?;
-                    if is_missing(resp.status()) {
-                        return Ok(None);
-                    }
-                    check_status(&resp)?;
+                    let resp = http.request(&url).await?.send().await?;
+                    let mut resp = check_status(resp).await?;
                     let encoding = content_encoding(&resp)?;
                     let mut body = Vec::new();
                     while let Some(chunk) = resp.chunk().await? {
@@ -448,7 +501,7 @@ impl Transport {
                         }
                         body.extend_from_slice(&chunk);
                     }
-                    Ok(Some(decode(body, encoding).await?))
+                    Ok(decode(body, encoding).await?)
                 })
                 .await
             }
@@ -732,6 +785,9 @@ pub(crate) mod tests {
 
     const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
+    const SIGNATURE_ERROR: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message><AWSAccessKeyId>AKIAEXAMPLE</AWSAccessKeyId><StringToSign>AWS4-HMAC-SHA256</StringToSign></Error>"#;
+
     fn open(url: &str) -> anyhow::Result<Transport> {
         Transport::new(&url.parse()?, None)
     }
@@ -834,6 +890,8 @@ pub(crate) mod tests {
                             ("/private" | "/obj" | "/harmonia.nar?hash=x", _) => {
                                 ("200 OK", BODY.to_vec())
                             }
+                            ("/denied", _) => ("403 Forbidden", SIGNATURE_ERROR.to_vec()),
+                            ("/bad", _) => ("400 Bad Request", b"no such\n  thing".to_vec()),
                             ("/big", _) => {
                                 ("200 OK", vec![0; usize::try_from(MAX_GET).unwrap() + 1])
                             }
@@ -1112,6 +1170,43 @@ pub(crate) mod tests {
         assert!(lacks_file(&err), "{err:#}");
         let err = read_all(&t, "private").await.unwrap_err();
         assert!(!lacks_file(&err), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn http_error_bodies() {
+        let t = open(&server(Mode::Normal).await).unwrap();
+        assert_eq!(t.get("denied").await.unwrap(), None);
+        for err in [
+            read_all(&t, "denied").await.unwrap_err(),
+            t.get_once("denied").await.unwrap_err(),
+        ] {
+            assert!(lacks_file(&err), "{err:#}");
+            let err = format!("{err:#}");
+            assert!(
+                err.contains("got 403 Forbidden: SignatureDoesNotMatch: The request signature")
+                    && !err.contains("AKIA"),
+                "{err}"
+            );
+        }
+        let err = format!("{:#}", t.get("bad").await.unwrap_err());
+        assert!(err.ends_with("got 400 Bad Request: no such thing"), "{err}");
+    }
+
+    #[test]
+    fn describes_error_bodies() {
+        let s3 = |body| {
+            quick_xml::de::from_str::<S3Error>(body)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(s3("<Error><Code>SlowDown</Code></Error>"), "SlowDown");
+        let escaped = "<Error><Code>A</Code><Message>&lt;b&gt;</Message></Error>";
+        assert_eq!(s3(escaped), "A: <b>");
+        for body in ["", " \n", "<html><body>Forbidden</body></html>"] {
+            assert_eq!(snippet(body), None, "{body:?}");
+        }
+        let long = "x".repeat(ERROR_SNIPPET + 1);
+        assert_eq!(snippet(&long).unwrap().len(), ERROR_SNIPPET);
     }
 
     #[tokio::test]

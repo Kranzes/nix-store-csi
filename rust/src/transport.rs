@@ -155,10 +155,16 @@ const BACKOFF: ExponentialBuilder = ExponentialBuilder::new()
     .with_jitter()
     .without_max_times();
 
+/// Added to the backoff after a 429 or an S3 `SlowDown` without
+/// `Retry-After`, so that many nodes retry a busy cache less often. A plain
+/// 503 is often a short outage, so it gets the backoff alone.
+const SLOW_DOWN: Duration = Duration::from_secs(5);
+
 struct Failure {
     error: anyhow::Error,
     transient: bool,
-    /// The response's `Retry-After`, the least time to wait before a retry.
+    /// The least time to wait before a retry, from the response's
+    /// `Retry-After` or else [`SLOW_DOWN`].
     retry_after: Option<Duration>,
 }
 
@@ -267,6 +273,11 @@ async fn check_status(mut resp: reqwest::Response) -> Result<reqwest::Response, 
         Some(detail) => format!("got {status}: {detail}"),
         None => format!("got {status}"),
     };
+    // MinIO sends `SlowDownRead`.
+    let slow_down = status == StatusCode::TOO_MANY_REQUESTS
+        || s3
+            .as_ref()
+            .is_some_and(|e| matches!(&*e.code, "SlowDown" | "SlowDownRead"));
     Err(Failure {
         error: if is_missing(status, s3.as_ref()) {
             Missing(msg).into()
@@ -274,7 +285,7 @@ async fn check_status(mut resp: reqwest::Response) -> Result<reqwest::Response, 
             anyhow::anyhow!(msg)
         },
         transient: is_transient(status),
-        retry_after,
+        retry_after: retry_after.or(slow_down.then_some(SLOW_DOWN)),
     })
 }
 
@@ -358,8 +369,8 @@ fn is_missing(status: StatusCode, s3: Option<&S3Error>) -> bool {
 }
 
 /// Tries `attempt` once, or for [`RETRY_FOR`] while it fails transiently. A
-/// `Retry-After` adds to the backoff, and one that ends past [`RETRY_FOR`]
-/// ends the retries.
+/// failure's `retry_after` adds to the backoff, and one that ends past
+/// [`RETRY_FOR`] ends the retries.
 async fn retry<T, F, Fut>(url: &Url, retries: bool, attempt: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
@@ -876,9 +887,7 @@ pub(crate) mod tests {
                                 ("200 OK", b"StoreDir: /nix/store\n".to_vec())
                             }
                             (_, Mode::Hangs) => std::future::pending().await,
-                            (_, Mode::FlakyOnce) if hit == 0 => {
-                                ("503 Service Unavailable", Vec::new())
-                            }
+                            (_, Mode::FlakyOnce) if hit == 0 => ("502 Bad Gateway", Vec::new()),
                             // user:secret
                             ("/private", _) if authorization != "Basic dXNlcjpzZWNyZXQ=" => {
                                 ("401 Unauthorized", Vec::new())
@@ -1066,6 +1075,31 @@ pub(crate) mod tests {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(is_transient(status), transient, "{code}");
         }
+    }
+
+    #[tokio::test]
+    async fn slows_down() {
+        let wait = async |code, header: Option<&str>, body: &'static str| {
+            let mut resp = hyper::Response::builder().status(code);
+            if let Some(header) = header {
+                resp = resp.header(RETRY_AFTER, header);
+            }
+            let resp = reqwest::Response::from(resp.body(body).unwrap());
+            check_status(resp).await.err().unwrap().retry_after
+        };
+        let slow_down = "<Error><Code>SlowDown</Code></Error>";
+        assert_eq!(wait(429, None, "").await, Some(SLOW_DOWN));
+        assert_eq!(wait(503, None, slow_down).await, Some(SLOW_DOWN));
+        assert_eq!(
+            wait(503, Some("1"), slow_down).await,
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            wait(503, None, "<Error><Code>SlowDownRead</Code></Error>").await,
+            Some(SLOW_DOWN)
+        );
+        assert_eq!(wait(503, None, "").await, None);
+        assert_eq!(wait(503, Some("1"), "").await, Some(Duration::from_secs(1)));
     }
 
     #[test]

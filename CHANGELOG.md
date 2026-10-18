@@ -6,6 +6,8 @@
 
 - Requests fail at once on 501, 505 and 511 responses instead of retrying
   for a minute, as in Nix.
+- After a 429 response or an S3 `SlowDown` error without `Retry-After`, a
+  request waits at least 5 seconds before it retries.
 - Error messages quote a cache's error response. For S3 and GCS they give
   the error's code and message, like `SignatureDoesNotMatch`. For a plain
   text body they give its first 200 characters.

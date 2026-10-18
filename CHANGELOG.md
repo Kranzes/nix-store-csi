@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- Requests fail at once on 501, 505 and 511 responses instead of retrying
+  for a minute, as in Nix.
+
 ### Added
 
 - `--gc-interval` sets how often collection runs, 10 minutes by default.

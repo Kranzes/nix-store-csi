@@ -251,11 +251,21 @@ fn check_status(resp: &reqwest::Response) -> Result<(), Failure> {
         } else {
             anyhow::anyhow!(msg)
         },
-        transient: status.is_server_error()
-            || status == StatusCode::TOO_MANY_REQUESTS
-            || status == StatusCode::REQUEST_TIMEOUT,
+        transient: is_transient(status),
         retry_after: resp.headers().get(RETRY_AFTER).and_then(retry_after),
     })
+}
+
+/// Whether a retry may get another answer than `status`. As in Nix, 501 and
+/// 505 don't count, and neither does 511, which captive portals send.
+fn is_transient(status: StatusCode) -> bool {
+    match status {
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS => true,
+        StatusCode::NOT_IMPLEMENTED
+        | StatusCode::HTTP_VERSION_NOT_SUPPORTED
+        | StatusCode::NETWORK_AUTHENTICATION_REQUIRED => false,
+        _ => status.is_server_error(),
+    }
 }
 
 /// The wait that a `Retry-After` asks for, in seconds or until a date.
@@ -971,6 +981,25 @@ pub(crate) mod tests {
             if attempts > 1 {
                 assert!(start.elapsed() >= Duration::from_secs(wait));
             }
+        }
+    }
+
+    #[test]
+    fn transient_statuses() {
+        for (code, transient) in [
+            (400, false),
+            (404, false),
+            (408, true),
+            (429, true),
+            (500, true),
+            (501, false),
+            (502, true),
+            (503, true),
+            (505, false),
+            (511, false),
+        ] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(is_transient(status), transient, "{code}");
         }
     }
 

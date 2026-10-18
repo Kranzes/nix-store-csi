@@ -1012,7 +1012,7 @@
     {
       "type": "stat",
       "title": "Failed collections",
-      "description": "Collections in the time range that failed. They run every 10 minutes, and every minute while free space or inodes are short.",
+      "description": "Collections in the time range that failed. They run every --gc-interval, 10 minutes by default, and every minute while free space or inodes are short.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

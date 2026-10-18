@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `--gc-interval` sets how often collection runs, 10 minutes by default.
+
 ## 0.1.6 - 2026-10-16
 
 ### Fixed

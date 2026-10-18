@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, bail, ensure};
 use clap::{Parser, Subcommand};
 use rustix::io::Errno;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
@@ -136,6 +136,17 @@ enum Command {
             value_parser = humantime::parse_duration
         )]
         keep_recent: Duration,
+        /// Collect garbage every DURATION, like `10m` or `1h`. While
+        /// `--ensure-free` needs the space or inodes, collection also runs
+        /// every minute.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            env = "NIX_STORE_CSI_GC_INTERVAL",
+            default_value = "10m",
+            value_parser = parse_interval
+        )]
+        gc_interval: Duration,
         /// Free space to keep on the state dir's filesystem, like `50G` or
         /// `20%`, by deleting unused store paths, least recently used first.
         /// It keeps the same share of inodes free, so `50G` of a 500G
@@ -248,6 +259,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             node_id,
             keep_recent,
+            gc_interval,
             metrics_address,
             prefetch_dir,
             ..
@@ -261,7 +273,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 info!("serving metrics on http://{address}/metrics");
                 tokio::spawn(metrics::serve(listener, metrics::registry(&store)));
             }
-            tokio::spawn(collect_garbage(store.clone(), keep_recent));
+            tokio::spawn(collect_garbage(store.clone(), gc_interval, keep_recent));
             if let Some(dir) = prefetch_dir {
                 tokio::spawn(prefetch::Prefetch::new(store.clone(), dir).run());
             }
@@ -309,10 +321,18 @@ fn raise_open_files_limit() {
     }
 }
 
-/// Collects every 10 minutes, and also every minute while free space or
+/// A nonzero duration, since a tokio interval can't have a zero period.
+fn parse_interval(s: &str) -> anyhow::Result<Duration> {
+    let interval = humantime::parse_duration(s)?;
+    ensure!(!interval.is_zero(), "the interval can't be 0");
+    Ok(interval)
+}
+
+/// Collects every `interval`, and also every minute while free space or
 /// inodes are below `--ensure-free`. If a collection deletes nothing while they
-/// are short, the per-minute collections wait for the next 10-minute one.
-async fn collect_garbage(store: Arc<Store>, keep_recent: Duration) {
+/// are short, the per-minute collections pause for 10 minutes or until the
+/// next sweep.
+async fn collect_garbage(store: Arc<Store>, interval: Duration, keep_recent: Duration) {
     // `run` prunes the views right before serving, so the first tick waits a
     // full period.
     let every = |period| {
@@ -320,8 +340,8 @@ async fn collect_garbage(store: Arc<Store>, keep_recent: Duration) {
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticks
     };
-    let (mut sweep, mut check) = (every(10 * MINUTE), every(MINUTE));
-    let mut futile = false;
+    let (mut sweep, mut check) = (every(interval), every(MINUTE));
+    let mut paused_until = Instant::now();
     loop {
         let measure = || {
             store.excess().unwrap_or_else(|e| {
@@ -331,16 +351,17 @@ async fn collect_garbage(store: Arc<Store>, keep_recent: Duration) {
         };
         let excess = tokio::select! {
             _ = sweep.tick() => {
-                futile = false;
+                paused_until = Instant::now();
                 measure()
             }
             _ = check.tick() => match measure() {
-                excess if excess != Excess::default() && !futile => excess,
+                excess if excess != Excess::default() && Instant::now() >= paused_until => excess,
                 _ => continue,
             },
         };
         match store.collect(mounts::is_bound, keep_recent, excess).await {
-            Ok(0) => futile = excess != Excess::default(),
+            Ok(0) if excess != Excess::default() => paused_until = Instant::now() + 10 * MINUTE,
+            Ok(0) => {}
             Ok(n) => info!(deleted = n, "collected the node store"),
             Err(e) => warn!("collecting the node store: {e:#}"),
         }
@@ -413,5 +434,21 @@ mod tests {
         .unwrap();
         let stores: Vec<_> = cli.substituters.split_whitespace().collect();
         assert_eq!(stores, ["https://b", "https://c"]);
+    }
+
+    #[test]
+    fn rejects_zero_gc_interval() {
+        let csi = |interval| {
+            Cli::try_parse_from([
+                "nix-store-csi",
+                "csi",
+                "--endpoint=/csi.sock",
+                "--node-id=node",
+                "--gc-interval",
+                interval,
+            ])
+        };
+        assert!(csi("0s").is_err());
+        assert!(csi("1h").is_ok());
     }
 }

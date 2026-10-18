@@ -268,7 +268,7 @@ async fn check_status(mut resp: reqwest::Response) -> Result<reqwest::Response, 
         None => format!("got {status}"),
     };
     Err(Failure {
-        error: if is_missing(status) {
+        error: if is_missing(status, s3.as_ref()) {
             Missing(msg).into()
         } else {
             anyhow::anyhow!(msg)
@@ -346,13 +346,15 @@ pub fn lacks_file(e: &anyhow::Error) -> bool {
     e.chain().any(<dyn std::error::Error>::is::<Missing>)
 }
 
-/// Whether `status` means a missing file. 403 counts because S3 sends it for
-/// a missing file.
-fn is_missing(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::GONE
-    )
+/// Whether `status`, with the S3 error if the body has one, means a missing
+/// file. Without `s3:ListBucket`, S3 answers 403 `AccessDenied` for a missing
+/// file. Other 403s, like `SignatureDoesNotMatch`, are errors.
+fn is_missing(status: StatusCode, s3: Option<&S3Error>) -> bool {
+    match status {
+        StatusCode::NOT_FOUND | StatusCode::GONE => true,
+        StatusCode::FORBIDDEN => s3.is_none_or(|e| e.code == "AccessDenied"),
+        _ => false,
+    }
 }
 
 /// Tries `attempt` once, or for [`RETRY_FOR`] while it fails transiently. A
@@ -891,6 +893,11 @@ pub(crate) mod tests {
                                 ("200 OK", BODY.to_vec())
                             }
                             ("/denied", _) => ("403 Forbidden", SIGNATURE_ERROR.to_vec()),
+                            ("/hidden", _) => (
+                                "403 Forbidden",
+                                b"<Error><Code>AccessDenied</Code></Error>".to_vec(),
+                            ),
+                            ("/forbidden", _) => ("403 Forbidden", Vec::new()),
                             ("/bad", _) => ("400 Bad Request", b"no such\n  thing".to_vec()),
                             ("/big", _) => {
                                 ("200 OK", vec![0; usize::try_from(MAX_GET).unwrap() + 1])
@@ -1175,12 +1182,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn http_error_bodies() {
         let t = open(&server(Mode::Normal).await).unwrap();
-        assert_eq!(t.get("denied").await.unwrap(), None);
+        for path in ["hidden", "forbidden"] {
+            assert_eq!(t.get(path).await.unwrap(), None);
+        }
         for err in [
             read_all(&t, "denied").await.unwrap_err(),
+            t.get("denied").await.unwrap_err(),
             t.get_once("denied").await.unwrap_err(),
         ] {
-            assert!(lacks_file(&err), "{err:#}");
+            assert!(!lacks_file(&err), "{err:#}");
             let err = format!("{err:#}");
             assert!(
                 err.contains("got 403 Forbidden: SignatureDoesNotMatch: The request signature")

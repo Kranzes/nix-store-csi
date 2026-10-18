@@ -75,8 +75,10 @@ differ in those settings and in where the plugin gets credentials.
 The plugin takes its credentials from EKS Pod Identity, IRSA, the keys in
 `s3CredentialsSecret`, or the node's instance role. With Pod Identity, give the
 plugin's ServiceAccount, which the chart names after the release, a role that
-can `s3:GetObject` on the bucket. Without `s3:ListBucket`, S3 answers 403 for a
-missing file, which the plugin treats like a 404.
+can `s3:GetObject` on the bucket. Without `s3:ListBucket`, S3 answers 403
+`AccessDenied` for a missing file, which the plugin treats like a 404. Other
+403 codes, like `SignatureDoesNotMatch`, are errors, so the plugin skips the
+cache for a minute.
 
 ```yaml
 # values.yaml

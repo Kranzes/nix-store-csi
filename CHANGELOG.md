@@ -10,6 +10,13 @@
   the error's code and message, like `SignatureDoesNotMatch`. For a plain
   text body they give its first 200 characters.
 
+### Fixed
+
+- A 403 from S3 or GCS counts as a missing file only with the code
+  `AccessDenied`. Others, like `SignatureDoesNotMatch` or
+  `RequestTimeTooSkewed`, are errors, so wrong credentials no longer look
+  like cache misses.
+
 ### Added
 
 - `--gc-interval` sets how often collection runs, 10 minutes by default.

@@ -219,12 +219,20 @@ impl From<anyhow::Error> for Failure {
 }
 
 /// Whether `e` is a failed TLS handshake. A retry would fail the same way.
-/// The TLS stack reports the failure as invalid data while connecting.
+/// The TLS stack reports the failure as invalid data while connecting, and
+/// hyper-rustls wraps that in an `io::Error` of kind `Other`, which
+/// `io::Error::source` skips.
 fn failed_tls(e: &reqwest::Error) -> bool {
     if !e.is_connect() {
         return false;
     }
-    std::iter::successors(std::error::Error::source(e), |e| e.source()).any(|e| {
+    std::iter::successors(std::error::Error::source(e), |e| {
+        match e.downcast_ref::<io::Error>() {
+            Some(e) => e.get_ref().map(|e| e as _),
+            None => e.source(),
+        }
+    })
+    .any(|e| {
         (e.downcast_ref::<io::Error>()).is_some_and(|e| e.kind() == io::ErrorKind::InvalidData)
     })
 }

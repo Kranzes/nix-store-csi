@@ -16,6 +16,8 @@
   fail every start and every garbage collection.
 - Pod events for a failed fetch or lookup name store paths in full, and name
   a failed NAR's URL once instead of twice.
+- A failed TLS handshake with a cache, as for an expired certificate, fails
+  the request at once instead of retrying for a minute.
 
 ## 0.1.7 - 2026-10-21
 

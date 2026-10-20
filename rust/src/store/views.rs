@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt::Write as _;
 use std::fs::Permissions;
@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
 use anyhow::{Context, bail, ensure};
+use foldhash::{HashSet, HashSetExt};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, HashFormat};
 use rayon::prelude::*;

@@ -10,7 +10,6 @@ mod sandbox;
 pub(crate) mod test_utils;
 mod views;
 
-use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -19,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, bail, ensure};
+use foldhash::{HashMap, HashSet, HashSetExt};
 use harmonia_store_path::{StoreDir, StorePath};
 use rustix::fs::{AtFlags, CWD, FlockOperation, Timespec, Timestamps, UTIME_NOW, flock, utimensat};
 use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore};
@@ -665,7 +665,7 @@ mod tests {
         assert!(store.narinfos.synced(&hello).exists());
         assert!(ghost_file.exists());
         let marked = store.unsynced.lock().unwrap().clone();
-        assert_eq!(marked, [(ghost, 0)].into());
+        assert_eq!(marked, HashMap::from_iter([(ghost, 0)]));
     }
 
     /// The kernel reports a lost write only once, so a later sync can't make

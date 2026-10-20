@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -10,6 +9,7 @@ use std::time::Instant;
 use anyhow::{Context, bail, ensure};
 use backon::{ConstantBuilder, Retryable};
 use bytesize::ByteSize;
+use foldhash::HashMap;
 use futures::StreamExt;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use harmonia_file_nar::{NarWriteError, parse_nar, restore};

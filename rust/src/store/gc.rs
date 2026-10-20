@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::AddAssign;
 use std::path::Path;
@@ -6,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, ensure};
+use foldhash::{HashMap, HashMapExt, HashSet};
 use harmonia_store_path::StorePath;
 use tokio::task::JoinHandle;
 use tracing::warn;

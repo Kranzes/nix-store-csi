@@ -64,10 +64,8 @@ impl Compression {
     }
 }
 
-/// Signatures cover the fields behind the accessors, not `url` or `compression`.
+/// Signatures cover only the path, NAR hash, NAR size and references.
 pub struct NarInfo {
-    /// Relative to the cache's base URL, like `nar/<filehash>.nar.xz`.
-    pub url: String,
     pub compression: Compression,
     parsed: harmonia_store_nar_info::NarInfo,
 }
@@ -75,7 +73,7 @@ pub struct NarInfo {
 impl NarInfo {
     pub fn parse(store_dir: &StoreDir, text: &str) -> anyhow::Result<Self> {
         let parsed = harmonia_store_nar_info::parse_narinfo_txt(store_dir, text)?;
-        let url = parsed.info.url.clone().context("narinfo has no URL")?;
+        let url = parsed.info.url.as_deref().context("narinfo has no URL")?;
         ensure!(!url.is_empty(), "narinfo has an empty URL");
         ensure!(
             url.len() <= MAX_URL,
@@ -87,10 +85,14 @@ impl NarInfo {
             .unwrap_or("bzip2");
         let compression = Compression::parse(name)?;
         Ok(Self {
-            url,
             compression,
             parsed,
         })
+    }
+
+    /// Relative to the cache's base URL, like `nar/<filehash>.nar.xz`.
+    pub fn url(&self) -> &str {
+        self.parsed.info.url.as_deref().unwrap_or_default()
     }
 
     /// The narinfo for the node store to keep. A cache can add lines that no

@@ -311,13 +311,13 @@ impl Store {
     ) -> anyhow::Result<()> {
         let info = &entry.info;
         let name = self.caches.name(cache);
-        let url = transport::request_url(name, &info.url)
-            .map_or_else(|_| info.url.clone(), |url| url.to_string());
+        let url = transport::request_url(name, info.url())
+            .map_or_else(|_| info.url().to_owned(), |url| url.to_string());
         debug!(cache = %name, %url, nar_size = info.nar_size(), "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
         let part = (|| async {
-            let body = self.caches.stream(cache, &info.url).await?;
+            let body = self.caches.stream(cache, info.url()).await?;
             let part = Scratch::new_in(&self.tmp)?;
             let dest = part.path().join(&base);
             let unpacked = self.sandbox.spawn(unpack_nar(
@@ -341,7 +341,7 @@ impl Store {
         .when(transport::broke_off)
         .notify(|e, _| warn!(%url, "{e:#}; starting the NAR over"))
         .await
-        .with_context(|| format!("fetching {} from {name}", info.url))?;
+        .with_context(|| format!("fetching {} from {name}", info.url()))?;
 
         let unpacked = part.path().join(&base);
         let unsynced = self.narinfos.unsynced(info.path());
@@ -1050,7 +1050,7 @@ mod tests {
         let corrupt = tmp.path().join("corrupt");
         copy_cache(&dir.join("cache-none"), &corrupt);
         let info = fixture_narinfo(&dir, "cache-none", &hello);
-        let nar = corrupt.join(&info.url);
+        let nar = corrupt.join(info.url());
         let mut bytes = std::fs::read(&nar).unwrap();
         let middle = bytes.len() / 2;
         bytes[middle] ^= 1;

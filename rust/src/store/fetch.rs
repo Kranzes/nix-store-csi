@@ -20,10 +20,11 @@ use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{InspectReader, ReaderStream, StreamReader};
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::closure::Entry;
 use crate::narinfo::Compression;
+use crate::store_path::Names;
 use crate::transport;
 
 use super::fs::{Scratch, rename_tree, set_canonical_time};
@@ -64,7 +65,7 @@ impl Store {
             // closure.
             drop(set);
             if let Err(Err(e)) = tx.send(result) {
-                warn!(store_paths = %crate::store_path::Names(&roots), "{e:#}; no publish is waiting any more");
+                warn!(store_paths = %Names(&roots), "{e:#}; no publish is waiting any more");
             }
         };
         // The closure's lookups log in the caller's span.
@@ -113,17 +114,31 @@ impl Store {
             let missing = tokio::task::spawn_blocking(move || this.touch_present(&all)).await??;
             (held, missing)
         };
+        let mut started = 0;
         let fetches: Vec<_> = (missing.iter())
-            .map(|path| self.fetch_shared(closure[path].clone()))
+            .map(|path| {
+                let (fetch, bytes, new) = self.fetch_shared(closure[path].clone());
+                started += usize::from(new);
+                (fetch, bytes)
+            })
             .collect();
         let fetching: u64 = missing.iter().map(|p| closure[p].info.nar_size()).sum();
         // Fetching can take a while, and each fetch holds the entry it needs.
         drop(closure);
+        // Only an ensure that starts a fetch logs. Kubelet's retries and
+        // prefetch's minutely ensures join running fetches or find the
+        // closure in the store, so they stay quiet.
+        let logs = started > 0;
+        let present = paths.len() - missing.len();
+        let (store_paths, start) = (Names(roots), Instant::now());
+        if logs {
+            info!(%store_paths, fetching = missing.len(), present, nar_size = fetching, "fetching the closure");
+        }
         let _ = progress.set(Fetching {
             present_bytes: total - fetching,
             total_bytes: total,
-            present_paths: paths.len() - missing.len(),
-            start: Instant::now(),
+            present_paths: present,
+            start,
             start_bytes: read(&fetches),
             fetches: fetches.clone(),
             _held: held,
@@ -139,6 +154,10 @@ impl Store {
         if self.installs.load(Ordering::SeqCst) != installs {
             let (this, all) = (self.clone(), paths.clone());
             tokio::task::spawn_blocking(move || this.check_references(&all)).await??;
+        }
+        if logs {
+            let elapsed_ms = start.elapsed().as_millis();
+            info!(%store_paths, fetched = missing.len(), nar_size = fetching, elapsed_ms, "fetched the closure");
         }
         Ok(paths)
     }
@@ -196,13 +215,15 @@ impl Store {
 
     /// Runs the fetch of `entry`'s path in its own task, so it finishes even
     /// if no publish waits for it any more. Every publish that needs the path
-    /// shares the fetch. Also returns the NAR bytes the fetch has read so far.
-    /// The fetch ends once the path is in store/, and the path's sync runs
-    /// after that.
-    fn fetch_shared(self: &Arc<Self>, entry: Arc<Entry>) -> (Fetch, Arc<AtomicU64>) {
+    /// shares the fetch. Also returns the NAR bytes the fetch has read so far,
+    /// and whether this call started the fetch. The fetch ends once the path
+    /// is in store/, and the path's sync runs after that.
+    fn fetch_shared(self: &Arc<Self>, entry: Arc<Entry>) -> (Fetch, Arc<AtomicU64>, bool) {
         let path = entry.info.path().clone();
         let mut fetching = self.fetching.lock().unwrap();
+        let mut started = false;
         let (fetch, bytes) = fetching.entry(path.clone()).or_insert_with(|| {
+            started = true;
             let (this, bytes) = (self.clone(), Arc::<AtomicU64>::default());
             let read = bytes.clone();
             // Shared by every volume that needs the path, so no publish's span
@@ -227,7 +248,7 @@ impl Store {
             let fetch = async move { task.await.unwrap_or_else(|e| Err(Arc::new(e.to_string()))) };
             (fetch.boxed().shared(), bytes)
         });
-        (fetch.clone(), bytes.clone())
+        (fetch.clone(), bytes.clone(), started)
     }
 
     /// Counts the NAR bytes it reads in `bytes`, and returns whether it
@@ -290,7 +311,7 @@ impl Store {
     ) -> anyhow::Result<()> {
         let info = &entry.info;
         let name = self.caches.name(cache);
-        info!(cache = %name, url = %info.url, nar_size = info.nar_size(), "fetching NAR");
+        debug!(cache = %name, url = %info.url, nar_size = info.nar_size(), "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
         let part = (|| async {
@@ -1076,7 +1097,7 @@ mod tests {
         // Another ensure's fetch gets hello from the narinfo with references.
         let jobs = store.jobs.acquire_many(2).await.unwrap();
         let info = fixture_narinfo(&dir, "cache-zstd", &hello);
-        let (fetch, _) = store.fetch_shared(Arc::new(Entry {
+        let (fetch, _, _) = store.fetch_shared(Arc::new(Entry {
             cache: Some(1),
             info,
         }));

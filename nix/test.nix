@@ -295,7 +295,15 @@ testers.runNixOSTest {
     plugin = "kubectl -n kube-system logs daemonset/nix-store-csi-node -c nix-store-csi"
     volumes = "grep 'kubernetes.io~csi/nix/mount' /proc/mounts"
     views = "ls /var/lib/nix-store-csi/views"
-    fetches = f"{plugin} | grep -c ' INFO .*fetching NAR' || true"
+
+    def fetches():
+        """The NARs that the plugin fetched, from its metrics."""
+        metrics = machine.succeed("${curl}/bin/curl -sf http://127.0.0.1:9809/metrics").splitlines()
+        return sum(
+            float(line.split()[-1])
+            for line in metrics
+            if line.startswith("nix_store_csi_nar_fetch_duration_seconds_count") and 'result="ok"' in line
+        )
 
     def phase(pod, want):
         try:
@@ -332,7 +340,7 @@ testers.runNixOSTest {
         phase("hello", "Succeeded")
         t.assertEqual(machine.succeed("kubectl logs hello").strip(), "Hello, world!")
         phase("sleep", "Running")
-        t.assertEqual(int(machine.succeed(fetches)), int(machine.succeed("wc -l < ${podsClosure}")))
+        t.assertEqual(fetches(), int(machine.succeed("wc -l < ${podsClosure}")))
         restarts = "{.items[0].status.containerStatuses[*].restartCount}"
         t.assertEqual(machine.succeed(f"kubectl -n kube-system get pod -l app.kubernetes.io/name=nix-store-csi -o jsonpath='{restarts}'").split(), ["0"] * 3)
 
@@ -406,11 +414,11 @@ testers.runNixOSTest {
         )
         machine.wait_until_succeeds(prefetched(revision), timeout=60)
         machine.succeed(f"{plugin} | grep 'prefetched store_paths=.*-${busybox.name}' > /dev/null")
-        before = int(machine.succeed(fetches))
+        before = fetches()
         machine.succeed("kubectl -n kube-system patch configmap nix-store-csi-prefetch --type merge --patch-file ${prefetchWarm}")
         machine.wait_until_succeeds(prefetched("warm"), timeout=60)
         # busybox, which warm references, is on the node already.
-        t.assertEqual(int(machine.succeed(fetches)), before + 1)
+        t.assertEqual(fetches(), before + 1)
 
     with subtest("the plugin fetches a closure from an S3 bucket"):
         machine.wait_for_open_port(9000)
@@ -428,7 +436,7 @@ testers.runNixOSTest {
         machine.succeed("kubectl -n kube-system delete pod -l app.kubernetes.io/name=nix-store-csi --wait")
         machine.succeed("kubectl apply -f ${offline}")
         phase("offline", "Running")
-        t.assertEqual(int(machine.succeed(fetches)), 0)
+        t.assertEqual(fetches(), 0)
 
     with subtest("a pod whose closure the plugin prefetched starts while the cache is down"):
         machine.succeed("kubectl apply -f ${warm}")

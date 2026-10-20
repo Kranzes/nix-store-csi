@@ -311,7 +311,9 @@ impl Store {
     ) -> anyhow::Result<()> {
         let info = &entry.info;
         let name = self.caches.name(cache);
-        debug!(cache = %name, url = %info.url, nar_size = info.nar_size(), "fetching NAR");
+        let url = transport::request_url(name, &info.url)
+            .map_or_else(|_| info.url.clone(), |url| url.to_string());
+        debug!(cache = %name, %url, nar_size = info.nar_size(), "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
         let part = (|| async {
@@ -337,7 +339,7 @@ impl Store {
         })
         .retry(NAR_RESTARTS)
         .when(transport::broke_off)
-        .notify(|e, _| warn!(url = %info.url, "{e:#}; starting the NAR over"))
+        .notify(|e, _| warn!(%url, "{e:#}; starting the NAR over"))
         .await
         .with_context(|| format!("fetching {} from {name}", info.url))?;
 
@@ -363,7 +365,7 @@ impl Store {
         match moved {
             // Setting the path's mode is the only step that can fail after
             // the move, and the path is whole without it.
-            Err(e) if self.present(info.path()) => warn!("{e:#}"),
+            Err(e) if self.present(info.path()) => warn!("{e:#}; keeping the store object"),
             Err(e) => {
                 self.unsynced.lock().unwrap().remove(info.path());
                 return Err(e);

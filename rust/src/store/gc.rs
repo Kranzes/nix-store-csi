@@ -95,7 +95,10 @@ impl Store {
             for trash in trash {
                 let path = trash.path().to_owned();
                 if let Err(e) = trash.close() {
-                    warn!("deleting {}: {e}", path.display());
+                    warn!(
+                        "deleting {}: {e}; the next start-up deletes it",
+                        path.display()
+                    );
                 }
             }
             drop(this);
@@ -195,7 +198,7 @@ impl Store {
         let count = |path: StorePath| {
             let tree = self.unpacked(&path);
             let inodes = count_inodes(&tree).unwrap_or_else(|e| {
-                warn!("counting the inodes in {}: {e}", tree.display());
+                warn!("counting the inodes in {}: {e}; using 0", tree.display());
                 0
             });
             (path, inodes)

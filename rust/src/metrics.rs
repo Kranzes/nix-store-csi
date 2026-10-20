@@ -412,7 +412,7 @@ pub async fn serve(listener: TcpListener, registry: Registry) {
             Err(e) => {
                 // Errors here, such as running out of file descriptors, would
                 // recur on an immediate retry.
-                warn!("accepting a metrics connection: {e}");
+                warn!("accepting a metrics connection: {e}; retrying in 1s");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }

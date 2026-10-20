@@ -770,7 +770,7 @@ fn content_range(range: &str) -> Option<(u64, u64, u64)> {
 /// query in `path` stay as they are. Harmonia puts a query in NAR URLs.
 /// Requests carry the cache's credentials, so the URL must stay within the
 /// cache.
-fn request_url(base: &Url, path: &str) -> anyhow::Result<Url> {
+pub fn request_url(base: &Url, path: &str) -> anyhow::Result<Url> {
     check_path(path.split_once('?').map_or(path, |(p, _)| p))?;
     let mut dir = base.clone();
     if !dir.path().ends_with('/') {

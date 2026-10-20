@@ -127,7 +127,7 @@ impl Prefetch {
                 self.report();
             }
             Err(e) => {
-                warn!(store_paths = %Names(&self.roots), "prefetching: {e:#}; trying again in a minute");
+                warn!(store_paths = %Names(&self.roots), "{e:#}; trying again in a minute");
             }
         }
     }

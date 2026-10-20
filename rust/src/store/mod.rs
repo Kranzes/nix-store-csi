@@ -228,14 +228,16 @@ impl Store {
     pub fn gauges(&self) -> Gauges {
         let entries = |dir: &Path| {
             (std::fs::read_dir(dir).map(Iterator::count))
-                .inspect_err(|e| warn!("reading {}: {e}", dir.display()))
+                .inspect_err(|e| warn!("reading {}: {e}; leaving its gauge out", dir.display()))
                 .ok()
         };
         // Inside the struct literal, the guard would hold the lock while a
         // later field reads a directory.
         let unsynced_paths = self.unsynced.lock().unwrap().len();
         let space = (Space::of(&self.dir))
-            .inspect_err(|e| warn!("measuring the node store's filesystem: {e}"))
+            .inspect_err(|e| {
+                warn!("measuring the node store's filesystem: {e}; leaving its gauges out");
+            })
             .ok();
         let target = space.map(|space| gc::target(space, self.ensure_free));
         let limits_inodes = space.is_some_and(|space| space.inodes > 0);
@@ -265,7 +267,9 @@ impl Store {
         // This takes any writeback error from before start-up, so the first
         // sync of a new path doesn't report it.
         let flushed = rustix::fs::syncfs(&self.dir_fd)
-            .inspect_err(|e| warn!("syncing the node store: {e}"))
+            .inspect_err(|e| {
+                warn!("syncing the node store: {e}; deleting the paths that the last run left unsynced");
+            })
             .is_ok();
         let synced = same_boot && !self.failed_record.exists() && flushed;
         let narinfos = self.narinfos.dir();
@@ -348,7 +352,7 @@ impl Store {
         match self.caches.local_info(path) {
             Ok(info) => info.map_or(0, |info| info.nar_size()),
             Err(e) => {
-                warn!("{e:#}");
+                warn!("{e:#}; counting its size as 0");
                 0
             }
         }

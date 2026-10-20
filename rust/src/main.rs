@@ -130,7 +130,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .await
                     .with_context(|| format!("listening on {address} for metrics"))?;
                 let address = listener.local_addr()?;
-                info!("serving metrics on http://{address}/metrics");
+                let url = format!("http://{address}/metrics");
+                info!(%url, "serving metrics");
                 tokio::spawn(metrics::serve(listener, metrics::registry(&store)));
             }
             tokio::spawn(collect_garbage(store.clone(), gc_interval, keep_recent));
@@ -208,7 +209,7 @@ fn raise_open_files_limit() {
         ..limit
     };
     if let Err(e) = setrlimit(Resource::Nofile, raised) {
-        warn!("raising the limit on open files: {e}");
+        warn!("raising the limit on open files: {e}; keeping the current limit");
     }
 }
 
@@ -229,7 +230,9 @@ async fn collect_garbage(store: Arc<Store>, interval: Duration, keep_recent: Dur
     loop {
         let measure = || {
             store.excess().unwrap_or_else(|e| {
-                warn!("measuring the node store's filesystem: {e}");
+                warn!(
+                    "measuring the node store's filesystem: {e}; collecting only by --keep-recent"
+                );
                 Excess::default()
             })
         };
@@ -247,7 +250,9 @@ async fn collect_garbage(store: Arc<Store>, interval: Duration, keep_recent: Dur
             Ok(0) if excess != Excess::default() => paused_until = Instant::now() + 10 * MINUTE,
             Ok(0) => {}
             Ok(n) => info!(deleted = n, "collected the node store"),
-            Err(e) => warn!("collecting the node store: {e:#}"),
+            Err(e) => {
+                warn!("collecting the node store: {e:#}; trying again at the next collection");
+            }
         }
         // Otherwise a check that is due would run right after a sweep.
         check.reset();
@@ -260,7 +265,7 @@ async fn serve(endpoint: &str, plugin: Arc<Plugin>) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("listening on {}", socket.display()))?;
-    info!("serving {} on {}", csi::DRIVER, socket.display());
+    info!(socket = %socket.display(), "serving the CSI plugin");
     let mut term = signal(SignalKind::terminate()).context("handling SIGTERM")?;
     let mut int = signal(SignalKind::interrupt()).context("handling SIGINT")?;
     let shutdown = {

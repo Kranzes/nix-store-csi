@@ -31,7 +31,6 @@ use self::sandbox::Sandbox;
 use crate::closure::Caches;
 use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
-use crate::store_path;
 
 pub use self::fetch::{Ensuring, TooBig};
 pub use self::gc::{EnsureFree, Excess, parse_ensure_free, parse_size};
@@ -179,7 +178,7 @@ impl Store {
                 &config.stores,
                 StoreDir::default(),
                 config.trusted_keys,
-                narinfos.clone(),
+                Some(narinfos.clone()),
                 config.netrc_file.as_deref(),
             )?,
             narinfos,
@@ -379,19 +378,6 @@ impl Store {
 
     fn present(&self, path: &StorePath) -> bool {
         self.unpacked(path).symlink_metadata().is_ok()
-    }
-
-    /// Parses `paths` into store paths. Each may point inside a store path.
-    pub fn roots<'a>(
-        &self,
-        paths: impl IntoIterator<Item = &'a str>,
-    ) -> anyhow::Result<Vec<StorePath>> {
-        (paths.into_iter())
-            .map(|path| {
-                store_path::parse(self.caches.store_dir(), path)
-                    .with_context(|| format!("parsing {path}"))
-            })
-            .collect()
     }
 
     /// Makes `path`, which a fetch moved into store/, durable. It syncs the

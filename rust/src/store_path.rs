@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use anyhow::Context;
 use harmonia_store_path::{StoreDir, StorePath};
 
 /// The volume attribute that lists space-separated store paths, or paths
@@ -43,6 +44,13 @@ pub fn for_system<'a>(
             let value = attributes.get(&attribute)?;
             Some((attribute, value.as_str()))
         })
+}
+
+/// Parses `paths` into store paths. Each may point inside a store path.
+pub fn roots<'a>(paths: impl IntoIterator<Item = &'a str>) -> anyhow::Result<Vec<StorePath>> {
+    (paths.into_iter())
+        .map(|path| parse(&StoreDir::default(), path).with_context(|| format!("parsing {path}")))
+        .collect()
 }
 
 /// Accepts a base name like `<hash>-hello`, a store path, or a path inside one.

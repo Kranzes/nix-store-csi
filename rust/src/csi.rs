@@ -79,7 +79,7 @@ impl Plugin {
             return Err(Status::invalid_argument("the volume needs readOnly: true"));
         }
         let (attribute, store_paths) = store_paths(&request.volume_context, &system())?;
-        let roots = (self.store.roots(store_paths.split_whitespace()))
+        let roots = (store_path::roots(store_paths.split_whitespace()))
             .map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
         if roots.is_empty() {
             return Err(Status::invalid_argument(format!("{attribute} is empty")));

@@ -257,7 +257,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     match cli.command {
         Command::Unpack { roots } => {
-            let roots = store.roots(roots.iter().map(String::as_str))?;
+            let roots = store_path::roots(roots.iter().map(String::as_str))?;
             let mut ensuring = store.ensure(&roots);
             loop {
                 if let Ok(result) = tokio::time::timeout(UNPACK_PROGRESS, ensuring.done()).await {

@@ -34,8 +34,8 @@ pub struct Caches {
     store_dir: StoreDir,
     trusted_keys: Option<Vec<PublicKey>>,
     /// The directory with the narinfos of the paths in the node store. The
-    /// node store comes before any cache.
-    local: Narinfos,
+    /// node store comes before any cache. `unpack --dry-run` has none.
+    local: Option<Narinfos>,
 }
 
 struct Cache {
@@ -71,7 +71,7 @@ impl Caches {
         urls: &[String],
         store_dir: StoreDir,
         trusted_keys: Option<Vec<PublicKey>>,
-        local: Narinfos,
+        local: Option<Narinfos>,
         netrc: Option<&Path>,
     ) -> anyhow::Result<Self> {
         let list = urls
@@ -282,7 +282,10 @@ impl Caches {
     /// when it fetched the path, so a change of trusted keys only affects new
     /// paths. A blocking read is fine, since the file is small.
     pub fn local_info(&self, path: &StorePath) -> anyhow::Result<Option<NarInfo>> {
-        for file in self.local.files(path) {
+        let Some(local) = &self.local else {
+            return Ok(None);
+        };
+        for file in local.files(path) {
             match std::fs::read(&file) {
                 Ok(text) => return self.parse(text, path, file.display()).map(Some),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -529,7 +532,7 @@ mod tests {
             stores,
             StoreDir::default(),
             keys,
-            Narinfos::new(local.to_owned()),
+            Some(Narinfos::new(local.to_owned())),
             None,
         )
         .unwrap()

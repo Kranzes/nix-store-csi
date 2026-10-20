@@ -151,7 +151,7 @@ impl Prefetch {
         let Some((name, list)) = store_path::for_system(&files, &self.system) else {
             return Ok(Some((revision, Vec::new())));
         };
-        let mut roots = (self.store.roots(list.split_whitespace()))
+        let mut roots = (store_path::roots(list.split_whitespace()))
             .with_context(|| format!("reading {}", self.dir.join(name).display()))?;
         roots.sort();
         roots.dedup();

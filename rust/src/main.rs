@@ -31,6 +31,9 @@ mod transport;
 
 const MINUTE: Duration = Duration::from_mins(1);
 
+/// How often `unpack` logs its progress.
+const UNPACK_PROGRESS: Duration = Duration::from_secs(5);
+
 /// `duration` in whole milliseconds, for logs.
 fn millis(duration: Duration) -> Duration {
     Duration::from_millis(duration.as_millis().try_into().unwrap_or(u64::MAX))
@@ -255,7 +258,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Unpack { roots } => {
             let roots = store.roots(roots.iter().map(String::as_str))?;
-            store.ensure(&roots).done().await?;
+            let mut ensuring = store.ensure(&roots);
+            loop {
+                if let Ok(result) = tokio::time::timeout(UNPACK_PROGRESS, ensuring.done()).await {
+                    result?;
+                    break;
+                }
+                info!("{}", ensuring.progress());
+            }
             store.sync_all().await?;
             println!("{}", store.dir().display());
             Ok(())

@@ -16,6 +16,7 @@
   and `deleting`, and a narinfo without a trusted signature logs at debug
   level.
 - Fetches log one line per closure instead of one per NAR.
+- `unpack` logs progress every 5 seconds.
 - Requests fail at once on 501, 505 and 511 responses instead of retrying
   for a minute, as in Nix.
 - After a 429 response or an S3 `SlowDown` error without `Retry-After`, a

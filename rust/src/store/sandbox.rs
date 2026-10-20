@@ -31,7 +31,7 @@ impl Sandbox {
         let probe = rules.clone();
         std::thread::spawn(move || probe.confine())
             .join()
-            .expect("confining a thread doesn't panic")?;
+            .expect("confining a thread does not panic")?;
         let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(cpus.min(jobs))

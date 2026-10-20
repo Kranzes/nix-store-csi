@@ -161,7 +161,7 @@ impl Plugin {
     ) -> Result<NodeGetVolumeStatsResponse, Status> {
         check_request(&request.volume_id, &request.volume_path)?;
         let missing = format!(
-            "volume {} isn't published at {}",
+            "volume {} is not published at {}",
             request.volume_id, request.volume_path
         );
         let store = self.store.clone();

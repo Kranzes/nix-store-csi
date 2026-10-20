@@ -212,7 +212,7 @@ impl Store {
         };
         store
             .settle(&state.join("boot-id"), &state.join("generation"))
-            .context("settling the paths that the last run didn't sync")?;
+            .context("settling the paths that the last run did not sync")?;
         let size = store
             .measure(&store.dir)
             .context("measuring the node store")?;

@@ -163,7 +163,7 @@ impl Store {
             }
             // A reboot drops the mounts without kubelet unpublishing them.
             let volume = entry.file_name();
-            info!(volume = %volume.display(), "forgetting a volume that isn't mounted");
+            info!(volume = %volume.display(), "forgetting a volume that is not mounted");
             remove_file(&record)?;
         }
         (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));
@@ -271,7 +271,7 @@ impl Volume {
 pub fn check_volume(volume: &str) -> anyhow::Result<&str> {
     ensure!(
         !volume.is_empty() && volume != "." && volume != ".." && !volume.contains('/'),
-        "volume ID {volume:?} can't name a directory"
+        "volume ID {volume:?} cannot name a directory"
     );
     Ok(volume)
 }

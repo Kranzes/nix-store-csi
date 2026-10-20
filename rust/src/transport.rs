@@ -76,7 +76,7 @@ impl Http {
                 // The parser's errors quote the text that failed to parse,
                 // which can be part of a password.
                 let netrc: netrc::Netrc = (text.parse())
-                    .map_err(|_| anyhow::anyhow!("{} isn't in netrc format", file.display()))?;
+                    .map_err(|_| anyhow::anyhow!("{} is not in netrc format", file.display()))?;
                 match netrc_entry(&netrc, url.host_str().unwrap_or_default()) {
                     Some(m) => {
                         request().basic_auth(&m.login, Some(&m.password).filter(|p| !p.is_empty()))
@@ -611,12 +611,12 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
             "endpoint" => {
                 let parsed = Url::parse(&value).ok().filter(Url::has_host);
                 endpoint = Some(parsed.with_context(|| {
-                    format!("endpoint {value:?} isn't a URL like https://host")
+                    format!("endpoint {value:?} is not a URL like https://host")
                 })?);
             }
             "addressing-style" => style = value.into_owned(),
             "scheme" => bail!("give the scheme in the endpoint, like endpoint=http://host:9000"),
-            "profile" => bail!("profile needs ~/.aws/config, which nix-store-csi doesn't read"),
+            "profile" => bail!("profile needs ~/.aws/config, which nix-store-csi does not read"),
             _ => {}
         }
     }
@@ -648,7 +648,7 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
             let gcs = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
             if !virtual_hosted {
                 (endpoint.path_segments_mut())
-                    .map_err(|()| anyhow::anyhow!("endpoint can't have a path"))?
+                    .map_err(|()| anyhow::anyhow!("endpoint cannot have a path"))?
                     .pop_if_empty()
                     .extend([bucket, ""]);
             }
@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
         let t = open_with("machine 127.0.0.1 login user password sec ret");
         let err = format!("{:#}", t.get("private").await.unwrap_err());
         assert!(
-            err.contains("isn't in netrc format") && !err.contains("ret"),
+            err.contains("is not in netrc format") && !err.contains("ret"),
             "{err}"
         );
         // User info in the URL overrides the netrc file.

@@ -289,7 +289,7 @@ pub fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
         let p: f64 = (p.trim().parse()).with_context(|| format!("invalid percentage {s:?}"))?;
         ensure!(
             (0.0..=100.0).contains(&p),
-            "{s:?} isn't between 0% and 100%"
+            "{s:?} is not between 0% and 100%"
         );
         return Ok(EnsureFree::Percent(p));
     }

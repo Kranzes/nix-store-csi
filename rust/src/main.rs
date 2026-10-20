@@ -383,7 +383,7 @@ fn raise_open_files_limit() {
 /// A nonzero duration, since a tokio interval can't have a zero period.
 fn parse_interval(s: &str) -> anyhow::Result<Duration> {
     let interval = humantime::parse_duration(s)?;
-    ensure!(!interval.is_zero(), "the interval can't be 0");
+    ensure!(!interval.is_zero(), "the interval cannot be 0");
     Ok(interval)
 }
 

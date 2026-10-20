@@ -263,66 +263,33 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if stores.is_empty() {
         bail!("no substituters given");
     }
-    let trusted_keys = (!cli.no_require_sigs).then_some(trusted_keys);
-    if let Command::Unpack {
-        roots,
-        dry_run: true,
-    } = &cli.command
-    {
-        let caches = Caches::new(
-            &stores,
-            StoreDir::default(),
-            trusted_keys,
-            None,
-            cli.netrc_file.as_deref(),
-        )?;
-        let roots = store_path::roots(roots.iter().map(String::as_str))?;
-        let closure = caches.resolve(&roots, &AtomicUsize::default()).await?;
-        println!("{}", closure_size(closure.values().map(|e| &e.info)));
-        return Ok(());
-    }
-    let (max_closure_size, ensure_free) = match cli.command {
-        Command::Csi {
-            max_closure_size,
-            ensure_free,
-            ..
-        } => (max_closure_size, ensure_free),
-        Command::Unpack { .. } => (None, EnsureFree::Bytes(0)),
-    };
-    let store = Arc::new(Store::new(Config {
+    let config = Config {
         stores,
-        trusted_keys,
+        trusted_keys: (!cli.no_require_sigs).then_some(trusted_keys),
         state_dir: cli.state_dir,
         jobs: cli.max_substitution_jobs.get(),
         netrc_file: cli.netrc_file,
-        max_closure_size,
-        ensure_free,
-    })?);
-
+        max_closure_size: None,
+        ensure_free: EnsureFree::Bytes(0),
+    };
     match cli.command {
-        Command::Unpack { roots, .. } => {
-            let roots = store_path::roots(roots.iter().map(String::as_str))?;
-            let mut ensuring = store.ensure(&roots);
-            loop {
-                if let Ok(result) = tokio::time::timeout(UNPACK_PROGRESS, ensuring.done()).await {
-                    result?;
-                    break;
-                }
-                info!("{}", ensuring.progress());
-            }
-            store.sync_all().await?;
-            println!("{}", store.dir().display());
-            Ok(())
-        }
+        Command::Unpack { roots, dry_run } => unpack(config, &roots, dry_run).await,
         Command::Csi {
             endpoint,
             node_id,
             keep_recent,
             gc_interval,
+            ensure_free,
             metrics_address,
+            max_closure_size,
             prefetch_dir,
-            ..
         } => {
+            let config = Config {
+                max_closure_size,
+                ensure_free,
+                ..config
+            };
+            let store = Arc::new(Store::new(config)?);
             store.prune_views(mounts::is_bound).await?;
             if let Some(address) = metrics_address {
                 let listener = listen(address)
@@ -340,6 +307,37 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             serve(&endpoint, plugin).await
         }
     }
+}
+
+/// Fetches the closures of `roots` and prints the node store's directory.
+/// With `dry_run`, it only resolves them against the caches and prints their
+/// size, without opening the state dir.
+async fn unpack(config: Config, roots: &[String], dry_run: bool) -> anyhow::Result<()> {
+    let roots = store_path::roots(roots.iter().map(String::as_str))?;
+    if dry_run {
+        let caches = Caches::new(
+            &config.stores,
+            StoreDir::default(),
+            config.trusted_keys,
+            None,
+            config.netrc_file.as_deref(),
+        )?;
+        let closure = caches.resolve(&roots, &AtomicUsize::default()).await?;
+        println!("{}", closure_size(closure.values().map(|e| &e.info)));
+        return Ok(());
+    }
+    let store = Arc::new(Store::new(config)?);
+    let mut ensuring = store.ensure(&roots);
+    loop {
+        if let Ok(result) = tokio::time::timeout(UNPACK_PROGRESS, ensuring.done()).await {
+            result?;
+            break;
+        }
+        info!("{}", ensuring.progress());
+    }
+    store.sync_all().await?;
+    println!("{}", store.dir().display());
+    Ok(())
 }
 
 /// Binds `address`. An IPv6 address takes IPv4 too, whatever

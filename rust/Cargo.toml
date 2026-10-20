@@ -40,7 +40,7 @@ rustix = { version = "1.1.5", features = ["fs", "mount", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 socket2 = "0.6.5"
 tempfile = "3"
-tokio = { version = "1.53.2", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.19", default-features = false, features = ["net"] }
 tokio-util = { version = "0.7.19", features = ["io", "rt"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server"] }
@@ -59,7 +59,7 @@ landlock = "0.4.7"
 pedantic = { level = "warn", priority = -1 }
 
 [dev-dependencies]
-tokio = { version = "1.53.2", features = ["test-util"] }
+tokio = { version = "1.53.3", features = ["test-util"] }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }

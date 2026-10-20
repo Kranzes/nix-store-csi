@@ -167,7 +167,10 @@ fn watch(dir: &Path) -> io::Result<AsyncFd<OwnedFd>> {
         | inotify::WatchFlags::CLOSE_WRITE
         | inotify::WatchFlags::DELETE;
     inotify::add_watch(&fd, dir, events)?;
-    AsyncFd::new(fd)
+    // SAFETY: the `AsyncFd` takes ownership of `fd`, so nothing else can close
+    // it, and this module only reads through `get_inner`, so the descriptor
+    // stays the same until the `AsyncFd` is dropped.
+    unsafe { AsyncFd::register(fd) }.map_err(|err| err.into_parts().1)
 }
 
 /// Waits for events on `watch`, and discards them.

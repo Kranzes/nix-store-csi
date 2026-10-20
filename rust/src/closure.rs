@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{Display, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,6 +55,12 @@ pub struct Entry {
     /// Index of the cache in the order given, or `None` for the node store.
     pub cache: Option<usize>,
     pub info: NarInfo,
+}
+
+enum Lookup {
+    Found(Arc<Entry>),
+    /// A line for each cache that has the path without a trusted signature.
+    Missing(Vec<String>),
 }
 
 impl Caches {
@@ -157,10 +164,11 @@ impl Caches {
 
     /// Resolves the closure of `roots`. Each narinfo comes from the node
     /// store, or else from the first cache that has it with a trusted
-    /// signature.
+    /// signature. It counts the narinfos it has in `resolved`.
     pub async fn resolve(
         &self,
         roots: &[StorePath],
+        resolved: &AtomicUsize,
     ) -> anyhow::Result<BTreeMap<StorePath, Arc<Entry>>> {
         let tiers = OnceCell::new();
         let mut found = BTreeMap::new();
@@ -186,9 +194,12 @@ impl Caches {
             let Some((path, entry)) = in_flight.next().await else {
                 break;
             };
-            let Some(entry) = entry? else {
-                missing.push(path);
-                continue;
+            let entry = match entry? {
+                Lookup::Found(entry) => entry,
+                Lookup::Missing(untrusted) => {
+                    missing.push((path, untrusted));
+                    continue;
+                }
             };
             for r in entry.info.references() {
                 if seen.insert(r.clone()) {
@@ -196,35 +207,37 @@ impl Caches {
                 }
             }
             found.insert(path, entry);
+            resolved.fetch_add(1, Ordering::Relaxed);
         }
 
         if !missing.is_empty() {
+            // One store path is enough to act on. A root comes first, since
+            // a missing root hides its references.
             missing.sort();
+            let (m, untrusted) = (missing.iter())
+                .find(|(m, _)| roots.contains(m))
+                .unwrap_or(&missing[0]);
             let what = if self.trusted_keys.is_some() {
-                "in any cache with a trusted signature"
+                " with a trusted signature"
             } else {
-                "in any cache"
+                ""
             };
-            let mut msg = format!("not found {what}:");
-            for m in &missing {
-                let by: Vec<_> = (found.iter())
-                    .filter(|(_, e)| e.info.references().contains(m))
-                    .map(|(path, _)| self.store_dir.display(path).to_string())
-                    .collect();
-                let m = self.store_dir.display(m);
-                match by.as_slice() {
-                    [] => write!(msg, "\n  {m} (requested)")?,
-                    [a, b, c, rest @ ..] if !rest.is_empty() => write!(
-                        msg,
-                        "\n  {m}, referenced by {a}, {b}, {c} and {} more",
-                        rest.len()
-                    )?,
-                    _ => write!(msg, "\n  {m}, referenced by {}", by.join(", "))?,
-                }
+            let mut msg = format!("{} is not in any cache{what}", self.store_dir.display(m));
+            let referrer = found.iter().find(|(_, e)| e.info.references().contains(m));
+            if let Some((by, _)) = referrer {
+                write!(msg, "; {} references it", self.store_dir.display(by))?;
+            }
+            if !untrusted.is_empty() {
+                write!(msg, "; {}", untrusted.join(", "))?;
+            }
+            match missing.len() - 1 {
+                0 => {}
+                1 => write!(msg, "; 1 more store path is missing")?,
+                n => write!(msg, "; {n} more store paths are missing")?,
             }
             for cache in &self.list {
                 if let Some(Err(e)) = &*cache.state.borrow() {
-                    write!(msg, "\nskipped {}: {e}", cache.name)?;
+                    write!(msg, "; skipped {}: {e}", cache.name)?;
                 }
             }
             bail!(msg);
@@ -241,19 +254,22 @@ impl Caches {
         for tier in &mut tiers {
             tier.retain(|cache| !tried.contains(cache));
         }
-        self.lookup(entry.info.path(), &tiers, |info| {
+        let found = self.lookup(entry.info.path(), &tiers, |info| {
             info.references() == entry.info.references()
+        });
+        Ok(match found.await? {
+            Lookup::Found(entry) => Some(entry),
+            Lookup::Missing(_) => None,
         })
-        .await
     }
 
     async fn find(
         &self,
         path: &StorePath,
         tiers: &OnceCell<Vec<Vec<usize>>>,
-    ) -> anyhow::Result<Option<Arc<Entry>>> {
+    ) -> anyhow::Result<Lookup> {
         match self.local_info(path) {
-            Ok(Some(info)) => return Ok(Some(Arc::new(Entry { cache: None, info }))),
+            Ok(Some(info)) => return Ok(Lookup::Found(Arc::new(Entry { cache: None, info }))),
             Ok(None) => {}
             Err(e) => tracing::warn!("{e:#}"),
         }
@@ -285,16 +301,17 @@ impl Caches {
         path: &StorePath,
         tiers: &[Vec<usize>],
         accept: impl Fn(&NarInfo) -> bool,
-    ) -> anyhow::Result<Option<Arc<Entry>>> {
+    ) -> anyhow::Result<Lookup> {
         let file = format!("{}.narinfo", path.hash());
         let mut races: FuturesOrdered<_> = (tiers.iter())
             .map(|tier| self.race(path, &file, tier, &accept))
             .collect();
         let mut error = None;
+        let mut untrusted = Vec::new();
         while let Some(found) = races.next().await {
             match found {
-                Ok(Some(entry)) => return Ok(Some(entry)),
-                Ok(None) => {}
+                Ok(Lookup::Found(entry)) => return Ok(Lookup::Found(entry)),
+                Ok(Lookup::Missing(more)) => untrusted.extend(more),
                 Err(e) => {
                     error.get_or_insert(e);
                 }
@@ -302,7 +319,7 @@ impl Caches {
         }
         match error {
             Some(e) => Err(e.context(format!("looking up {path}"))),
-            None => Ok(None),
+            None => Ok(Lookup::Missing(untrusted)),
         }
     }
 
@@ -314,7 +331,7 @@ impl Caches {
         file: &str,
         tier: &[usize],
         accept: &impl Fn(&NarInfo) -> bool,
-    ) -> anyhow::Result<Option<Arc<Entry>>> {
+    ) -> anyhow::Result<Lookup> {
         let mut answers: FuturesUnordered<_> = (tier.iter())
             .map(|&cache| {
                 let c = &*self.list[cache];
@@ -322,6 +339,7 @@ impl Caches {
             })
             .collect();
         let mut error = None;
+        let mut untrusted = Vec::new();
         while let Some((cache, answer)) = answers.next().await {
             let name = &self.list[cache].name;
             let info = match answer {
@@ -330,24 +348,30 @@ impl Caches {
                 Err(e) => Err(e),
             };
             match info {
-                Ok(mut info) => {
-                    if !self.trust(&mut info) {
+                Ok(mut info) => match self.trust(&mut info) {
+                    Err(signers) => {
                         tracing::warn!("{path} in {name} has no trusted signature, skipping it");
-                    } else if accept(&info) {
+                        untrusted.push(match signers.as_slice() {
+                            [] => format!("{name} has it unsigned"),
+                            _ => format!("{name} has it signed by {}", self.signers(&signers)),
+                        });
+                    }
+                    Ok(()) if accept(&info) => {
                         tracing::trace!("found {path} in {name}");
-                        return Ok(Some(Arc::new(Entry {
+                        return Ok(Lookup::Found(Arc::new(Entry {
                             cache: Some(cache),
                             info,
                         })));
                     }
-                }
+                    Ok(()) => {}
+                },
                 Err(e) => {
                     tracing::debug!("{e:#}");
                     error.get_or_insert(e);
                 }
             }
         }
-        error.map_or(Ok(None), Err)
+        error.map_or(Ok(Lookup::Missing(untrusted)), Err)
     }
 
     fn parse(
@@ -368,11 +392,33 @@ impl Caches {
         Ok(info)
     }
 
-    /// Returns whether a trusted key signed `info`, and drops its signatures.
-    /// Without trusted keys it accepts `info`.
-    fn trust(&self, info: &mut NarInfo) -> bool {
+    /// Lists `signers`, marking a trusted key's name as invalid, since its
+    /// signature didn't verify.
+    fn signers(&self, signers: &[String]) -> String {
+        let trusted =
+            |name: &str| (self.trusted_keys.iter().flatten()).any(|key| key.name() == name);
+        (signers.iter())
+            .map(|name| {
+                if trusted(name) {
+                    format!("{name} (invalid)")
+                } else {
+                    name.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Checks that a trusted key signed `info`, and drops its signatures. If
+    /// none did, returns the names of the keys that did. Without trusted keys
+    /// it accepts any `info`.
+    fn trust(&self, info: &mut NarInfo) -> Result<(), Vec<String>> {
         let keys = self.trusted_keys.as_deref();
-        info.check_signatures(keys.unwrap_or_default()) || keys.is_none()
+        let checked = info.check_signatures(keys.unwrap_or_default());
+        if keys.is_none() {
+            return Ok(());
+        }
+        checked
     }
 }
 
@@ -488,8 +534,18 @@ mod tests {
         .unwrap()
     }
 
+    impl Caches {
+        /// [`Caches::resolve`] without the count.
+        pub(crate) async fn closure(
+            &self,
+            roots: &[StorePath],
+        ) -> anyhow::Result<BTreeMap<StorePath, Arc<Entry>>> {
+            self.resolve(roots, &AtomicUsize::default()).await
+        }
+    }
+
     async fn resolve_err(caches: &Caches, roots: &[StorePath]) -> String {
-        let Err(e) = caches.resolve(roots).await else {
+        let Err(e) = caches.closure(roots).await else {
             panic!("{roots:?} resolved");
         };
         format!("{e:#}")
@@ -510,20 +566,36 @@ mod tests {
             format!("{}?priority=30", file_store(&dir.join("cache-none"))),
         ];
         let caches_zstd = caches(&stores, Some(TEST_KEY));
-        let closure = caches_zstd.resolve(&roots).await.unwrap();
+        let resolved = AtomicUsize::default();
+        let closure = caches_zstd.resolve(&roots, &resolved).await.unwrap();
         assert_eq!(closure.len(), 5);
+        assert_eq!(resolved.into_inner(), 5);
         assert!(closure.contains_key(&fixture_path(&dir, "glibc")));
         // The best cache that has a path wins.
         assert_eq!(sources(&closure), [Some(1)].into());
 
         // With the wrong trusted key, even the root is missing.
         let wrong = NIXOS_KEY.replace("cache.nixos.org-1", "other");
-        let msg = resolve_err(&caches(&stores, Some(&wrong)), &roots).await;
-        assert!(msg.contains("(requested)"), "{msg}");
-        assert!(caches(&stores, None).resolve(&roots).await.is_ok());
+        let wrong_caches = caches(&stores, Some(&wrong));
+        let msg = resolve_err(&wrong_caches, &roots).await;
+        let hello = StoreDir::default().display(&roots[0]).to_string();
+        assert!(
+            msg.starts_with(&format!(
+                "{hello} is not in any cache with a trusted signature; "
+            )),
+            "{msg}"
+        );
+        for i in [1, 2] {
+            let name = wrong_caches.name(i);
+            assert!(
+                msg.contains(&format!("{name} has it signed by test-1")),
+                "{msg}"
+            );
+        }
+        assert!(caches(&stores, None).closure(&roots).await.is_ok());
 
         copy_narinfos(&dir, "cache-none", tmp.path(), |t| t);
-        let closure = caches_zstd.resolve(&roots).await.unwrap();
+        let closure = caches_zstd.closure(&roots).await.unwrap();
         assert_eq!(sources(&closure), [Some(0)].into());
 
         // After a NAR fails, `next` finds a cache not tried yet with the same
@@ -550,7 +622,7 @@ mod tests {
         let unsynced = narinfos.unsynced(&glibc);
         std::fs::rename(narinfos.synced(&glibc), &unsynced).unwrap();
         let closure = with_local(&[], Some(NIXOS_KEY), local.path())
-            .resolve(&roots)
+            .closure(&roots)
             .await
             .unwrap();
         assert_eq!(closure.len(), 5);
@@ -564,7 +636,7 @@ mod tests {
             Some(TEST_KEY),
             local.path(),
         );
-        let closure = caches.resolve(&roots).await.unwrap();
+        let closure = caches.closure(&roots).await.unwrap();
         assert_eq!(closure[&glibc].cache, Some(0));
         assert_eq!(sources(&closure), [None, Some(0)].into());
         let from_cache = caches
@@ -604,10 +676,23 @@ mod tests {
             zstd.clone(),
         ];
         let closure = caches(&stores, Some(TEST_KEY))
-            .resolve(std::slice::from_ref(&hello))
+            .closure(std::slice::from_ref(&hello))
             .await
             .unwrap();
         assert_eq!(sources(&closure), [Some(1)].into());
+        // With no other cache, the error names it.
+        let only = caches(&[file_store(unsigned.path())], Some(TEST_KEY));
+        let msg = resolve_err(&only, std::slice::from_ref(&hello)).await;
+        let name = only.name(0);
+        assert!(msg.contains(&format!("{name} has it unsigned")), "{msg}");
+        // A trusted key's signature that doesn't verify.
+        let tampered = empty_cache();
+        copy_narinfos(&dir, "cache-none", tampered.path(), |t| {
+            t.replace("NarSize: ", "NarSize: 1")
+        });
+        let only = caches(&[file_store(tampered.path())], Some(TEST_KEY));
+        let msg = resolve_err(&only, std::slice::from_ref(&hello)).await;
+        assert!(msg.contains("signed by test-1 (invalid)"), "{msg}");
 
         // A fallback must have the references the closure came from. Without
         // the line the narinfo still parses, with no references.
@@ -622,7 +707,7 @@ mod tests {
         ];
         let fallbacks = caches(&stores, None);
         let closure = fallbacks
-            .resolve(std::slice::from_ref(&hello))
+            .closure(std::slice::from_ref(&hello))
             .await
             .unwrap();
         let next = fallbacks.next(&closure[&hello], &[0]).await.unwrap();
@@ -650,7 +735,7 @@ mod tests {
             &[stores[0].clone(), stores[1].clone(), good],
             Some(TEST_KEY),
         );
-        let closure = all.resolve(&roots).await.unwrap();
+        let closure = all.closure(&roots).await.unwrap();
         assert_eq!(sources(&closure), [Some(2)].into());
         // The cache for another store dir counts as paused for the metrics.
         let paused: Vec<_> = all.paused().into_iter().map(|(_, p)| p).collect();
@@ -661,7 +746,9 @@ mod tests {
         assert!(msg.contains("parsing the narinfo"), "{msg}");
         let msg = resolve_err(&caches(&stores[..1], Some(TEST_KEY)), &roots).await;
         assert!(
-            msg.contains("(requested)") && msg.contains("holds paths for /other/store"),
+            msg.contains("is not in any cache")
+                && msg.contains("; skipped ")
+                && msg.contains("holds paths for /other/store"),
             "{msg}"
         );
     }
@@ -685,12 +772,12 @@ mod tests {
             Some(TEST_KEY),
         );
 
-        let closure = caches.resolve(&[hello]).await.unwrap();
+        let closure = caches.closure(&[hello]).await.unwrap();
         assert_eq!(sources(&closure), [Some(1)].into());
-        let closure = caches.resolve(std::slice::from_ref(&glibc)).await.unwrap();
+        let closure = caches.closure(std::slice::from_ref(&glibc)).await.unwrap();
         assert_eq!(sources(&closure), [Some(1)].into());
         tokio::time::advance(PAUSE).await;
-        let closure = caches.resolve(&[glibc]).await.unwrap();
+        let closure = caches.closure(&[glibc]).await.unwrap();
         assert_eq!(sources(&closure), [Some(0)].into());
     }
 
@@ -715,7 +802,7 @@ mod tests {
         let hung = crate::transport::tests::server(crate::transport::tests::Mode::Hangs).await;
         let stores = [hung, file_store(&dir.join("cache-zstd"))];
         let caches = caches(&stores, Some(TEST_KEY));
-        let closure = tokio::time::timeout(Duration::from_secs(10), caches.resolve(&roots))
+        let closure = tokio::time::timeout(Duration::from_secs(10), caches.closure(&roots))
             .await
             .expect("waited for the hung cache")
             .unwrap();
@@ -739,7 +826,7 @@ mod tests {
         let mut stores: Vec<_> = dirs.iter().map(|d| file_store(d.path())).collect();
         stores[0].push_str("?priority=70");
         let caches = caches(&stores, Some(TEST_KEY));
-        let closure = caches.resolve(&roots).await.unwrap();
+        let closure = caches.closure(&roots).await.unwrap();
         assert_eq!(caches.tiers().await, [[2], [1], [0]]);
         assert_eq!(sources(&closure), [Some(2)].into());
     }
@@ -755,7 +842,7 @@ mod tests {
         std::fs::remove_file(tmp.path().join(format!("{}.narinfo", glibc.hash()))).unwrap();
         let msg = resolve_err(&caches(&[file_store(tmp.path())], None), &roots).await;
         assert!(
-            msg.contains(&format!("/nix/store/{glibc}, referenced by")),
+            msg.contains(&format!("/nix/store/{glibc} is not in any cache; ")),
             "{msg}"
         );
         assert!(msg.contains(&roots[0].to_string()), "{msg}");
@@ -767,7 +854,7 @@ mod tests {
             return;
         }
         let closure = caches(&["https://cache.nixos.org".into()], Some(NIXOS_KEY))
-            .resolve(&[StorePath::from_base_path(HELLO).unwrap()])
+            .closure(&[StorePath::from_base_path(HELLO).unwrap()])
             .await
             .unwrap();
         assert_eq!(closure.len(), 5);

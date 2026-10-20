@@ -13,7 +13,7 @@ kubectl logs hello
 ```
 
 A pod stays in `ContainerCreating` until its closure is on the node. Past 90
-seconds, its events show how much has arrived.
+seconds, its events show how many store paths and bytes have arrived.
 
 ## Multiple architectures
 

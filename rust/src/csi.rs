@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytesize::ByteSize;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
@@ -102,14 +101,7 @@ impl Plugin {
             }
             Err(_) => {
                 // Kubelet puts this message in the pod's events.
-                let msg = match ensuring.progress() {
-                    Some((done, total)) => format!(
-                        "still fetching the closure, {} of {}",
-                        ByteSize(done),
-                        ByteSize(total)
-                    ),
-                    None => "still resolving the closure".to_owned(),
-                };
+                let msg = format!("still {}", ensuring.progress());
                 info!(volume = request.volume_id, "{msg}");
                 return Err(Status::unavailable(msg));
             }
@@ -332,9 +324,17 @@ fn store_paths<'a>(
     system: &str,
 ) -> Result<(String, &'a str), Status> {
     store_path::for_system(context, system).ok_or_else(|| {
-        Status::invalid_argument(format!(
-            "no {STORE_PATHS}.{system} or {STORE_PATHS} attribute"
-        ))
+        let mut msg = format!("no {STORE_PATHS}.{system} or {STORE_PATHS} attribute");
+        // Kubelet adds attributes under this prefix.
+        let mut others: Vec<_> = (context.keys())
+            .filter(|k| !k.starts_with("csi.storage.k8s.io/"))
+            .map(String::as_str)
+            .collect();
+        if !others.is_empty() {
+            others.sort_unstable();
+            msg = format!("{msg}, only {}", others.join(", "));
+        }
+        Status::invalid_argument(msg)
     })
 }
 
@@ -371,9 +371,17 @@ mod tests {
         let (attribute, value) = store_paths(&both, "x86_64-linux").unwrap();
         assert_eq!((attribute.as_str(), value), ("storePaths", "/nix/store/a"));
 
-        let other = context(&[("storePaths.aarch64-linux", "/nix/store/b")]);
+        let other = context(&[
+            ("storePaths.aarch64-linux", "/nix/store/b"),
+            ("csi.storage.k8s.io/ephemeral", "true"),
+        ]);
         let e = store_paths(&other, "x86_64-linux").unwrap_err();
         assert_eq!(e.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            e.message(),
+            "no storePaths.x86_64-linux or storePaths attribute, only storePaths.aarch64-linux"
+        );
+        let e = store_paths(&context(&[]), "x86_64-linux").unwrap_err();
         assert_eq!(
             e.message(),
             "no storePaths.x86_64-linux or storePaths attribute"

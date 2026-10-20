@@ -3,7 +3,7 @@ use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -53,11 +53,12 @@ impl Store {
     fn start_ensure(self: &Arc<Self>, roots: &[StorePath], prefetch: bool) -> Ensuring {
         let (this, roots) = (self.clone(), roots.to_vec());
         let progress = Arc::<OnceLock<_>>::default();
-        let set = progress.clone();
+        let resolved = Arc::<AtomicUsize>::default();
+        let (set, count) = (progress.clone(), resolved.clone());
         let (tx, rx) = oneshot::channel();
         self.ensures.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
-            let result = this.ensure_closure(&roots, prefetch, &set).await;
+            let result = this.ensure_closure(&roots, prefetch, &set, &count).await;
             this.ensures.fetch_sub(1, Ordering::Relaxed);
             // From here on, only the caller's hold makes collection spare the
             // closure.
@@ -68,6 +69,7 @@ impl Store {
         });
         Ensuring {
             result: rx,
+            resolved,
             progress,
         }
     }
@@ -76,10 +78,11 @@ impl Store {
         self: &Arc<Self>,
         roots: &[StorePath],
         prefetch: bool,
-        progress: &OnceLock<Progress>,
+        progress: &OnceLock<Fetching>,
+        resolved: &AtomicUsize,
     ) -> anyhow::Result<Arc<[StorePath]>> {
         let installs = self.installs.load(Ordering::SeqCst);
-        let closure = self.caches.resolve(roots).await?;
+        let closure = self.caches.resolve(roots, resolved).await?;
         let total: u64 = closure.values().map(|e| e.info.nar_size()).sum();
         let paths: Arc<[StorePath]> = closure.keys().cloned().collect();
         // Under the guard, a collection either sees the hold or finishes
@@ -114,10 +117,13 @@ impl Store {
         let fetching: u64 = missing.iter().map(|p| closure[p].info.nar_size()).sum();
         // Fetching can take a while, and each fetch holds the entry it needs.
         drop(closure);
-        let _ = progress.set(Progress {
-            present: total - fetching,
-            total,
-            fetches: fetches.iter().map(|(_, bytes)| bytes.clone()).collect(),
+        let _ = progress.set(Fetching {
+            present_bytes: total - fetching,
+            total_bytes: total,
+            present_paths: paths.len() - missing.len(),
+            start: Instant::now(),
+            start_bytes: read(&fetches),
+            fetches: fetches.clone(),
             _held: held,
         });
         // Returns at the first failure, and the other fetches carry on.
@@ -354,16 +360,23 @@ impl Drop for Leave {
 /// [`Store::prefetch`].
 pub struct Ensuring {
     result: oneshot::Receiver<anyhow::Result<Arc<[StorePath]>>>,
-    progress: Arc<OnceLock<Progress>>,
+    /// The narinfos resolution has so far.
+    resolved: Arc<AtomicUsize>,
+    progress: Arc<OnceLock<Fetching>>,
 }
 
-/// Counts of a closure's NAR bytes, set once the closure is resolved.
-struct Progress {
+/// The fetches of a closure's paths, set once the closure is resolved.
+struct Fetching {
     /// NAR bytes of the paths the store already had.
-    present: u64,
-    total: u64,
-    /// The NAR bytes that each fetch of the other paths has read.
-    fetches: Vec<Arc<AtomicU64>>,
+    present_bytes: u64,
+    total_bytes: u64,
+    present_paths: usize,
+    /// When the fetches started, and the NAR bytes they had read by then. A
+    /// fetch that another ensure started may have read some already.
+    start: Instant,
+    start_bytes: u64,
+    /// The fetch of each other path, and the NAR bytes it has read.
+    fetches: Vec<(Fetch, Arc<AtomicU64>)>,
     /// Lasts until both the fetches and the caller are done with it, so
     /// collection spares the closure until the caller has it in a view.
     _held: Held,
@@ -398,15 +411,96 @@ impl Ensuring {
         (&mut self.result).await?
     }
 
-    /// Returns the NAR bytes of the closure in the store so far, and the
-    /// total, once the closure is resolved.
-    pub fn progress(&self) -> Option<(u64, u64)> {
-        let progress = self.progress.get()?;
-        let fetched: u64 = (progress.fetches.iter())
-            .map(|bytes| bytes.load(Ordering::Relaxed))
-            .sum();
-        Some((progress.present + fetched, progress.total))
+    pub fn progress(&self) -> Progress {
+        let Some(f) = self.progress.get() else {
+            return Progress::Resolving {
+                paths: self.resolved.load(Ordering::Relaxed),
+            };
+        };
+        let fetched = read(&f.fetches);
+        let ms = f.start.elapsed().as_millis();
+        let rate = (ms >= 1000).then(|| {
+            let bytes = u128::from(fetched.saturating_sub(f.start_bytes));
+            u64::try_from(bytes * 1000 / ms).unwrap_or(u64::MAX)
+        });
+        let done = (f.fetches.iter()).filter(|(fetch, _)| matches!(fetch.peek(), Some(Ok(()))));
+        Progress::Fetching {
+            bytes: f.present_bytes + fetched,
+            total_bytes: f.total_bytes,
+            paths: f.present_paths + done.count(),
+            total_paths: f.present_paths + f.fetches.len(),
+            rate,
+        }
     }
+}
+
+/// The NAR bytes that `fetches` have read.
+fn read(fetches: &[(Fetch, Arc<AtomicU64>)]) -> u64 {
+    fetches.iter().map(|(_, b)| b.load(Ordering::Relaxed)).sum()
+}
+
+/// How far an [`Ensuring`] has got. It reads as the rest of a sentence, like
+/// "resolving the closure: 12 store paths so far".
+pub enum Progress {
+    Resolving {
+        paths: usize,
+    },
+    Fetching {
+        /// NAR bytes in the store, counting the paths it already had.
+        bytes: u64,
+        total_bytes: u64,
+        paths: usize,
+        total_paths: usize,
+        /// NAR bytes per second since the fetches started, or `None` in the
+        /// first second.
+        rate: Option<u64>,
+    },
+}
+
+impl std::fmt::Display for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            Self::Resolving { paths } => {
+                let s = if paths == 1 { "" } else { "s" };
+                write!(f, "resolving the closure: {paths} store path{s} so far")
+            }
+            Self::Fetching {
+                bytes,
+                total_bytes,
+                paths,
+                total_paths,
+                rate,
+            } => {
+                let bytes = fraction(bytes, total_bytes);
+                write!(
+                    f,
+                    "fetching the closure: {paths}/{total_paths} store paths ({bytes})"
+                )?;
+                match rate {
+                    Some(rate) => write!(f, ", {}/s", ByteSize(rate)),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
+}
+
+/// Formats `done` and `total` in the unit that suits `total`, like Nix's
+/// `45.2/120.3 MiB`.
+fn fraction(done: u64, total: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let exp = (1..UNITS.len())
+        .rev()
+        .find(|&i| total >> (10 * i) > 0)
+        .unwrap_or(0);
+    if exp == 0 {
+        return format!("{done}/{total} B");
+    }
+    // Rounds to the nearest tenth, like ByteSize.
+    let half = 1u128 << (10 * exp - 1);
+    let tenths = |n: u64| (u128::from(n) * 10 + half) >> (10 * exp);
+    let (d, t) = (tenths(done), tenths(total));
+    format!("{}.{}/{}.{} {}", d / 10, d % 10, t / 10, t % 10, UNITS[exp])
 }
 
 /// A closure whose NARs, other than those that a prefetch holds, add up to
@@ -666,6 +760,14 @@ mod tests {
         assert!(format!("{err:#}").contains("parsing the NAR"), "{err:#}");
     }
 
+    #[test]
+    fn formats_fractions() {
+        assert_eq!(fraction(0, 512), "0/512 B");
+        assert_eq!(fraction(1536, 3 << 20), "0.0/3.0 MiB");
+        assert_eq!(fraction(5 << 29, 3 << 30), "2.5/3.0 GiB");
+        assert_eq!(fraction((4 << 30) - (1 << 25), 4 << 30), "4.0/4.0 GiB");
+    }
+
     #[tokio::test]
     async fn unpacks_closure() {
         let Some(dir) = fixtures() else {
@@ -687,8 +789,21 @@ mod tests {
         let mut ensuring = store.ensure(std::slice::from_ref(&hello));
         let paths = ensuring.done().await.unwrap();
         assert_eq!(paths.len(), 5);
-        let (done, total) = ensuring.progress().unwrap();
-        assert!(done == total && total > 0, "{done} of {total}");
+        let Progress::Fetching {
+            bytes,
+            total_bytes,
+            paths: done,
+            total_paths,
+            ..
+        } = ensuring.progress()
+        else {
+            panic!("{}", ensuring.progress());
+        };
+        assert!(
+            bytes == total_bytes && total_bytes > 0,
+            "{bytes} of {total_bytes}"
+        );
+        assert_eq!((done, total_paths), (5, 5));
         drop(ensuring);
         assert_eq!(count(store.dir()), 5);
         assert_eq!(count(state.join("narinfo")), 5);
@@ -708,7 +823,7 @@ mod tests {
         std::fs::remove_dir_all(&cache).unwrap();
         let store = reopen(store, || config(&dir, &cache, &state)).await;
         let mut info = fixture_narinfo(&dir, "cache-zstd", &hello);
-        info.check_signatures(&[]);
+        let _ = info.check_signatures(&[]);
         let stored = std::fs::read(store.narinfos.synced(&hello)).unwrap();
         assert_eq!(stored, info.to_text());
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
@@ -832,9 +947,17 @@ mod tests {
         let (a_fetches, b_fetches) = (fetches(&a), fetches(&b));
         assert!(!b_fetches.is_empty() && b_fetches.len() < a_fetches.len());
         for fetch in &b_fetches {
-            assert!(a_fetches.iter().any(|a| Arc::ptr_eq(a, fetch)));
+            assert!(a_fetches.iter().any(|a| Arc::ptr_eq(&a.1, &fetch.1)));
         }
         assert_eq!(store.fetching.lock().unwrap().len(), a_fetches.len());
+        // No fetch can start while the test holds the jobs.
+        let Progress::Fetching {
+            paths, total_paths, ..
+        } = a.progress()
+        else {
+            panic!("{}", a.progress());
+        };
+        assert_eq!((paths, total_paths), (0, a_fetches.len()));
 
         drop(jobs);
         assert_eq!(a.done().await.unwrap().len(), a_fetches.len());
@@ -871,7 +994,7 @@ mod tests {
         let retry = store.ensure(std::slice::from_ref(&hello));
         resolved(&retry).await;
         for fetch in fetches(&retry) {
-            assert!(started.iter().any(|s| Arc::ptr_eq(s, &fetch)));
+            assert!(started.iter().any(|s| Arc::ptr_eq(&s.1, &fetch.1)));
         }
 
         // With no caller left, the fetches and their syncs still finish.

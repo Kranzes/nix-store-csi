@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use harmonia_store_path::StorePath;
 
-use super::fetch::Ensuring;
+use super::fetch::{Ensuring, Progress};
 use super::fs::Scratch;
 use super::{Config, EnsureFree, Store};
 use crate::narinfo::tests::{file_store, fixture_root, fixtures};
@@ -81,7 +81,7 @@ pub(super) async fn settled(store: &Arc<Store>) {
 
 /// Waits for `ensuring` to resolve its closure and start its fetches.
 pub(super) async fn resolved(ensuring: &Ensuring) {
-    while ensuring.progress().is_none() {
+    while matches!(ensuring.progress(), Progress::Resolving { .. }) {
         tokio::task::yield_now().await;
     }
 }

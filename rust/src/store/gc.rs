@@ -589,7 +589,7 @@ mod tests {
         unsync(&store, &unsynced);
 
         // Publishes find it on the node.
-        let closure = store.caches.resolve(&[hello]).await.unwrap();
+        let closure = store.caches.closure(&[hello]).await.unwrap();
         assert_eq!(closure[&unsynced].cache, None);
         // Collection spares it until its sync.
         let day = Duration::from_hours(24);

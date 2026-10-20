@@ -114,8 +114,9 @@ impl NarInfo {
         &self.parsed.info.info.references
     }
 
-    /// Returns whether one of `keys` signed it, and drops its signatures.
-    pub fn check_signatures(&mut self, keys: &[PublicKey]) -> bool {
+    /// Checks that one of `keys` signed it, and drops its signatures. If none
+    /// did, returns the names of the keys that did.
+    pub fn check_signatures(&mut self, keys: &[PublicKey]) -> Result<(), Vec<String>> {
         let info = &mut self.parsed.info.info;
         let signatures = std::mem::take(&mut info.signatures);
         let fingerprint = fingerprint_path(
@@ -125,10 +126,14 @@ impl NarInfo {
             info.nar_size,
             &info.references,
         );
-        signatures.iter().any(|sig| {
+        let trusted = signatures.iter().any(|sig| {
             keys.iter()
                 .any(|k| k.name() == sig.name() && k.verify(&fingerprint, sig))
-        })
+        });
+        if trusted {
+            return Ok(());
+        }
+        Err(signatures.iter().map(|sig| sig.name().to_owned()).collect())
     }
 }
 
@@ -281,7 +286,8 @@ Sig: test-1:uLy+NsnprYjac4dL2b/QKAqXkcZ2kMJmSWAGrfdHnRb4ycbZsCv7MMXVqp4aPJci0GM6
 
     #[test]
     fn verify() {
-        let verify = |text: &str, keys: &[PublicKey]| parse(text).unwrap().check_signatures(keys);
+        let verify =
+            |text: &str, keys: &[PublicKey]| parse(text).unwrap().check_signatures(keys).is_ok();
         assert!(verify(GLIBC, &[key(TEST_KEY)]));
         assert!(verify(GLIBC, &[key(NIXOS_KEY)]));
         assert!(!verify(GLIBC, &[]));
@@ -304,7 +310,10 @@ Sig: test-1:uLy+NsnprYjac4dL2b/QKAqXkcZ2kMJmSWAGrfdHnRb4ycbZsCv7MMXVqp4aPJci0GM6
     #[test]
     fn writes_verified_narinfos() {
         let mut info = parse(&format!("{GLIBC}Padding: {}\n", "x".repeat(100))).unwrap();
-        assert!(info.check_signatures(&[key(TEST_KEY), key(NIXOS_KEY)]));
+        assert!(
+            info.check_signatures(&[key(TEST_KEY), key(NIXOS_KEY)])
+                .is_ok()
+        );
         let text = String::from_utf8(info.to_text()).unwrap();
         assert_eq!(text, without_lines(GLIBC, "Sig:"));
     }

@@ -4,6 +4,12 @@
 
 ### Changed
 
+- Pod events show the closure's progress, like `still fetching the closure:
+  45/210 store paths (1.2/3.4 GiB), 38.1 MiB/s`.
+- When no cache has a store path, the error fits on one line and names the
+  caches that have it with an untrusted or invalid signature.
+- When a volume has no `storePaths` attribute for the node's system, the
+  error lists the ones it has.
 - Requests fail at once on 501, 505 and 511 responses instead of retrying
   for a minute, as in Nix.
 - After a 429 response or an S3 `SlowDown` error without `Retry-After`, a

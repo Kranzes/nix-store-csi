@@ -201,8 +201,10 @@ impl Caches {
                     continue;
                 }
             };
+            // Most references are already seen, so this clones only new ones.
             for r in entry.info.references() {
-                if seen.insert(r.clone()) {
+                if !seen.contains(r) {
+                    seen.insert(r.clone());
                     queue.push_back(r.clone());
                 }
             }

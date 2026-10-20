@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{CStr, CString, OsStr};
+use std::fmt::Write as _;
 use std::fs::Permissions;
 use std::io;
 use std::os::fd::AsFd;
@@ -27,8 +28,9 @@ pub const ROOTS: &str = ".roots";
 
 impl Store {
     /// Returns the view of `paths`, the closure of `roots`, for `volume` to
-    /// mount at `target`. Volumes with the same roots and closure share a view
-    /// of the current generation. Call it with the guard from
+    /// mount at `target`. `paths` must be in order, as [`Store::ensure`]
+    /// returns them. Volumes with the same roots and closure share a view of
+    /// the current generation. Call it with the guard from
     /// [`Store::gc_guard`] held.
     pub fn view(
         &self,
@@ -205,14 +207,21 @@ pub fn root_links(roots: &[StorePath]) -> anyhow::Result<BTreeMap<&str, &StorePa
 }
 
 /// Names the view of a closure in `generation`, so volumes with the same
-/// roots and closure share it.
+/// roots and closure share it. Store paths sort like their names, so it
+/// hashes the names in sorted order.
 fn view_key(generation: u64, links: &BTreeMap<&str, &StorePath>, paths: &[StorePath]) -> String {
-    let mut names: Vec<String> = paths.iter().map(ToString::to_string).collect();
-    names.sort();
+    debug_assert!(paths.is_sorted());
+    let mut text = String::new();
+    for path in paths {
+        writeln!(text, "{path}").unwrap();
+    }
     // The dot keeps roots apart from the closure, since no store path starts
     // with one.
-    names.extend(links.values().map(|root| format!(".{root}")));
-    let hash = Algorithm::SHA256.digest(names.join("\n"));
+    for root in links.values() {
+        writeln!(text, ".{root}").unwrap();
+    }
+    text.pop();
+    let hash = Algorithm::SHA256.digest(text);
     format!("{generation}-{}", hash.as_base32().as_bare())
 }
 

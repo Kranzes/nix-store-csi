@@ -42,7 +42,7 @@ tokio-stream = { version = "0.1.19", default-features = false, features = ["net"
 tokio-util = { version = "0.7.19", features = ["io", "rt"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server"] }
 tonic-prost = "0.14"
-tracing = { version = "0.1.44", default-features = false }
+tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "tracing-log"] }
 url = "2.5.8"
 walkdir = "2.5"

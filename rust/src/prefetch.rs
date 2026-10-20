@@ -13,10 +13,10 @@ use harmonia_store_path::StorePath;
 use rustix::fs::inotify;
 use tokio::io::unix::AsyncFd;
 use tokio::time::MissedTickBehavior;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::store::{Ensuring, Store};
-use crate::store_path;
+use crate::store_path::{self, Names};
 
 /// The link that kubelet points at the current files of a `ConfigMap`'s volume.
 const DATA: &str = "..data";
@@ -55,6 +55,7 @@ impl Prefetch {
     /// Reads `dir` when it changes and every minute, and ensures the closure
     /// again each time. That fetches what a failed sync deleted, and counts as
     /// a use, so a closure that leaves the list stays for `--keep-recent`.
+    #[instrument(name = "prefetch", skip_all)]
     pub async fn run(mut self) {
         let mut ticks = tokio::time::interval(crate::MINUTE);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -81,7 +82,7 @@ impl Prefetch {
         match self.read_list() {
             Ok(Some((revision, roots))) => {
                 if roots != self.roots {
-                    info!(store_paths = ?roots, "prefetching");
+                    info!(store_paths = %Names(&roots), "prefetching");
                     if roots.is_empty() {
                         self.held = None;
                     }
@@ -114,13 +115,16 @@ impl Prefetch {
                     .as_ref()
                     .is_none_or(|(roots, _)| *roots != self.roots)
                 {
-                    info!(store_paths = ?self.roots, "prefetched");
+                    info!(store_paths = %Names(&self.roots), "prefetched");
                 }
                 self.held = Some((self.roots.clone(), done));
                 self.report();
             }
             Err(e) => {
-                warn!(store_paths = ?self.roots, "prefetching: {e:#}; trying again in a minute");
+                warn!(
+                    store_paths = %Names(&self.roots),
+                    "prefetching: {e:#}; trying again in a minute"
+                );
             }
         }
     }

@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{InspectReader, ReaderStream, StreamReader};
-use tracing::{info, warn};
+use tracing::{Instrument, info, info_span, warn};
 
 use crate::closure::Entry;
 use crate::narinfo::Compression;
@@ -57,16 +57,18 @@ impl Store {
         let (set, count) = (progress.clone(), resolved.clone());
         let (tx, rx) = oneshot::channel();
         self.ensures.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(async move {
+        let ensure = async move {
             let result = this.ensure_closure(&roots, prefetch, &set, &count).await;
             this.ensures.fetch_sub(1, Ordering::Relaxed);
             // From here on, only the caller's hold makes collection spare the
             // closure.
             drop(set);
             if let Err(Err(e)) = tx.send(result) {
-                warn!(store_paths = ?roots, "no publish is waiting any more: {e:#}");
+                warn!(store_paths = %crate::store_path::Names(&roots), "{e:#}; no publish is waiting any more");
             }
-        });
+        };
+        // The closure's lookups log in the caller's span.
+        tokio::spawn(ensure.in_current_span());
         Ensuring {
             result: rx,
             resolved,
@@ -203,19 +205,25 @@ impl Store {
         let (fetch, bytes) = fetching.entry(path.clone()).or_insert_with(|| {
             let (this, bytes) = (self.clone(), Arc::<AtomicU64>::default());
             let read = bytes.clone();
-            let task = tokio::spawn(async move {
-                let leave = Leave(this.clone(), path.clone());
-                let result = this.install(entry, &read).await;
-                drop(leave);
-                if let Ok(true) = result {
-                    tokio::spawn(async move {
-                        if let Err(e) = this.sync(&path).await {
-                            warn!("{e:#}");
-                        }
-                    });
+            // Shared by every volume that needs the path, so no publish's span
+            // is its parent.
+            let span = info_span!(parent: None, "fetch", store_path = %path);
+            let task = tokio::spawn(
+                async move {
+                    let leave = Leave(this.clone(), path.clone());
+                    let result = this.install(entry, &read).await;
+                    drop(leave);
+                    if let Ok(true) = result {
+                        tokio::spawn(async move {
+                            if let Err(e) = this.sync(&path).await {
+                                warn!("{e:#}");
+                            }
+                        });
+                    }
+                    result.map(drop).map_err(|e| Arc::new(format!("{e:#}")))
                 }
-                result.map(drop).map_err(|e| Arc::new(format!("{e:#}")))
-            });
+                .instrument(span),
+            );
             let fetch = async move { task.await.unwrap_or_else(|e| Err(Arc::new(e.to_string()))) };
             (fetch.boxed().shared(), bytes)
         });
@@ -265,7 +273,7 @@ impl Store {
                 }
                 Ok(None) => return Err(error),
                 Err(e) => {
-                    warn!("looking for {path} in the other caches: {e:#}");
+                    warn!("looking in the other caches: {e:#}; giving up");
                     return Err(error);
                 }
             }
@@ -282,7 +290,7 @@ impl Store {
     ) -> anyhow::Result<()> {
         let info = &entry.info;
         let name = self.caches.name(cache);
-        info!(cache = %name, url = %info.url, size = info.nar_size(), "fetching NAR");
+        info!(cache = %name, url = %info.url, nar_size = info.nar_size(), "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
         let part = (|| async {
@@ -308,7 +316,7 @@ impl Store {
         })
         .retry(NAR_RESTARTS)
         .when(transport::broke_off)
-        .notify(|e, _| warn!(url = %info.url, "fetching NAR: {e:#}; starting over"))
+        .notify(|e, _| warn!(url = %info.url, "{e:#}; starting the NAR over"))
         .await
         .with_context(|| format!("fetching {} from {name}", info.url))?;
 

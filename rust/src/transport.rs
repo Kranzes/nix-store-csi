@@ -390,7 +390,7 @@ where
         })
         .adjust(|f, delay| Some(delay?.saturating_add(f.retry_after.unwrap_or_default())))
         .notify(|f, delay| {
-            tracing::warn!("fetching {url}: {:#}; retrying in {delay:?}", f.error);
+            tracing::warn!(%url, "{:#}; retrying in {:?}", f.error, crate::millis(delay));
         })
         .await
         .map_err(|f| f.error.context(format!("fetching {url}")))
@@ -719,7 +719,7 @@ fn resumable(
                 return Err(io::Error::other(error));
             };
             let error = anyhow::Error::from(error);
-            tracing::warn!("fetching {}: {error:#}; resumed at byte {}", s.url, s.read);
+            tracing::warn!(url = %s.url, "{error:#}; resumed at byte {}", s.read);
             s.body = resp.bytes_stream().boxed();
             s.read_since_resume = 0;
         }
@@ -738,7 +738,7 @@ async fn resume(
     let resp = match http.fetch(url, Some((from, validator))).await {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::debug!("resuming {url}: {e:#}");
+            tracing::debug!(%url, "resuming: {e:#}");
             return None;
         }
     };
@@ -753,7 +753,7 @@ async fn resume(
         && (range.and_then(content_range))
             .is_some_and(|(first, last, len)| first == from && last.checked_add(1) == Some(len));
     if !resumed {
-        tracing::debug!("resuming {url}: got {} for {range:?}", resp.status());
+        tracing::debug!(%url, "resuming: got {} for {range:?}", resp.status());
     }
     resumed.then_some(resp)
 }

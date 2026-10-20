@@ -31,6 +31,11 @@ mod transport;
 
 const MINUTE: Duration = Duration::from_mins(1);
 
+/// `duration` in whole milliseconds, for logs.
+fn millis(duration: Duration) -> Duration {
+    Duration::from_millis(duration.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

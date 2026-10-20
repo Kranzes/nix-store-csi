@@ -153,7 +153,8 @@ impl Store {
         for entry in std::fs::read_dir(&self.volumes)
             .with_context(|| format!("reading {}", self.volumes.display()))?
         {
-            let record = entry?.path();
+            let entry = entry?;
+            let record = entry.path();
             if let Some(volume) = Volume::read(&record)?
                 && is_bound(&self.views.join(&volume.key), &volume.target)?
             {
@@ -161,7 +162,8 @@ impl Store {
                 continue;
             }
             // A reboot drops the mounts without kubelet unpublishing them.
-            info!(volume = %record.display(), "forgetting a volume that isn't mounted");
+            let volume = entry.file_name();
+            info!(volume = %volume.display(), "forgetting a volume that isn't mounted");
             remove_file(&record)?;
         }
         (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));

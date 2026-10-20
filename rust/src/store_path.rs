@@ -10,6 +10,21 @@ use harmonia_store_path::{StoreDir, StorePath};
 /// path for every pod. The files in `--prefetch-dir` have the same names.
 pub const STORE_PATHS: &str = "storePaths";
 
+/// Store paths by base name, separated by spaces, for logs.
+pub struct Names<'a>(pub &'a [StorePath]);
+
+impl std::fmt::Display for Names<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for (i, path) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{path}")?;
+        }
+        Ok(())
+    }
+}
+
 /// The Nix system of this node. Rust and Nix use the same names for `x86_64`
 /// and `aarch64`, the architectures the plugin is built for.
 pub fn system() -> String {

@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::mounts;
 use crate::store::{self, Store};
-use crate::store_path::{self, STORE_PATHS, system};
+use crate::store_path::{self, Names, STORE_PATHS, system};
 
 pub mod proto {
     #![allow(clippy::all, clippy::pedantic)]
@@ -63,6 +63,7 @@ impl Plugin {
         self.shutdown.cancel();
     }
 
+    #[instrument(skip_all, fields(volume = request.volume_id))]
     async fn publish(
         &self,
         request: NodePublishVolumeRequest,
@@ -91,7 +92,7 @@ impl Plugin {
         let names = match done {
             Ok(Ok(names)) => names,
             Ok(Err(e)) => {
-                warn!(volume = request.volume_id, "{e:#}");
+                warn!("{e:#}");
                 let code = if e.is::<store::TooBig>() {
                     tonic::Code::ResourceExhausted
                 } else {
@@ -102,7 +103,7 @@ impl Plugin {
             Err(_) => {
                 // Kubelet puts this message in the pod's events.
                 let msg = format!("still {}", ensuring.progress());
-                info!(volume = request.volume_id, "{msg}");
+                info!("{msg}");
                 return Err(Status::unavailable(msg));
             }
         };
@@ -115,10 +116,11 @@ impl Plugin {
             mounts::publish(&view, &target)
         })
         .await?;
-        info!(volume = request.volume_id, store_paths = ?roots, "published");
+        info!(store_paths = %Names(&roots), "published");
         Ok(NodePublishVolumeResponse {})
     }
 
+    #[instrument(skip_all, fields(volume = request.volume_id))]
     async fn unpublish(
         &self,
         request: NodeUnpublishVolumeRequest,
@@ -135,7 +137,7 @@ impl Plugin {
         // Deleting a big view is slow, so it happens after the hold on
         // collection ends.
         self.store.discard(trash);
-        info!(volume = request.volume_id, "unpublished");
+        info!("unpublished");
         Ok(NodeUnpublishVolumeResponse {})
     }
 

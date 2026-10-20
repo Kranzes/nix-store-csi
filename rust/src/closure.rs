@@ -242,7 +242,7 @@ impl Caches {
             }
             bail!(msg);
         }
-        tracing::debug!("resolved {} store paths", found.len());
+        tracing::debug!(resolved = found.len(), "resolved the closure");
         Ok(found)
     }
 
@@ -271,7 +271,7 @@ impl Caches {
         match self.local_info(path) {
             Ok(Some(info)) => return Ok(Lookup::Found(Arc::new(Entry { cache: None, info }))),
             Ok(None) => {}
-            Err(e) => tracing::warn!("{e:#}"),
+            Err(e) => tracing::warn!("{e:#}; looking in the caches"),
         }
         // Only a path the node store lacks waits for the caches to open.
         let tiers = tiers.get_or_init(|| self.tiers()).await;
@@ -350,14 +350,15 @@ impl Caches {
             match info {
                 Ok(mut info) => match self.trust(&mut info) {
                     Err(signers) => {
-                        tracing::warn!("{path} in {name} has no trusted signature, skipping it");
+                        // The error says so if no cache has a trusted one.
+                        tracing::debug!(store_path = %path, cache = %name, "no trusted signature");
                         untrusted.push(match signers.as_slice() {
                             [] => format!("{name} has it unsigned"),
                             _ => format!("{name} has it signed by {}", self.signers(&signers)),
                         });
                     }
                     Ok(()) if accept(&info) => {
-                        tracing::trace!("found {path} in {name}");
+                        tracing::trace!(store_path = %path, cache = %name, "found narinfo");
                         return Ok(Lookup::Found(Arc::new(Entry {
                             cache: Some(cache),
                             info,
@@ -431,7 +432,7 @@ impl Cache {
                     return;
                 }
                 Err(e) => {
-                    tracing::warn!("skipping {} for a minute: {e:#}", self.name);
+                    tracing::warn!(cache = %self.name, "{e:#}; skipping the cache for a minute");
                     self.state.send_replace(Some(Err(format!("{e:#}"))));
                 }
             }
@@ -477,7 +478,7 @@ impl Cache {
         {
             let mut failed = self.failed.lock().unwrap();
             if pause_reason(failed.as_ref()).is_none() {
-                tracing::warn!("skipping {} for a minute: {e:#}", self.name);
+                tracing::warn!(cache = %self.name, "{e:#}; skipping the cache for a minute");
             }
             *failed = Some((Instant::now(), format!("{e:#}")));
         }

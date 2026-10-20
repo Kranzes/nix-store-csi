@@ -10,6 +10,11 @@
   caches that have it with an untrusted or invalid signature.
 - When a volume has no `storePaths` attribute for the node's system, the
   error lists the ones it has.
+- Logs carry spans: `publish` and `unpublish` with the volume, `fetch` with
+  the store path, and `prefetch`. The fetch's `size` field is now
+  `nar_size`, the counts of synced and deleted paths are `synced`, `deleted`
+  and `deleting`, and a narinfo without a trusted signature logs at debug
+  level.
 - Requests fail at once on 501, 505 and 511 responses instead of retrying
   for a minute, as in Nix.
 - After a 429 response or an S3 `SlowDown` error without `Retry-After`, a

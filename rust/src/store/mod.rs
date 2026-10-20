@@ -308,12 +308,12 @@ impl Store {
         }
         if kept > 0 {
             info!(
-                paths = kept,
+                synced = kept,
                 "synced the paths that the last run left unsynced"
             );
         }
         if dropped > 0 {
-            warn!(paths = dropped, "deleted paths that may have lost data");
+            warn!(deleted = dropped, "deleted paths that may have lost data");
         }
         sync_dir(narinfos)?;
         sync_dir(&self.dir)?;
@@ -439,7 +439,7 @@ impl Store {
             (batch.into_iter()).partition(|&(_, since)| since < failed_syncs);
         if !lost.is_empty() {
             warn!(
-                paths = lost.len(),
+                deleting = lost.len(),
                 "deleting paths that may have lost data in a failed sync"
             );
             self.forget(lost.into_iter().map(|(p, _)| p).collect())

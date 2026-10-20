@@ -428,6 +428,23 @@ mod tests {
         assert_eq!(err.to_string(), format!("{a} and {b} have the same name"));
     }
 
+    /// Views in views/ have these names, so the key must not change. The
+    /// first two hashes are in text order but not in byte order.
+    #[test]
+    fn keeps_view_keys() {
+        let paths = [
+            "00000000000000000000000000000001-b-1",
+            "10000000000000000000000000000000-a-1",
+            "1000000000000000000000000000000z-c-1",
+        ]
+        .map(|p| StorePath::from_base_path(p).unwrap());
+        let links = root_links(&paths[..2]).unwrap();
+        assert_eq!(
+            view_key(3, &links, &paths),
+            "3-04d1rq8d54408hyaxvaadn844xwai6hzs4j6ymnfk68x4dnqnysj"
+        );
+    }
+
     /// Symlinks in store objects often point at store paths the node store
     /// doesn't have, so the view must link the symlink, not follow it.
     #[test]

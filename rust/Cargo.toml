@@ -27,7 +27,7 @@ mimalloc = { version = "0.1.52", features = ["no_thp"] }
 # Only for credentials and S3 signatures. Requests go through reqwest.
 object_store = { version = "0.14.2", default-features = false, features = ["aws", "gcp"] }
 rust-netrc = "0.1.2"
-percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
+percent-encoding = "2.3.2"
 prost = "0.14"
 prost-types = { version = "0.14", default-features = false }
 quick-xml = { version = "0.41.0", features = ["serialize"] }

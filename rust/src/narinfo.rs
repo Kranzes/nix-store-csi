@@ -1,3 +1,4 @@
+use std::cell::LazyCell;
 use std::collections::BTreeSet;
 use std::pin::Pin;
 
@@ -124,16 +125,18 @@ impl NarInfo {
     pub fn check_signatures(&mut self, keys: &[PublicKey]) -> Result<(), Vec<String>> {
         let info = &mut self.parsed.info.info;
         let signatures = std::mem::take(&mut info.signatures);
-        let fingerprint = fingerprint_path(
-            &info.store_dir,
-            &self.parsed.path,
-            &info.nar_hash,
-            info.nar_size,
-            &info.references,
-        );
+        let fingerprint = LazyCell::new(|| {
+            fingerprint_path(
+                &info.store_dir,
+                &self.parsed.path,
+                &info.nar_hash,
+                info.nar_size,
+                &info.references,
+            )
+        });
         let trusted = signatures.iter().any(|sig| {
             keys.iter()
-                .any(|k| k.name() == sig.name() && k.verify(&fingerprint, sig))
+                .any(|k| k.name() == sig.name() && k.verify(&*fingerprint, sig))
         });
         if trusted {
             return Ok(());
@@ -291,22 +294,22 @@ Sig: test-1:uLy+NsnprYjac4dL2b/QKAqXkcZ2kMJmSWAGrfdHnRb4ycbZsCv7MMXVqp4aPJci0GM6
 
     #[test]
     fn verify() {
-        let verify =
-            |text: &str, keys: &[PublicKey]| parse(text).unwrap().check_signatures(keys).is_ok();
-        assert!(verify(GLIBC, &[key(TEST_KEY)]));
-        assert!(verify(GLIBC, &[key(NIXOS_KEY)]));
-        assert!(!verify(GLIBC, &[]));
+        let check = |text: &str, keys: &[PublicKey]| parse(text).unwrap().check_signatures(keys);
+        assert_eq!(check(GLIBC, &[key(TEST_KEY)]), Ok(()));
+        assert_eq!(check(GLIBC, &[key(NIXOS_KEY)]), Ok(()));
+        let signers = Err(vec!["cache.nixos.org-1".to_owned(), "test-1".to_owned()]);
+        assert_eq!(check(GLIBC, &[]), signers);
 
         // The right key bytes under the wrong name.
         let renamed = key(&TEST_KEY.replace("test-1", "other"));
-        assert!(!verify(GLIBC, &[renamed]));
+        assert_eq!(check(GLIBC, &[renamed]), signers);
 
         let keys = [key(TEST_KEY), key(NIXOS_KEY)];
         for tampered in [
             GLIBC.replace("NarSize: 35073128", "NarSize: 35073129"),
             GLIBC.replace(" m07syxhld8hpprrdmzq565ziia6vlw9l-xgcc-15.3.0-libgcc", ""),
         ] {
-            assert!(!verify(&tampered, &keys));
+            assert_eq!(check(&tampered, &keys), signers);
         }
     }
 

@@ -7,6 +7,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context;
 use harmonia_store_path::StorePath;
@@ -32,6 +33,8 @@ pub struct Prefetch {
     revision: String,
     /// The store paths that `dir` lists for `system`, sorted.
     roots: Vec<StorePath>,
+    /// When `roots` last changed.
+    since: Instant,
     /// The last ensure that succeeded, and its list. Until a new list succeeds
     /// or the list empties, collection spares its closure, and volumes don't
     /// count it towards the limit.
@@ -47,6 +50,7 @@ impl Prefetch {
             system: store_path::system(),
             revision: String::new(),
             roots: Vec::new(),
+            since: Instant::now(),
             held: None,
             running: None,
         }
@@ -87,6 +91,7 @@ impl Prefetch {
                         self.held = None;
                     }
                     self.roots = roots;
+                    self.since = Instant::now();
                     // An ensure of the old list carries on in its own task.
                     self.running = None;
                 }
@@ -115,16 +120,14 @@ impl Prefetch {
                     .as_ref()
                     .is_none_or(|(roots, _)| *roots != self.roots)
                 {
-                    info!(store_paths = %Names(&self.roots), "prefetched");
+                    let elapsed_ms = self.since.elapsed().as_millis();
+                    info!(store_paths = %Names(&self.roots), elapsed_ms, "prefetched");
                 }
                 self.held = Some((self.roots.clone(), done));
                 self.report();
             }
             Err(e) => {
-                warn!(
-                    store_paths = %Names(&self.roots),
-                    "prefetching: {e:#}; trying again in a minute"
-                );
+                warn!(store_paths = %Names(&self.roots), "prefetching: {e:#}; trying again in a minute");
             }
         }
     }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
@@ -44,6 +44,9 @@ pub struct Plugin {
     /// Calls for a volume take turns. A publish that kubelet gave up on keeps
     /// running and keeps its turn.
     volumes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// When kubelet first asked to publish each volume that still waits for
+    /// its closure.
+    waiting: Mutex<HashMap<String, Instant>>,
     shutdown: CancellationToken,
 }
 
@@ -53,6 +56,7 @@ impl Plugin {
             node_id,
             store,
             volumes: Mutex::default(),
+            waiting: Mutex::default(),
             shutdown: CancellationToken::new(),
         }
     }
@@ -82,6 +86,13 @@ impl Plugin {
         }
         store::root_links(&roots).map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
 
+        let started = {
+            let mut waiting = self.waiting.lock().unwrap();
+            // Kubelet stops retrying when the pod goes away, or when a publish
+            // fails for good, which would leave its entry here.
+            waiting.retain(|_, started| started.elapsed() < Duration::from_hours(24));
+            *(waiting.entry(request.volume_id.clone())).or_insert_with(Instant::now)
+        };
         let mut ensuring = self.store.ensure(&roots);
         let done = tokio::select! {
             done = tokio::time::timeout(PUBLISH_WAIT, ensuring.done()) => done,
@@ -116,7 +127,9 @@ impl Plugin {
             mounts::publish(&view, &target)
         })
         .await?;
-        info!(store_paths = %Names(&roots), "published");
+        self.waiting.lock().unwrap().remove(&request.volume_id);
+        let elapsed_ms = started.elapsed().as_millis();
+        info!(store_paths = %Names(&roots), elapsed_ms, "published");
         Ok(NodePublishVolumeResponse {})
     }
 

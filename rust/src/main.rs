@@ -1,10 +1,13 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
+use bytesize::ByteSize;
 use clap::{Parser, Subcommand};
+use harmonia_store_path::StoreDir;
 use rustix::io::Errno;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::net::{TcpListener, TcpSocket, UnixListener};
@@ -13,10 +16,11 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_stream::wrappers::UnixListenerStream;
 use tracing::{error, info, warn};
 
+use crate::closure::Caches;
 use crate::csi::Plugin;
 use crate::csi::proto::identity_server::IdentityServer;
 use crate::csi::proto::node_server::NodeServer;
-use crate::narinfo::PublicKey;
+use crate::narinfo::{NarInfo, PublicKey};
 use crate::store::{Config, EnsureFree, Excess, Store};
 
 mod closure;
@@ -33,6 +37,23 @@ const MINUTE: Duration = Duration::from_mins(1);
 
 /// How often `unpack` logs its progress.
 const UNPACK_PROGRESS: Duration = Duration::from_secs(5);
+
+/// Like Nix's `--dry-run`: "5 store paths (12.4 MiB download, 36.7 MiB
+/// unpacked)". The download size needs every narinfo's `FileSize`.
+fn closure_size<'a>(infos: impl IntoIterator<Item = &'a NarInfo>) -> String {
+    let (mut count, mut unpacked, mut download) = (0, 0, Some(0));
+    for info in infos {
+        count += 1;
+        unpacked += info.nar_size();
+        download = download.zip(info.file_size()).map(|(a, b)| a + b);
+    }
+    let s = if count == 1 { "" } else { "s" };
+    let download = download.map_or_else(String::new, |d| format!("{} download, ", ByteSize(d)));
+    format!(
+        "{count} store path{s} ({download}{} unpacked)",
+        ByteSize(unpacked)
+    )
+}
 
 /// `duration` in whole milliseconds, for logs.
 fn millis(duration: Duration) -> Duration {
@@ -196,6 +217,11 @@ enum Command {
         /// Store paths, their base names, or paths inside them.
         #[arg(value_name = "STORE_PATH", required = true)]
         roots: Vec<String>,
+        /// Only look up the closures in the caches and print their size, or
+        /// fail if a store path is missing. This fetches no NARs and doesn't
+        /// use the state dir.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -237,6 +263,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if stores.is_empty() {
         bail!("no substituters given");
     }
+    let trusted_keys = (!cli.no_require_sigs).then_some(trusted_keys);
+    if let Command::Unpack {
+        roots,
+        dry_run: true,
+    } = &cli.command
+    {
+        let caches = Caches::new(
+            &stores,
+            StoreDir::default(),
+            trusted_keys,
+            None,
+            cli.netrc_file.as_deref(),
+        )?;
+        let roots = store_path::roots(roots.iter().map(String::as_str))?;
+        let closure = caches.resolve(&roots, &AtomicUsize::default()).await?;
+        println!("{}", closure_size(closure.values().map(|e| &e.info)));
+        return Ok(());
+    }
     let (max_closure_size, ensure_free) = match cli.command {
         Command::Csi {
             max_closure_size,
@@ -247,7 +291,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let store = Arc::new(Store::new(Config {
         stores,
-        trusted_keys: (!cli.no_require_sigs).then_some(trusted_keys),
+        trusted_keys,
         state_dir: cli.state_dir,
         jobs: cli.max_substitution_jobs.get(),
         netrc_file: cli.netrc_file,
@@ -256,7 +300,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     })?);
 
     match cli.command {
-        Command::Unpack { roots } => {
+        Command::Unpack { roots, .. } => {
             let roots = store_path::roots(roots.iter().map(String::as_str))?;
             let mut ensuring = store.ensure(&roots);
             loop {
@@ -418,6 +462,28 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
+    use crate::narinfo::tests::{fixture_narinfos, fixtures, without_lines};
+
+    #[test]
+    fn sizes_closures() {
+        let Some(dir) = fixtures() else { return };
+        let narinfos = fixture_narinfos(&dir, "cache-zstd");
+        let infos: Vec<_> = narinfos.iter().map(|(_, _, info)| info).collect();
+        let size = closure_size(infos.iter().copied());
+        assert!(
+            size.starts_with(&format!("{} store paths (", infos.len()))
+                && size.contains(" download, "),
+            "{size}"
+        );
+        // A narinfo without FileSize leaves out the download size.
+        let (_, text, _) = &narinfos[0];
+        let without = NarInfo::parse(&StoreDir::default(), &without_lines(text, "FileSize:"));
+        let size = closure_size(std::iter::once(&without.unwrap()));
+        assert!(
+            size.starts_with("1 store path (") && !size.contains("download"),
+            "{size}"
+        );
+    }
 
     /// The chart serves metrics on `[::]`, which has to take IPv4 too. The
     /// default `net.ipv6.bindv6only=0` allows that even without the socket

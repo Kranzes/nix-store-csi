@@ -106,6 +106,11 @@ impl NarInfo {
         self.parsed.info.info.nar_hash.into()
     }
 
+    /// The size of the download, if the narinfo has a `FileSize`.
+    pub fn file_size(&self) -> Option<u64> {
+        self.parsed.info.download_size
+    }
+
     pub fn nar_size(&self) -> u64 {
         self.parsed.info.info.nar_size
     }

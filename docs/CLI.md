@@ -64,6 +64,7 @@ Arguments:
   <STORE_PATH>...  Store paths, their base names, or paths inside them
 
 Options:
+      --dry-run                     Only look up the closures in the caches and print their size, or fail if a store path is missing. This fetches no NARs and doesn't use the state dir
       --substituters <URLS>         Binary caches [env: NIX_STORE_CSI_SUBSTITUTERS=] [default: https://cache.nixos.org]
       --trusted-public-keys <KEYS>  Keys that narinfos must be signed by [env: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS=] [default: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=]
       --no-require-sigs             Accept narinfos without a trusted signature [env: NIX_STORE_CSI_NO_REQUIRE_SIGS=]

@@ -36,6 +36,8 @@
 
 ### Added
 
+- `unpack --dry-run` checks that the caches have the closures and prints
+  their size, without fetching NARs or using the state dir.
 - The `published` and `prefetched` logs have an `elapsed_ms` field.
 - `--gc-interval` sets how often collection runs, 10 minutes by default.
 

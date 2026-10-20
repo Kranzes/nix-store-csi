@@ -89,7 +89,10 @@ volumeAttributes:
 
 CI can build the derivation and commit the result to a branch that Flux or
 Argo CD syncs. The same variables work in Helm values files and other
-text that ends up in a pod spec.
+text that ends up in a pod spec. Before it commits, CI can run
+`nix-store-csi unpack --dry-run` on the store paths, with the chart's
+`substituters` and `trustedPublicKeys`. It fails if the caches lack a store
+path, so no pod waits for one.
 
 The derivation's `prefetch` output is a values file with the chart's
 `prefetch` value for the same store paths. Apply it in a commit or sync of its

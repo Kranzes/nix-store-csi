@@ -263,6 +263,7 @@ impl Store {
             bytes.store(entry.info.nar_size(), Ordering::Relaxed);
             return Ok(false);
         }
+        self.flush().await?;
         let mut tried = Vec::new();
         loop {
             // The node store had the narinfo but no longer has the path.

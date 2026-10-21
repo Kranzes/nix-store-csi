@@ -124,6 +124,9 @@ pub struct Store {
     /// store/, opened once, since a syncfs on a freshly opened file misses
     /// writeback errors that another file already reported.
     dir_fd: std::fs::File,
+    /// Set once a syncfs on `dir_fd` has taken the writeback errors from
+    /// before start-up, so the first sync of a new path doesn't report them.
+    flushed: tokio::sync::OnceCell<()>,
     metrics: Metrics,
     /// Held for as long as the store is open.
     _lock: std::fs::File,
@@ -207,6 +210,7 @@ impl Store {
             size: AtomicU64::default(),
             gc: Arc::default(),
             dir_fd,
+            flushed: tokio::sync::OnceCell::new(),
             metrics: Metrics::default(),
             _lock: lock,
         };
@@ -264,17 +268,11 @@ impl Store {
         let boot =
             std::fs::read_to_string(BOOT_ID).with_context(|| format!("reading {BOOT_ID}"))?;
         let same_boot = std::fs::read_to_string(record).is_ok_and(|last| last == boot);
-        // This takes any writeback error from before start-up, so the first
-        // sync of a new path doesn't report it.
-        let flushed = rustix::fs::syncfs(&self.dir_fd)
-            .inspect_err(|e| {
-                warn!("syncing the node store: {e}; deleting the paths that the last run left unsynced");
-            })
-            .is_ok();
-        let synced = same_boot && !self.failed_record.exists() && flushed;
+        let failed = self.failed_record.exists();
         let narinfos = self.narinfos.dir();
         let mut durable = HashSet::new();
         let mut unsynced = Vec::new();
+        let mut cleared = false;
         for entry in std::fs::read_dir(narinfos)
             .with_context(|| format!("reading {}", narinfos.display()))?
         {
@@ -285,9 +283,25 @@ impl Store {
                 }
                 Some((path, false)) => unsynced.push(path),
                 // A temporary file that a crash left half written.
-                None => remove_file(&entry.path())?,
+                None => {
+                    remove_file(&entry.path())?;
+                    cleared = true;
+                }
             }
         }
+        let pending = failed || !unsynced.is_empty();
+        // With nothing to settle, `flush` runs this syncfs instead.
+        let flushed = if pending {
+            let _ = self.flushed.set(());
+            rustix::fs::syncfs(&self.dir_fd)
+                .inspect_err(|e| {
+                    warn!("syncing the node store: {e}; deleting the paths that the last run left unsynced");
+                })
+                .is_ok()
+        } else {
+            true
+        };
+        let synced = same_boot && !failed && flushed;
         let (mut kept, mut dropped) = (0, 0);
         for path in unsynced {
             let file = self.narinfos.unsynced(&path);
@@ -318,8 +332,11 @@ impl Store {
         if dropped > 0 {
             warn!(deleted = dropped, "deleted paths that may have lost data");
         }
-        sync_dir(narinfos)?;
-        sync_dir(&self.dir)?;
+        let quiet = same_boot && !pending && !cleared && dropped == 0;
+        if !quiet {
+            sync_dir(narinfos)?;
+            sync_dir(&self.dir)?;
+        }
         let recorded: Option<u64> = std::fs::read_to_string(generation)
             .ok()
             .and_then(|g| g.trim().parse().ok());
@@ -337,7 +354,30 @@ impl Store {
         };
         self.generation.store(generation, Ordering::SeqCst);
         remove_file(&self.failed_record)?;
-        write_synced(record, boot.as_bytes())
+        if !quiet {
+            write_synced(record, boot.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Runs the syncfs that start-up left to the first fetch, once, before
+    /// the fetch writes anything. A store path gets its final narinfo name
+    /// only after a syncfs that followed its last write. With nothing left to
+    /// settle, every path has its final name, so an error here isn't in any
+    /// store object.
+    async fn flush(self: &Arc<Self>) -> anyhow::Result<()> {
+        let flush = || {
+            let this = self.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = rustix::fs::syncfs(&this.dir_fd) {
+                    warn!(
+                        "syncing the node store: {e}; keeping its store paths, since earlier syncs wrote them"
+                    );
+                }
+            })
+        };
+        self.flushed.get_or_try_init(flush).await?;
+        Ok(())
     }
 
     /// Adds up the NAR sizes of the store paths in `dir`.
@@ -614,8 +654,11 @@ fn write_unsynced(dest: &Path, contents: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::Duration;
+
     use super::*;
-    use crate::narinfo::tests::{file_store, fixtures};
+    use crate::narinfo::tests::{file_store, fixture_path, fixture_root, fixtures};
     use crate::store::test_utils::*;
 
     /// Start-up records the layout version in a state dir that has none, and
@@ -778,6 +821,7 @@ mod tests {
         std::fs::write(narinfos.join(".tmpAbC123"), "").unwrap();
 
         let store = reopen(store, || zstd_config(&dir, tmp.path())).await;
+        assert!(store.flushed.initialized());
         assert!(store.present(&others[0]) && store.present(&others[1]));
         assert!(!store.present(&others[2]));
         let mut names: Vec<_> = (paths.iter())
@@ -806,5 +850,55 @@ mod tests {
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
         assert_eq!(count(store.dir()), paths.len());
         assert_eq!(count(&narinfos), paths.len());
+    }
+
+    /// With nothing to settle, start-up leaves its syncfs to the first fetch,
+    /// which runs it before writing anything, and doesn't rewrite the boot id
+    /// record.
+    #[tokio::test]
+    async fn flushes_before_the_first_fetch() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let config = || zstd_config(&dir, tmp.path());
+        let store = Arc::new(Store::new(config()).unwrap());
+        assert!(!store.flushed.initialized());
+        let glibc = fixture_path(&dir, "glibc");
+        store.ensure(&[glibc]).done().await.unwrap();
+        assert!(store.flushed.initialized());
+
+        let record = tmp.path().join("boot-id");
+        let ino = || std::fs::metadata(&record).unwrap().ino();
+        let before = ino();
+        let store = reopen(store, config).await;
+        assert!(!store.flushed.initialized());
+        assert_eq!(ino(), before);
+
+        // The fetches wait while the test is setting the cell.
+        let (started, holding) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let this = store.clone();
+        let flushing = tokio::spawn(async move {
+            (this.flushed)
+                .get_or_init(|| async move {
+                    started.send(()).unwrap();
+                    released.await.unwrap();
+                })
+                .await;
+        });
+        holding.await.unwrap();
+        let present = count(store.dir());
+        let mut ensuring = store.ensure(&[fixture_root(&dir, "hello.path")]);
+        while store.jobs.available_permits() == store.max_jobs {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(count(store.dir()), present);
+        assert_eq!(count(tmp.path().join("tmp")), 0);
+        assert!(store.unsynced.lock().unwrap().is_empty());
+        release.send(()).unwrap();
+        flushing.await.unwrap();
+        assert_eq!(ensuring.done().await.unwrap().len(), 5);
     }
 }

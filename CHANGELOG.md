@@ -24,6 +24,10 @@
 - Error messages quote a cache's error response. For S3 and GCS they give
   the error's code and message, like `SignatureDoesNotMatch`. For a plain
   text body they give its first 200 characters.
+- Start-up syncs the state dir's filesystem only when the last run left
+  store paths unsynced, and otherwise the first fetch does. So `unpack` of a
+  closure that the state dir already holds no longer waits for other
+  programs' writes to that filesystem.
 
 ### Fixed
 

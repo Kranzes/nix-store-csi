@@ -316,7 +316,9 @@ impl Store {
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
         let part = (|| async {
-            let body = self.caches.stream(cache, info.url()).await?;
+            let body = (self.caches)
+                .stream(cache, info.url(), info.compression)
+                .await?;
             let part = Scratch::new_in(&self.tmp)?;
             let dest = part.path().join(&base);
             let unpacked = self.sandbox.spawn(unpack_nar(
@@ -640,8 +642,6 @@ fn decode_apart(
     (pump(decoded, Some(to_hash)), hashed)
 }
 
-const CHUNK_SIZE: usize = 256 * 1024;
-
 /// Reads `src` in a task, and sends each chunk to the returned stream and to
 /// `tee`.
 fn pump(
@@ -650,7 +650,7 @@ fn pump(
 ) -> impl Stream<Item = io::Result<Bytes>> + Send + Unpin {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
-        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(src, CHUNK_SIZE));
+        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(src, transport::NAR_CHUNK));
         while let Some(chunk) = chunks.next().await {
             if let (Some(tee), Ok(chunk)) = (&tee, &chunk)
                 && tee.send(chunk.clone()).await.is_err()
@@ -675,7 +675,7 @@ mod tests {
     use super::*;
     use crate::metrics::tests::sample;
     use crate::narinfo::tests::{
-        file_store, fixture_narinfo, fixture_path, fixture_root, fixtures, without_lines,
+        encode, file_store, fixture_narinfo, fixture_path, fixture_root, fixtures, without_lines,
         write_narinfos,
     };
     use crate::store::test_utils::*;
@@ -743,29 +743,15 @@ mod tests {
 
     #[tokio::test]
     async fn unpacks_other_compressions() {
-        use async_compression::tokio::bufread::{BrotliEncoder, BzEncoder, GzipEncoder, XzEncoder};
-        use tokio::io::AsyncRead;
-
-        async fn encode(mut encoder: impl AsyncRead + Unpin) -> Vec<u8> {
-            let mut out = Vec::new();
-            encoder.read_to_end(&mut out).await.unwrap();
-            out
-        }
-
         let contents = b"not really a program".repeat(100);
         let plain = file_nar(&contents);
-        for (compression, compressed) in [
-            (Compression::Xz, encode(XzEncoder::new(&plain[..])).await),
-            (Compression::Bzip2, encode(BzEncoder::new(&plain[..])).await),
-            (
-                Compression::Gzip,
-                encode(GzipEncoder::new(&plain[..])).await,
-            ),
-            (
-                Compression::Brotli,
-                encode(BrotliEncoder::new(&plain[..])).await,
-            ),
+        for compression in [
+            Compression::Xz,
+            Compression::Bzip2,
+            Compression::Gzip,
+            Compression::Brotli,
         ] {
+            let compressed = encode(compression, &plain).await;
             let (_tmp, dest) = unpack(
                 &compressed,
                 compression,
@@ -806,10 +792,10 @@ mod tests {
 
         // A byte after the archive counts even in a chunk the parser never
         // reads.
-        let mut nar = file_nar(&vec![0; CHUNK_SIZE - file_nar(b"").len()]);
-        assert_eq!(nar.len(), CHUNK_SIZE);
+        let mut nar = file_nar(&vec![0; transport::NAR_CHUNK - file_nar(b"").len()]);
+        assert_eq!(nar.len(), transport::NAR_CHUNK);
         nar.push(0);
-        let size = CHUNK_SIZE as u64;
+        let size = transport::NAR_CHUNK as u64;
         let Err(err) = unpack(&nar, Compression::None, &sha256(&nar), size).await else {
             panic!("unpacked a NAR with a byte after it");
         };
@@ -1057,6 +1043,25 @@ mod tests {
         let narinfos = file_names(tmp.path().join("narinfo"));
         assert_eq!(narinfos.len(), glibc + started.len());
         assert!(narinfos.iter().all(synced));
+    }
+
+    /// A cache that compresses NARs as it serves them, like harmonia, gives
+    /// the same store objects.
+    #[tokio::test]
+    async fn fetches_from_a_compressing_cache() {
+        use crate::transport::tests::{Mode, server};
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let cache = Box::leak(dir.join("cache-none").into_boxed_path());
+        let mut config = config(&dir, cache, tmp.path());
+        let coding = "zstd";
+        config.stores = vec![server(Mode::Cache { dir: cache, coding }).await];
+        let store = Arc::new(Store::new(config).unwrap());
+        let hello = fixture_root(&dir, "hello.path");
+        let paths = store.ensure(&[hello]).done().await.unwrap();
+        assert_eq!(count(store.dir()), paths.len());
     }
 
     /// A NAR that doesn't match its `NarHash` fails over to the next cache.

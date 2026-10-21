@@ -171,6 +171,26 @@ Sig: cache.nixos.org-1:tsZFm/X1kvsybHu4gnDR7XxYpTAkTKwaDHSNkZGiALxhhvmKeSvCsD2cD
 Sig: test-1:uLy+NsnprYjac4dL2b/QKAqXkcZ2kMJmSWAGrfdHnRb4ycbZsCv7MMXVqp4aPJci0GM6u8LeVhzyxzA2aT/nAw==
 ";
 
+    /// `plain` compressed with `compression`, fast rather than small.
+    pub async fn encode(compression: Compression, plain: &[u8]) -> Vec<u8> {
+        use async_compression::Level::Fastest;
+        use async_compression::tokio::bufread::{
+            BrotliEncoder, BzEncoder, GzipEncoder, XzEncoder, ZstdEncoder,
+        };
+        use tokio::io::AsyncReadExt;
+        let mut encoder: Pin<Box<dyn AsyncRead + Send + '_>> = match compression {
+            Compression::None => Box::pin(plain),
+            Compression::Xz => Box::pin(XzEncoder::with_quality(plain, Fastest)),
+            Compression::Zstd => Box::pin(ZstdEncoder::with_quality(plain, Fastest)),
+            Compression::Bzip2 => Box::pin(BzEncoder::with_quality(plain, Fastest)),
+            Compression::Gzip => Box::pin(GzipEncoder::with_quality(plain, Fastest)),
+            Compression::Brotli => Box::pin(BrotliEncoder::with_quality(plain, Fastest)),
+        };
+        let mut out = Vec::new();
+        encoder.read_to_end(&mut out).await.unwrap();
+        out
+    }
+
     /// The caches from `nix/fixtures.nix`. The dev shell and the package build
     /// point `NIX_STORE_CSI_FIXTURES` at them.
     pub fn fixtures() -> Option<PathBuf> {

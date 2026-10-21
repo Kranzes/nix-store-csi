@@ -34,7 +34,8 @@ symlink in the NAR, or joins a bad name, then fails instead of writing outside
 `tmp/`. The threads share the plugin's memory, so this doesn't contain code
 that a crafted NAR manages to run. The transport reads the NAR on other
 threads, since it reads credentials and may request the rest of a broken
-download.
+download. It also undoes the compression that a cache adds to the response,
+since a resume asks for the rest from an offset in the uncompressed NAR.
 
 ## Syncing
 

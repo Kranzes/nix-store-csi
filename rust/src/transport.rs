@@ -4,18 +4,21 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, bail, ensure};
 use backon::{ExponentialBuilder, Retryable};
-use futures::StreamExt;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::signer::{Method, Signer};
 use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
 use reqwest::header::{
-    CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED,
+    RANGE, RETRY_AFTER,
 };
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
 use tokio::time::Instant;
-use tokio_util::io::StreamReader;
+use tokio_util::bytes::Bytes;
+use tokio_util::io::{ReaderStream, StreamReader};
 use url::{Position, Url};
 
 use crate::narinfo::Compression;
@@ -106,10 +109,11 @@ impl Http {
     async fn fetch(
         &self,
         url: &Url,
+        encodings: &'static str,
         range: Option<(u64, &HeaderValue)>,
     ) -> anyhow::Result<reqwest::Response> {
         retry(url, true, || async {
-            let mut request = self.request(url).await?;
+            let mut request = self.request(url).await?.header(ACCEPT_ENCODING, encodings);
             if let Some((from, validator)) = range {
                 request =
                     (request.header(RANGE, format!("bytes={from}-"))).header(IF_RANGE, validator);
@@ -139,8 +143,22 @@ fn netrc_entry<'a>(netrc: &'a netrc::Netrc, host: &str) -> Option<&'a netrc::Aut
 /// like narinfos.
 const MAX_GET: u64 = 1 << 20;
 
+/// The `Accept-Encoding` of requests for narinfos and uncompressed NARs. On
+/// one core, zstd decodes faster than a 10 Gbit/s link and brotli and gzip
+/// don't, so zstd comes first. Brotli comes before gzip for its smaller
+/// output, which matters on the slower links where either pays off.
+const ENCODINGS: &str = "zstd, br;q=0.9, gzip;q=0.8";
+
+/// The `Accept-Encoding` of requests for compressed NARs and the rest of a
+/// broken download.
+const IDENTITY: &str = "identity";
+
 /// Large, because tokio runs each read of a local file on a blocking thread.
 const FILE_BUF: usize = 256 * 1024;
+
+/// The chunk size of NAR data, from decoding the cache's compression to
+/// unpacking.
+pub const NAR_CHUNK: usize = 256 * 1024;
 
 /// How long a request keeps retrying. backon's total delay counts only the
 /// sleeps, so a cache that times out on every attempt would retry far longer.
@@ -219,13 +237,20 @@ fn failed_tls(e: &reqwest::Error) -> bool {
 /// The response's `Content-Encoding`. Nix sets it on the narinfos it
 /// compresses on S3.
 fn content_encoding(resp: &reqwest::Response) -> anyhow::Result<Compression> {
-    let Some(value) = resp.headers().get(reqwest::header::CONTENT_ENCODING) else {
+    let Some(value) = resp.headers().get(CONTENT_ENCODING) else {
         return Ok(Compression::None);
     };
     match value.to_str().context("Content-Encoding")? {
         "identity" | "" => Ok(Compression::None),
         value => Compression::parse(value).context("Content-Encoding"),
     }
+}
+
+/// The `Content-Encoding` to decode a NAR response from. A coding that the
+/// plugin doesn't know, like the `aws-chunked` that S3 can keep with an
+/// object, passes through, and the `NarHash` check decides.
+fn nar_encoding(resp: &reqwest::Response) -> Compression {
+    content_encoding(resp).unwrap_or(Compression::None)
 }
 
 /// `body` decoded from `encoding`.
@@ -507,7 +532,8 @@ impl Transport {
             Self::Http(http) => {
                 let url = request_url(&http.base, path)?;
                 retry(&url, retries, || async {
-                    let resp = http.request(&url).await?.send().await?;
+                    let request = http.request(&url).await?;
+                    let resp = request.header(ACCEPT_ENCODING, ENCODINGS).send().await?;
                     let mut resp = check_status(resp).await?;
                     let encoding = content_encoding(&resp)?;
                     let mut body = Vec::new();
@@ -526,8 +552,13 @@ impl Transport {
         }
     }
 
-    /// A reader for the NAR at `path`. Over HTTP, it is [`resumable`].
-    pub async fn stream(&self, path: &str) -> anyhow::Result<Box<dyn AsyncBufRead + Send + Unpin>> {
+    /// A reader for the NAR at `path`, which the narinfo says has
+    /// `compression`. Over HTTP, it is [`resumable`].
+    pub async fn stream(
+        &self,
+        path: &str,
+        compression: Compression,
+    ) -> anyhow::Result<Box<dyn AsyncBufRead + Send + Unpin>> {
         match self {
             Self::File(base) => {
                 let src = file_path(base, path)?;
@@ -541,8 +572,13 @@ impl Transport {
             }
             Self::Http(http) => {
                 let url = request_url(&http.base, path)?;
-                let resp = http.fetch(&url, None).await?;
-                Ok(resumable(http.clone(), url, resp))
+                // A compressed NAR would not get smaller, and compressing it
+                // again would only cost the cache CPU. Its response is the
+                // file as stored, even when S3 gives it a `Content-Encoding`.
+                let decode = compression == Compression::None;
+                let encodings = if decode { ENCODINGS } else { IDENTITY };
+                let resp = http.fetch(&url, encodings, None).await?;
+                Ok(resumable(http.clone(), url, resp, decode))
             }
         }
     }
@@ -665,36 +701,48 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
     Ok(Auth::S3 { s3, unsigned })
 }
 
-struct Resuming<S> {
+struct Resuming {
     http: Http,
     url: Url,
     /// Sent as `If-Range`, so a resume can't mix two versions of the file.
     validator: Option<HeaderValue>,
-    body: S,
+    decode: bool,
+    body: BoxStream<'static, io::Result<Bytes>>,
+    /// Decoded bytes, which is where a resume starts.
     read: u64,
     read_since_resume: u64,
 }
 
-/// The body of `resp`. When it breaks off, a range request picks it up where
-/// it stopped. That needs a server that supports ranges and an unchanged file,
-/// and each try must read some bytes. Otherwise reading fails with an error
-/// that [`broke_off`] matches.
+/// The body of `resp`, decoded from its `Content-Encoding` if `decode`. When
+/// it breaks off, a range request picks it up where it stopped. That needs a
+/// server that supports ranges and an unchanged file, and each try must read
+/// some bytes. Otherwise reading fails with an error that [`broke_off`]
+/// matches.
 fn resumable(
     http: Http,
     url: Url,
     resp: reqwest::Response,
+    decode: bool,
 ) -> Box<dyn AsyncBufRead + Send + Unpin> {
     let headers = resp.headers();
-    // A weak ETag doesn't promise the same bytes, so If-Range can't take one.
+    let encoding = if decode {
+        nar_encoding(&resp)
+    } else {
+        Compression::None
+    };
+    // A weak ETag doesn't promise the same bytes, so If-Range can't take
+    // one. The ETag of a compressed body won't match the uncompressed file
+    // that a resume asks for.
     let validator = (headers.get(ETAG))
-        .filter(|etag| !etag.as_bytes().starts_with(b"W/"))
+        .filter(|etag| !etag.as_bytes().starts_with(b"W/") && encoding == Compression::None)
         .or_else(|| headers.get(LAST_MODIFIED))
         .cloned();
     let state = Resuming {
         http,
         url,
         validator,
-        body: resp.bytes_stream().boxed(),
+        decode,
+        body: decoded(resp, encoding),
         read: 0,
         read_since_resume: 0,
     };
@@ -711,31 +759,50 @@ fn resumable(
             };
             let resumed = match &s.validator {
                 Some(validator) if s.read_since_resume > 0 => {
-                    resume(&s.http, &s.url, validator, s.read).await
+                    resume(&s.http, &s.url, validator, s.read, s.decode).await
                 }
                 _ => None,
             };
             let Some(resp) = resumed else {
-                return Err(io::Error::other(error));
+                return Err(error);
             };
             let error = anyhow::Error::from(error);
             tracing::warn!(url = %s.url, "{error:#}; resumed at byte {}", s.read);
-            s.body = resp.bytes_stream().boxed();
+            s.body = body(resp);
             s.read_since_resume = 0;
         }
     });
     Box::new(StreamReader::new(chunks.boxed()))
 }
 
+fn decoded(
+    resp: reqwest::Response,
+    encoding: Compression,
+) -> BoxStream<'static, io::Result<Bytes>> {
+    match encoding {
+        Compression::None => body(resp),
+        encoding => {
+            let decoder = encoding.decoder(StreamReader::new(body(resp)));
+            ReaderStream::with_capacity(decoder, NAR_CHUNK).boxed()
+        }
+    }
+}
+
+fn body(resp: reqwest::Response) -> BoxStream<'static, io::Result<Bytes>> {
+    resp.bytes_stream().map_err(io::Error::other).boxed()
+}
+
 /// Asks for the bytes from offset `from` on, if the file still matches
-/// `validator`.
+/// `validator`. With `decode`, `from` counts decoded bytes, so the rest must
+/// come without compression.
 async fn resume(
     http: &Http,
     url: &Url,
     validator: &HeaderValue,
     from: u64,
+    decode: bool,
 ) -> Option<reqwest::Response> {
-    let resp = match http.fetch(url, Some((from, validator))).await {
+    let resp = match http.fetch(url, IDENTITY, Some((from, validator))).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::debug!(%url, "resuming: {e:#}");
@@ -751,7 +818,8 @@ async fn resume(
         .and_then(|r| r.to_str().ok());
     let resumed = resp.status() == StatusCode::PARTIAL_CONTENT
         && (range.and_then(content_range))
-            .is_some_and(|(first, last, len)| first == from && last.checked_add(1) == Some(len));
+            .is_some_and(|(first, last, len)| first == from && last.checked_add(1) == Some(len))
+        && (!decode || nar_encoding(&resp) == Compression::None);
     if !resumed {
         tracing::debug!(%url, "resuming: got {} for {range:?}", resp.status());
     }
@@ -811,6 +879,7 @@ pub(crate) mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::narinfo::tests::encode;
 
     const BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
@@ -832,22 +901,55 @@ pub(crate) mod tests {
             ranges: bool,
             short: bool,
         },
+        /// Encodes bodies with `coding` when the request accepts it, like
+        /// harmonia, or always if `stored`, like S3 with an object's
+        /// `Content-Encoding`. A whole `/large` breaks off halfway.
+        Encodes {
+            coding: &'static str,
+            stored: bool,
+        },
+        /// Serves the files in `dir` encoded with `coding`, and refuses
+        /// requests that don't accept it.
+        Cache {
+            dir: &'static Path,
+            coding: &'static str,
+        },
         /// A cache that answers only `/nix-cache-info`.
         Hangs,
     }
 
-    fn range_start(line: &str) -> Option<usize> {
-        let line = line.to_ascii_lowercase();
-        let from = line.strip_prefix("range: bytes=")?.trim_end();
-        from.strip_suffix('-')?.parse().ok()
+    const LAST_MODIFIED: &str = "Wed, 21 Oct 2015 07:28:00 GMT";
+
+    /// Bytes that don't compress, so that half of a compressed body decodes
+    /// to some of them.
+    fn large() -> Vec<u8> {
+        use std::hash::BuildHasher;
+        let state = foldhash::quality::FixedState::default();
+        (0..64 * 1024u64)
+            .flat_map(|i| state.hash_one(i).to_le_bytes())
+            .collect()
     }
 
-    /// A request's path, `Authorization` and `Range` start, or `None` once the
-    /// client has closed the connection. The `Range` counts only if `If-Range`
-    /// holds the `ETag` that `Mode::BreaksOnce` serves.
-    async fn read_request(
-        reader: &mut (impl AsyncBufRead + Unpin),
-    ) -> Option<(String, String, Option<usize>)> {
+    fn range_start(value: &str) -> Option<usize> {
+        value
+            .strip_prefix("bytes=")?
+            .strip_suffix('-')?
+            .parse()
+            .ok()
+    }
+
+    struct Request {
+        path: String,
+        authorization: String,
+        accept_encoding: String,
+        /// Where the `Range` starts, if `If-Range` holds the `ETag` or
+        /// `Last-Modified` that the server sends.
+        range: Option<usize>,
+    }
+
+    /// The next request, or `None` once the client has closed the
+    /// connection.
+    async fn read_request(reader: &mut (impl AsyncBufRead + Unpin)) -> Option<Request> {
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
             return None;
@@ -861,23 +963,107 @@ pub(crate) mod tests {
             .split_once("?X-Amz-")
             .map_or(path, |(p, _)| p)
             .to_owned();
-        let (mut authorization, mut if_range, mut range) = (String::new(), String::new(), None);
+        let (mut authorization, mut accept_encoding) = (String::new(), String::new());
+        let (mut if_range, mut range) = (String::new(), None);
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             if line == "\r\n" {
-                let range = range.filter(|_| if_range == "\"x\"");
-                return Some((path, authorization, range));
+                let range = range.filter(|_| [r#""x""#, LAST_MODIFIED].contains(&&*if_range));
+                return Some(Request {
+                    path,
+                    authorization,
+                    accept_encoding,
+                    range,
+                });
             }
-            let lower = line.to_ascii_lowercase();
-            if lower.starts_with("authorization:") {
-                authorization = line["authorization:".len()..].trim().to_owned();
+            let (name, value) = line.split_once(':').unwrap();
+            let value = value.trim().to_owned();
+            match &*name.to_ascii_lowercase() {
+                "authorization" => authorization = value,
+                "accept-encoding" => accept_encoding = value,
+                "if-range" => if_range = value,
+                "range" => range = range_start(&value),
+                _ => {}
             }
-            if lower.starts_with("if-range:") {
-                if_range = line["if-range:".len()..].trim().to_owned();
-            }
-            range = range.or_else(|| range_start(&line));
         }
+    }
+
+    impl Request {
+        /// Whether `Accept-Encoding` lists `coding`, whatever its weight.
+        fn accepts(&self, coding: &str) -> bool {
+            (self.accept_encoding.split(',')).any(|c| c.split(';').next().unwrap().trim() == coding)
+        }
+    }
+
+    /// The status, headers and body of the response to `req`, before
+    /// `Mode::Encodes` or `Mode::Cache` encodes it.
+    async fn answer(mode: Mode, req: &Request, hit: usize) -> (&'static str, String, Vec<u8>) {
+        let path = req.path.as_str();
+        let mut headers = String::new();
+        let (mut status, mut body) = match (path, mode) {
+            ("/nix-cache-info", Mode::Hangs) => ("200 OK", b"StoreDir: /nix/store\n".to_vec()),
+            (_, Mode::Hangs) => std::future::pending().await,
+            (_, Mode::FlakyOnce) if hit == 0 => ("502 Bad Gateway", Vec::new()),
+            (_, Mode::Cache { coding, .. }) if !req.accepts(coding) => {
+                ("406 Not Acceptable", Vec::new())
+            }
+            (_, Mode::Cache { dir, .. }) => match std::fs::read(dir.join(&path[1..])) {
+                Ok(file) => ("200 OK", file),
+                Err(_) => ("404 Not Found", Vec::new()),
+            },
+            // user:secret
+            ("/private", _) if req.authorization != "Basic dXNlcjpzZWNyZXQ=" => {
+                ("401 Unauthorized", Vec::new())
+            }
+            ("/whoami", _) => ("200 OK", req.authorization.clone().into_bytes()),
+            ("/accept-encoding", _) => ("200 OK", req.accept_encoding.clone().into_bytes()),
+            (p, _) if p.starts_with("/redirect?to=") => {
+                let to = &p["/redirect?to=".len()..];
+                write!(headers, "Location: {to}\r\n").unwrap();
+                ("307 Temporary Redirect", Vec::new())
+            }
+            ("/private" | "/obj" | "/harmonia.nar?hash=x", _) => ("200 OK", BODY.to_vec()),
+            ("/large", _) => ("200 OK", large()),
+            ("/denied", _) => ("403 Forbidden", SIGNATURE_ERROR.to_vec()),
+            ("/hidden", _) => (
+                "403 Forbidden",
+                b"<Error><Code>AccessDenied</Code></Error>".to_vec(),
+            ),
+            ("/forbidden", _) => ("403 Forbidden", Vec::new()),
+            ("/bad", _) => ("400 Bad Request", b"no such\n  thing".to_vec()),
+            ("/big", _) => ("200 OK", vec![0; usize::try_from(MAX_GET).unwrap() + 1]),
+            ("/identity" | "/aws-chunked", _) => {
+                write!(headers, "Content-Encoding: {}\r\n", &path[1..]).unwrap();
+                ("200 OK", BODY.to_vec())
+            }
+            ("/not-zstd", _) => {
+                headers.push_str("Content-Encoding: zstd\r\n");
+                ("200 OK", BODY.to_vec())
+            }
+            _ => ("404 Not Found", Vec::new()),
+        };
+        // Whether a range stops one byte short, for the paths that take one.
+        let ranged = match mode {
+            Mode::BreaksOnce { ranges, short } if path == "/obj" => {
+                headers.push_str("ETag: \"x\"\r\n");
+                ranges.then_some(short)
+            }
+            // Like Caddy, which gives a compressed body an ETag of its own.
+            Mode::Encodes { .. } if path == "/large" => {
+                write!(headers, "ETag: \"y\"\r\nLast-Modified: {LAST_MODIFIED}\r\n").unwrap();
+                Some(false)
+            }
+            _ => None,
+        };
+        if let (Some(short), Some(from)) = (ranged, req.range) {
+            status = "206 Partial Content";
+            let len = body.len();
+            let last = len - 1 - usize::from(short);
+            write!(headers, "Content-Range: bytes {from}-{last}/{len}\r\n").unwrap();
+            body = body[from..=last].to_vec();
+        }
+        (status, headers, body)
     }
 
     pub(crate) async fn server(mode: Mode) -> String {
@@ -892,80 +1078,37 @@ pub(crate) mod tests {
                     let (reader, mut writer) = sock.into_split();
                     let mut reader = BufReader::new(reader);
                     loop {
-                        let Some((path, authorization, range)) = read_request(&mut reader).await
-                        else {
+                        let Some(req) = read_request(&mut reader).await else {
                             return;
                         };
                         let hit = hits.fetch_add(1, Ordering::SeqCst);
-                        let mut encoding = "identity";
-                        let mut headers = String::new();
-                        let (mut status, mut body) = match (path.as_str(), mode) {
-                            ("/nix-cache-info", Mode::Hangs) => {
-                                ("200 OK", b"StoreDir: /nix/store\n".to_vec())
+                        let (status, mut headers, mut body) = answer(mode, &req, hit).await;
+                        let coding = match mode {
+                            Mode::Encodes { coding, stored } if stored || req.accepts(coding) => {
+                                Some(coding)
                             }
-                            (_, Mode::Hangs) => std::future::pending().await,
-                            (_, Mode::FlakyOnce) if hit == 0 => ("502 Bad Gateway", Vec::new()),
-                            // user:secret
-                            ("/private", _) if authorization != "Basic dXNlcjpzZWNyZXQ=" => {
-                                ("401 Unauthorized", Vec::new())
-                            }
-                            ("/whoami", _) => ("200 OK", authorization.into_bytes()),
-                            (p, _) if p.starts_with("/redirect?to=") => {
-                                let to = &p["/redirect?to=".len()..];
-                                write!(headers, "Location: {to}\r\n").unwrap();
-                                ("307 Temporary Redirect", Vec::new())
-                            }
-                            ("/private" | "/obj" | "/harmonia.nar?hash=x", _) => {
-                                ("200 OK", BODY.to_vec())
-                            }
-                            ("/denied", _) => ("403 Forbidden", SIGNATURE_ERROR.to_vec()),
-                            ("/hidden", _) => (
-                                "403 Forbidden",
-                                b"<Error><Code>AccessDenied</Code></Error>".to_vec(),
-                            ),
-                            ("/forbidden", _) => ("403 Forbidden", Vec::new()),
-                            ("/bad", _) => ("400 Bad Request", b"no such\n  thing".to_vec()),
-                            ("/big", _) => {
-                                ("200 OK", vec![0; usize::try_from(MAX_GET).unwrap() + 1])
-                            }
-                            ("/xz" | "/xz-bomb", _) => {
-                                encoding = "xz";
-                                let size = if path == "/xz" {
-                                    BODY.len()
-                                } else {
-                                    usize::try_from(MAX_GET).unwrap() + 1
-                                };
-                                let plain =
-                                    BODY.iter().copied().cycle().take(size).collect::<Vec<_>>();
-                                let mut xz = Vec::new();
-                                async_compression::tokio::bufread::XzEncoder::new(&plain[..])
-                                    .read_to_end(&mut xz)
-                                    .await
-                                    .unwrap();
-                                ("200 OK", xz)
-                            }
-                            _ => ("404 Not Found", Vec::new()),
+                            Mode::Cache { coding, .. } => Some(coding),
+                            _ => None,
                         };
-                        if let Mode::BreaksOnce { ranges, short } = mode
-                            && path == "/obj"
+                        // Like harmonia and Caddy, it leaves an encoded body
+                        // as it is.
+                        if let Some(coding) = coding
+                            && status.starts_with('2')
+                            && !headers.contains("Content-Encoding")
                         {
-                            headers.push_str("ETag: \"x\"\r\n");
-                            if let Some(from) = range.filter(|_| ranges) {
-                                status = "206 Partial Content";
-                                let len = BODY.len();
-                                let last = len - 1 - usize::from(short);
-                                write!(headers, "Content-Range: bytes {from}-{last}/{len}\r\n")
-                                    .unwrap();
-                                body = BODY[from..=last].to_vec();
-                            }
+                            write!(headers, "Content-Encoding: {coding}\r\n").unwrap();
+                            body = encode(Compression::parse(coding).unwrap(), &body).await;
                         }
                         let head = format!(
-                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Encoding: {encoding}\r\n{headers}\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{headers}\r\n",
                             body.len()
                         );
                         writer.write_all(head.as_bytes()).await.unwrap();
                         let sent = match mode {
                             Mode::BreaksOnce { .. } if hit == 0 => body.len() / 2,
+                            Mode::Encodes { .. } if req.path == "/large" && req.range.is_none() => {
+                                body.len() / 2
+                            }
                             Mode::Truncated => body.len().saturating_sub(1),
                             _ => body.len(),
                         };
@@ -1206,8 +1349,19 @@ pub(crate) mod tests {
     }
 
     async fn read_all(t: &Transport, path: &str) -> anyhow::Result<Vec<u8>> {
+        read_nar(t, path, Compression::None).await
+    }
+
+    async fn read_nar(
+        t: &Transport,
+        path: &str,
+        compression: Compression,
+    ) -> anyhow::Result<Vec<u8>> {
         let mut out = Vec::new();
-        t.stream(path).await?.read_to_end(&mut out).await?;
+        t.stream(path, compression)
+            .await?
+            .read_to_end(&mut out)
+            .await?;
         Ok(out)
     }
 
@@ -1215,11 +1369,15 @@ pub(crate) mod tests {
     async fn http_get_and_stream() {
         let base = server(Mode::Normal).await;
         let t = open(&base).unwrap();
-        assert_eq!(t.get("xz").await.unwrap().unwrap(), BODY);
-        for big in ["big", "xz-bomb"] {
-            let err = t.get(big).await.unwrap_err();
-            assert!(format!("{err:#}").contains(" than "), "{err:#}");
+        let err = t.get("big").await.unwrap_err();
+        assert!(format!("{err:#}").contains(" than "), "{err:#}");
+        assert_eq!(t.get("identity").await.unwrap().unwrap(), BODY);
+        for coding in ["identity", "aws-chunked"] {
+            assert_eq!(read_all(&t, coding).await.unwrap(), BODY, "{coding}");
         }
+        // Bad data from a decoder doesn't count as a body that broke off.
+        let err = read_all(&t, "not-zstd").await.unwrap_err();
+        assert!(!broke_off(&err), "{err:#}");
 
         assert_eq!(read_all(&t, "big").await.unwrap().len() as u64, MAX_GET + 1);
         assert_eq!(read_all(&t, "harmonia.nar?hash=x").await.unwrap(), BODY);
@@ -1228,6 +1386,38 @@ pub(crate) mod tests {
         assert!(lacks_file(&err), "{err:#}");
         let err = read_all(&t, "private").await.unwrap_err();
         assert!(!lacks_file(&err), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn http_accepts_encodings() {
+        let t = open(&server(Mode::Normal).await).unwrap();
+        let sent = t.get("accept-encoding").await.unwrap().unwrap();
+        assert_eq!(sent, ENCODINGS.as_bytes());
+        let sent = |compression| read_nar(&t, "accept-encoding", compression);
+        assert_eq!(sent(Compression::None).await.unwrap(), ENCODINGS.as_bytes());
+        assert_eq!(sent(Compression::Xz).await.unwrap(), IDENTITY.as_bytes());
+
+        for (coding, stored) in [
+            ("zstd", false),
+            ("br", false),
+            ("gzip", false),
+            ("xz", true),
+            ("gzip", true),
+        ] {
+            let t = open(&server(Mode::Encodes { coding, stored }).await).unwrap();
+            assert_eq!(t.get("obj").await.unwrap().unwrap(), BODY, "{coding}");
+            assert_eq!(read_all(&t, "obj").await.unwrap(), BODY, "{coding}");
+            let err = t.get("big").await.unwrap_err();
+            assert!(format!("{err:#}").contains(" than "), "{coding}: {err:#}");
+        }
+        // A NAR that the narinfo says is compressed comes as stored.
+        let stored = Mode::Encodes {
+            coding: "xz",
+            stored: true,
+        };
+        let t = open(&server(stored).await).unwrap();
+        let nar = read_nar(&t, "obj", Compression::Xz).await.unwrap();
+        assert_eq!(nar, encode(Compression::Xz, BODY).await);
     }
 
     #[tokio::test]
@@ -1282,6 +1472,17 @@ pub(crate) mod tests {
             let err = read_all(&t, "obj").await.unwrap_err();
             assert!(broke_off(&err), "{err:#}");
         }
+        // A compressed body resumes from its decoded size, unless the rest
+        // comes compressed too.
+        let encodes = |stored| Mode::Encodes {
+            coding: "zstd",
+            stored,
+        };
+        let t = open(&server(encodes(false)).await).unwrap();
+        assert_eq!(read_all(&t, "large").await.unwrap(), large());
+        let t = open(&server(encodes(true)).await).unwrap();
+        let err = read_all(&t, "large").await.unwrap_err();
+        assert!(broke_off(&err), "{err:#}");
     }
 
     /// A path-style bucket at `endpoint`, with keys in place of the

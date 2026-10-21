@@ -40,6 +40,9 @@
 
 ### Added
 
+- Requests to HTTP and S3 caches accept zstd, brotli and gzip responses,
+  except for NARs that are compressed already. harmonia-cache, which stores
+  NARs uncompressed, then sends them compressed with zstd.
 - `unpack --dry-run` checks that the caches have the closures and prints
   their size, without fetching NARs or using the state dir.
 - The `published` and `prefetched` logs have an `elapsed_ms` field.

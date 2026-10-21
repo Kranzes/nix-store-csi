@@ -15,7 +15,7 @@ use tokio::sync::{OnceCell, watch};
 use tokio::time::Instant;
 use url::Url;
 
-use crate::narinfo::{NarInfo, PublicKey};
+use crate::narinfo::{Compression, NarInfo, PublicKey};
 use crate::store::Narinfos;
 use crate::transport::{self, Transport};
 
@@ -114,10 +114,13 @@ impl Caches {
         &self,
         cache: usize,
         path: &str,
+        compression: Compression,
     ) -> anyhow::Result<Box<dyn AsyncBufRead + Send + Unpin>> {
         let cache = &*self.list[cache];
         cache.transport.check(path)?;
-        cache.request(cache.transport.stream(path)).await
+        cache
+            .request(cache.transport.stream(path, compression))
+            .await
     }
 
     pub fn name(&self, cache: usize) -> &Url {
@@ -792,10 +795,11 @@ mod tests {
     async fn keeps_a_cache_that_lacks_a_file() {
         use crate::transport::tests::{Mode, server};
         let caches = caches(&[server(Mode::Normal).await], None);
-        assert!(caches.stream(0, "missing").await.is_err());
-        assert!(caches.stream(0, "obj").await.is_ok());
-        assert!(caches.stream(0, "private").await.is_err());
-        let Err(e) = caches.stream(0, "obj").await else {
+        let stream = |path| caches.stream(0, path, Compression::None);
+        assert!(stream("missing").await.is_err());
+        assert!(stream("obj").await.is_ok());
+        assert!(stream("private").await.is_err());
+        let Err(e) = stream("obj").await else {
             panic!("a cache was used right after it failed");
         };
         assert!(format!("{e:#}").contains("skipped"), "{e:#}");

@@ -56,6 +56,9 @@ pub struct Config {
     pub max_closure_size: Option<u64>,
     /// The free space that collection keeps.
     pub ensure_free: EnsureFree,
+    /// Whether start-up adds up the NAR sizes in store/ for the `store_size`
+    /// metric.
+    pub measure: bool,
 }
 
 pub struct Store {
@@ -116,8 +119,9 @@ pub struct Store {
     ensures: AtomicUsize,
     /// Counts the fetches that wrote a narinfo.
     installs: AtomicU64,
-    /// The NAR size of the store objects in store/, for the metrics.
-    size: AtomicU64,
+    /// The NAR size of the store objects in store/, for the metrics, if
+    /// [`Config::measure`] is set.
+    size: Option<AtomicU64>,
     /// Publishes and unpublishes hold it shared, so collection and
     /// [`Store::forget`] never run in the middle of one.
     gc: Arc<RwLock<()>>,
@@ -136,7 +140,7 @@ pub struct Store {
 /// read leaves its gauge out.
 pub struct Gauges {
     pub store_paths: Option<usize>,
-    pub store_size: u64,
+    pub store_size: Option<u64>,
     pub unsynced_paths: usize,
     pub views: Option<usize>,
     /// The free bytes and inodes on the node store's filesystem, and what
@@ -176,7 +180,7 @@ impl Store {
         let narinfos = Narinfos::new(narinfos);
         let dir_fd =
             std::fs::File::open(&dir).with_context(|| format!("opening {}", dir.display()))?;
-        let store = Self {
+        let mut store = Self {
             caches: Caches::new(
                 &config.stores,
                 StoreDir::default(),
@@ -207,7 +211,7 @@ impl Store {
             prefetched: Mutex::default(),
             ensures: AtomicUsize::default(),
             installs: AtomicU64::default(),
-            size: AtomicU64::default(),
+            size: None,
             gc: Arc::default(),
             dir_fd,
             flushed: tokio::sync::OnceCell::new(),
@@ -217,10 +221,12 @@ impl Store {
         store
             .settle(&state.join("boot-id"), &state.join("generation"))
             .context("settling the paths that the last run did not sync")?;
-        let size = store
-            .measure(&store.dir)
-            .context("measuring the node store")?;
-        store.size.store(size, Ordering::Relaxed);
+        if config.measure {
+            let size = store
+                .measure(&store.dir)
+                .context("measuring the node store")?;
+            store.size = Some(AtomicU64::new(size));
+        }
         store.metrics.init(store.caches.names());
         Ok(store)
     }
@@ -247,7 +253,7 @@ impl Store {
         let limits_inodes = space.is_some_and(|space| space.inodes > 0);
         Gauges {
             store_paths: entries(&self.dir),
-            store_size: self.size.load(Ordering::Relaxed),
+            store_size: self.size.as_ref().map(|size| size.load(Ordering::Relaxed)),
             unsynced_paths,
             views: entries(&self.views),
             free_bytes: space.map(|space| space.free),
@@ -406,9 +412,11 @@ impl Store {
         let tree = self.unpacked(path);
         let trash = Scratch::move_in(&self.tmp, &tree)
             .with_context(|| format!("moving {} out of the node store", tree.display()))?;
-        let _ = (self.size).fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
-            Some(total.saturating_sub(size))
-        });
+        if let Some(total) = &self.size {
+            let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+                Some(total.saturating_sub(size))
+            });
+        }
         Ok(trash)
     }
 
@@ -674,6 +682,7 @@ mod tests {
             netrc_file: None,
             max_closure_size: None,
             ensure_free: EnsureFree::Bytes(0),
+            measure: false,
         };
         let new = tmp.path().join("new");
         drop(Store::new(config(&new)).unwrap());
@@ -850,6 +859,34 @@ mod tests {
         assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
         assert_eq!(count(store.dir()), paths.len());
         assert_eq!(count(&narinfos), paths.len());
+    }
+
+    /// Start-up measures the node store for the `store_size` metric only
+    /// when the config asks for it.
+    #[tokio::test]
+    async fn measures_the_node_store() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let Some((store, _, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let size = paths.iter().map(|path| store.nar_size(path)).sum::<u64>() as f64;
+        let store_size = |store: &Arc<Store>| {
+            let registry = crate::metrics::registry(store);
+            crate::metrics::tests::sample(&registry, "nix_store_csi_store_size_bytes")
+        };
+        let config = || zstd_config(&dir, tmp.path());
+        let store = reopen(store, config).await;
+        assert_eq!(store_size(&store), Some(size));
+        let store = reopen(store, || Config {
+            measure: false,
+            ..config()
+        })
+        .await;
+        assert_eq!(store_size(&store), None);
     }
 
     /// With nothing to settle, start-up leaves its syncfs to the first fetch,

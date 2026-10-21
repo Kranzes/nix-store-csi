@@ -249,6 +249,7 @@ mod tests {
             // Every closure is over it, and prefetches have no limit.
             max_closure_size: Some(1),
             ensure_free: crate::store::EnsureFree::Bytes(0),
+            measure: true,
         });
         Prefetch::new(Arc::new(store.unwrap()), dir.to_owned())
     }

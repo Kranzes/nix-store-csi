@@ -43,6 +43,7 @@ pub(super) fn config(fixtures: &Path, cache: &Path, state: &Path) -> Config {
         netrc_file: None,
         max_closure_size: None,
         ensure_free: EnsureFree::Bytes(1 << 30),
+        measure: true,
     }
 }
 

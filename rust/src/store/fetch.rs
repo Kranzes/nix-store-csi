@@ -370,7 +370,9 @@ impl Store {
             }
             Ok(()) => {}
         }
-        self.size.fetch_add(info.nar_size(), Ordering::Relaxed);
+        if let Some(size) = &self.size {
+            size.fetch_add(info.nar_size(), Ordering::Relaxed);
+        }
         Ok(())
     }
 }

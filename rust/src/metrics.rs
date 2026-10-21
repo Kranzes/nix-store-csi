@@ -321,7 +321,7 @@ impl Collector for StoreGauges {
             "store_size",
             "NAR size of the store objects in the node store",
             Some(&Unit::Bytes),
-            Some(gauges.store_size),
+            gauges.store_size,
         )?;
         gauge(
             "unsynced_paths",

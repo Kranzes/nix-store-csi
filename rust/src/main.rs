@@ -109,6 +109,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         netrc_file: cli.netrc_file,
         max_closure_size: None,
         ensure_free: EnsureFree::Bytes(0),
+        measure: false,
     };
     match cli.command {
         Command::Unpack { roots, dry_run } => unpack(config, &roots, dry_run).await,
@@ -125,6 +126,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let config = Config {
                 max_closure_size,
                 ensure_free,
+                measure: metrics_address.is_some(),
                 ..config
             };
             let store = Arc::new(Store::new(config)?);

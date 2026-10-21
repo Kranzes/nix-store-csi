@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1125 395" width="1125" height="395">
+  <style>
+    svg { --text: #1f2328; --muted: #59636e; --line: #768390; --box: #f6f8fa; --edge: #d1d9e0; --accent: #ddf4ff; --accent-edge: #0969da; }
+    @media (prefers-color-scheme: dark) {
+      svg { --text: #f0f6fc; --muted: #9198a1; --line: #768390; --box: #151b23; --edge: #3d444d; --accent: #0c2d6b; --accent-edge: #4493f8; }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 16px; fill: var(--text); }
+    .title { font-weight: 600; }
+    .sub { font-size: 14px; fill: var(--muted); }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; fill: var(--muted); }
+    .label { font-size: 14px; fill: var(--line); }
+    .page { fill: var(--line); }
+    .box { fill: var(--box); stroke: var(--edge); stroke-width: 1.5; }
+    .accent { fill: var(--accent); stroke: var(--accent-edge); stroke-width: 1.5; }
+    .node { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 6 4; }
+    .group { fill: none; stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
+    .arrow { fill: none; stroke: var(--line); stroke-width: 1.5; marker-end: url(#head); }
+    .head { fill: var(--line); }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- binary caches, outside the node -->
+  <path class="box" d="M20,60 v70 a75,10 0 0 0 150,0 v-70 a75,10 0 0 0 -150,0 z"/>
+  <ellipse class="box" cx="95" cy="60" rx="75" ry="10"/>
+  <text class="title" x="95" y="100" text-anchor="middle">binary caches</text>
+  <text class="sub" x="95" y="120" text-anchor="middle">narinfos, NARs</text>
+
+  <rect class="node" x="210" y="20" width="905" height="360" rx="12"/>
+  <text class="title page" x="230" y="44">Node</text>
+
+  <rect class="accent" x="250" y="60" width="200" height="70" rx="8"/>
+  <text class="title" x="350" y="91" text-anchor="middle">nix-store-csi</text>
+  <text class="sub" x="350" y="112" text-anchor="middle">node plugin</text>
+
+  <rect class="box" x="930" y="60" width="160" height="70" rx="8"/>
+  <text class="title" x="1010" y="100" text-anchor="middle">kubelet</text>
+
+  <rect class="group" x="232" y="176" width="600" height="184" rx="10"/>
+  <text class="label" x="820" y="194" text-anchor="end" style="font-weight: 600">state dir</text>
+
+  <path class="box" d="M250,220 v90 a100,10 0 0 0 200,0 v-90 a100,10 0 0 0 -200,0 z"/>
+  <ellipse class="box" cx="350" cy="220" rx="100" ry="10"/>
+  <text class="title" x="350" y="262" text-anchor="middle">node store</text>
+  <text class="sub" x="350" y="284" text-anchor="middle">all fetched store objects</text>
+
+  <path class="box" d="M530,220 v90 a135,10 0 0 0 270,0 v-90 a135,10 0 0 0 -270,0 z"/>
+  <ellipse class="box" cx="665" cy="220" rx="135" ry="10"/>
+  <text class="title" x="665" y="262" text-anchor="middle">view</text>
+  <text class="sub" x="665" y="284" text-anchor="middle">a closure's store objects and <tspan class="mono" style="font-size: 14px">.roots/</tspan></text>
+  <text class="label" x="665" y="346" text-anchor="middle">shared by pods that list the same set of store paths</text>
+
+  <rect class="box" x="930" y="190" width="160" height="125" rx="8"/>
+  <text class="title" x="1010" y="212" text-anchor="middle">pod</text>
+  <rect class="accent" x="945" y="227" width="130" height="70" rx="6"/>
+  <text class="mono" x="1010" y="258" text-anchor="middle" style="fill: var(--text)">/nix/store</text>
+  <text class="sub" x="1010" y="278" text-anchor="middle">its closure only</text>
+
+  <path class="arrow" d="M170,95 H248"/>
+  <path class="arrow" d="M930,95 H452"/>
+  <text class="label" x="691" y="85" text-anchor="middle"><tspan class="mono" style="fill: var(--line); font-size: 14px">NodePublishVolume</tspan> with <tspan class="mono" style="fill: var(--line); font-size: 14px">storePaths</tspan> over gRPC</text>
+  <path class="arrow" d="M350,130 V208"/>
+  <text class="label" x="362" y="160">fetch, verify, unpack</text>
+  <path class="arrow" d="M450,262 H528"/>
+  <text class="label" x="490" y="252" text-anchor="middle">hard links</text>
+  <path class="arrow" d="M800,262 H943"/>
+  <text class="label" x="881" y="238" text-anchor="middle">read-only</text>
+  <text class="label" x="881" y="254" text-anchor="middle">bind mount</text>
+</svg>

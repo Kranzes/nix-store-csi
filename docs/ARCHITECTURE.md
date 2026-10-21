@@ -11,18 +11,7 @@ for its node's system. Every view has a `.roots/` directory that links each
 listed store path by its name without the hash. A pod's command can then use
 the same path on every system.
 
-```mermaid
-flowchart LR
-    caches[("binary caches<br/>narinfos, NARs")]
-    subgraph node[Node]
-        kubelet -- gRPC over a unix socket --> plugin[nix-store-csi node plugin]
-        plugin -- fetch, verify, unpack --> store[("/var/lib/nix-store-csi/store")]
-        store -- hard links --> views[("/var/lib/nix-store-csi/views/&lt;generation&gt;-&lt;hash&gt;")]
-        views -- one read-only bind mount --> view["pod's /nix/store:<br/>its closure only"]
-        pod -- reads --> view
-    end
-    caches --> plugin
-```
+![The plugin fetches from binary caches into the node store, hard-links a view, and bind-mounts it read-only at the pod's /nix/store](architecture.svg)
 
 ## Unpacking
 

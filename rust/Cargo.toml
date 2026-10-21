@@ -17,12 +17,13 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 # rustc-hash, a cache can't send store paths that collide in every map.
 foldhash = "0.2.0"
 futures = { version = "0.3.34", default-features = false, features = ["std"] }
-harmonia-file-nar = { git = "https://github.com/nix-community/harmonia" }
-harmonia-store-nar-info = { git = "https://github.com/nix-community/harmonia" }
-harmonia-store-path = { git = "https://github.com/nix-community/harmonia" }
-harmonia-store-path-info = { git = "https://github.com/nix-community/harmonia" }
-harmonia-utils-hash = { git = "https://github.com/nix-community/harmonia" }
-harmonia-utils-signature = { git = "https://github.com/nix-community/harmonia" }
+# Upstream main plus the open harmonia PRs, until they are merged.
+harmonia-file-nar = { git = "https://github.com/Kranzes/harmonia", branch = "combined-all" }
+harmonia-store-nar-info = { git = "https://github.com/Kranzes/harmonia", branch = "combined-all" }
+harmonia-store-path = { git = "https://github.com/Kranzes/harmonia", branch = "combined-all" }
+harmonia-store-path-info = { git = "https://github.com/Kranzes/harmonia", branch = "combined-all" }
+harmonia-utils-hash = { git = "https://github.com/Kranzes/harmonia", branch = "combined-all" }
+harmonia-utils-signature = { git = "https://github.com/Kranzes/harmonia", branch = "combined-all" }
 httpdate = "1.0.3"
 humantime = "2"
 # With huge pages, mimalloc held several times the memory and was no faster.

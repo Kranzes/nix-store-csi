@@ -65,19 +65,19 @@ since the plugin would fetch them again within a minute.
 
 ```
 <state-dir>/
-  lock                      held by the one process using the state dir
-  version                   the version of the state dir's layout
-  boot-id                   the boot that last used the state dir
-  sync-failed               left by a failed sync until the next start-up
-  generation                the generation of the views that publishes build
-  store/<name>              unpacked store objects, verified
-  narinfo/<name>.narinfo    a narinfo per store path, dated by last use, and
-                            named <name>.unsynced until the path is synced
-  views/<generation>-<hash>/
-                            a closure, hard-linked from store/, and .roots/.
-                            The hash covers the closure and the roots.
-  volumes/<volume>          which view the volume mounts, and where
-  tmp/                      store objects being unpacked, views being built,
-                            and trash being deleted
+  lock                        held by the one process using the state dir
+  version                     the version of the state dir's layout
+  boot-id                     the boot that last used the state dir
+  sync-failed                 left by a failed sync until the next start-up
+  generation                  the generation of the views that publishes build
+  store/<name>                unpacked store objects, verified
+  narinfo/<name>.narinfo      a narinfo per store path, dated by last use, and
+                              named <name>.unsynced until the path is synced
+  views/<generation>-<hash>/  a closure's store objects, hard-linked from
+                              store/, and .roots/. The hash covers the closure
+                              and the roots.
+  volumes/<volume>            which view the volume mounts, and where
+  tmp/                        store objects being unpacked, views being built,
+                              and trash being deleted
 ```
 

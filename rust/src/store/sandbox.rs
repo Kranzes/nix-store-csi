@@ -19,7 +19,8 @@ use tracing::error;
 
 /// A Tokio runtime whose threads can only create directories, files and
 /// symlinks in one directory and write to files there. They can't read or
-/// write any other file.
+/// write any other file, but can change modes and modification times, which
+/// Landlock doesn't cover.
 pub(super) struct Sandbox(Option<Runtime>);
 
 impl Sandbox {

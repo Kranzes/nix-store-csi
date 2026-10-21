@@ -16,16 +16,30 @@ use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, HashFormat};
 use rayon::prelude::*;
 use rustix::fs::{
-    AtFlags, Dir, FileType, Mode, OFlags, fchmod, futimens, linkat, mkdirat, openat, statat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, Timespec, Timestamps, UTIME_OMIT, fchmod, futimens,
+    linkat, mkdirat, openat, statat, utimensat,
 };
 use tracing::info;
 
-use super::fs::{CANONICAL_TIME, Scratch, count_inodes, remove_file, set_canonical_time};
+use super::fs::{Scratch, count_inodes, remove_file};
 use super::{Store, list_names, list_store_paths, write_synced};
 
 /// The directory in a view that links each root under its name without the
 /// hash. Pods reach a root there by the same path on every system.
 pub const ROOTS: &str = ".roots";
+
+/// The modification time 1, which Nix gives every file in the store, with the
+/// access time left as it is.
+const CANONICAL_TIME: Timestamps = Timestamps {
+    last_access: Timespec {
+        tv_sec: 0,
+        tv_nsec: UTIME_OMIT,
+    },
+    last_modification: Timespec {
+        tv_sec: 1,
+        tv_nsec: 0,
+    },
+};
 
 impl Store {
     /// Returns the view of `paths`, the closure of `roots`, for `volume` to
@@ -235,8 +249,7 @@ fn link_roots(dir: &Path, links: &BTreeMap<&str, &StorePath>) -> anyhow::Result<
             .with_context(|| format!("linking {root} into the view"))?;
     }
     std::fs::set_permissions(dir, Permissions::from_mode(0o555))?;
-    set_canonical_time(dir)?;
-    Ok(())
+    Ok(utimensat(CWD, dir, &CANONICAL_TIME, AtFlags::empty())?)
 }
 
 /// What a view holds.
@@ -311,7 +324,7 @@ fn link_tree(
         }
         link_tree(entries.fd()?, &dst, child, entry.file_type())?;
     }
-    // The mode every sealed directory has.
+    // The mode of every directory in the node store.
     fchmod(&dst, Mode::from_raw_mode(0o555))?;
     Ok(futimens(&dst, &CANONICAL_TIME)?)
 }

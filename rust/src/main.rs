@@ -8,8 +8,9 @@ use anyhow::{Context, bail};
 use bytesize::ByteSize;
 use clap::Parser;
 use harmonia_store_path::StoreDir;
+use rustix::fs::Mode;
 use rustix::io::Errno;
-use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit, umask};
 use tokio::net::{TcpListener, TcpSocket, UnixListener};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -83,6 +84,9 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     raise_open_files_limit();
+    // Restore creates files with their canonical modes, and a stricter umask
+    // would take bits off them. Nix sets the same one.
+    umask(Mode::from_raw_mode(0o022));
     // Any whitespace separates list items, since a value from a file or a YAML
     // block string can end in a newline.
     let trusted_keys = (cli.trusted_public_keys.split_whitespace())

@@ -5,11 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
-use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, UTIME_OMIT, utimensat};
 use walkdir::WalkDir;
 
 /// A directory that's deleted when dropped. Unlike a `TempDir`, it can hold
-/// sealed, read-only trees.
+/// read-only trees.
 pub struct Scratch(PathBuf);
 
 impl Scratch {
@@ -51,7 +50,7 @@ impl Drop for Scratch {
     }
 }
 
-/// Deletes the tree at `path`. Sealed directories aren't writable, so like
+/// Deletes the tree at `path`. Restored directories aren't writable, so like
 /// Nix it makes each one writable first.
 pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
     fn remove_dir(dir: &Path) -> io::Result<()> {
@@ -76,7 +75,7 @@ pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
 
 /// Renames `from` to `to`, and makes a directory writable for the move.
 /// Moving a directory into another needs write access to it, to update its
-/// `..`, and a sealed directory is read-only.
+/// `..`, and a restored directory is read-only.
 pub(super) fn rename_tree(from: &Path, to: &Path) -> io::Result<()> {
     if !std::fs::symlink_metadata(from)?.is_dir() {
         return std::fs::rename(from, to);
@@ -94,29 +93,6 @@ pub(super) fn remove_file(path: &Path) -> anyhow::Result<()> {
         }
         _ => Ok(()),
     }
-}
-
-/// The modification time 1, which Nix gives every file in the store, with the
-/// access time left as it is.
-pub(super) const CANONICAL_TIME: Timestamps = Timestamps {
-    last_access: Timespec {
-        tv_sec: 0,
-        tv_nsec: UTIME_OMIT,
-    },
-    last_modification: Timespec {
-        tv_sec: 1,
-        tv_nsec: 0,
-    },
-};
-
-/// Sets [`CANONICAL_TIME`] on `path`, or on the symlink itself if it is one.
-pub(super) fn set_canonical_time(path: &Path) -> io::Result<()> {
-    Ok(utimensat(
-        CWD,
-        path,
-        &CANONICAL_TIME,
-        AtFlags::SYMLINK_NOFOLLOW,
-    )?)
 }
 
 /// Counts the files, directories and symlinks in the tree at `path`.

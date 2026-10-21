@@ -1,7 +1,5 @@
-use std::fs::Permissions;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -12,7 +10,7 @@ use bytesize::ByteSize;
 use foldhash::HashMap;
 use futures::StreamExt;
 use futures::future::{BoxFuture, FutureExt, Shared};
-use harmonia_file_nar::{NarWriteError, parse_nar, restore};
+use harmonia_file_nar::{NarWriteError, RestoreOptions, parse_nar};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, Hash};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
@@ -27,7 +25,7 @@ use crate::narinfo::Compression;
 use crate::store_path::Names;
 use crate::transport;
 
-use super::fs::{Scratch, rename_tree, set_canonical_time};
+use super::fs::{Scratch, rename_tree};
 use super::{Store, write_unsynced};
 
 /// Restarts a NAR download that the transport couldn't resume.
@@ -301,7 +299,7 @@ impl Store {
         }
     }
 
-    /// Unpacks the store object into tmp/, seals it, and moves it into store/.
+    /// Unpacks the store object into tmp/ and moves it into store/.
     /// Its narinfo stays unsynced until [`Store::sync`].
     async fn fetch(
         self: &Arc<Self>,
@@ -350,7 +348,6 @@ impl Store {
         (self.unsynced.lock().unwrap()).insert(info.path().clone(), failed_syncs);
         let moved = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let _part = part;
-            seal(&unpacked).with_context(|| format!("sealing {}", unpacked.display()))?;
             // The narinfo goes in before the path, so every path in store/
             // has one. Its modification time is the path's last use, and a
             // fetch counts as a use.
@@ -558,28 +555,9 @@ impl std::fmt::Display for TooBig {
 
 impl std::error::Error for TooBig {}
 
-/// Gives the tree Nix's canonical modes and modification time.
-fn seal(path: &Path) -> io::Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.is_symlink() {
-        return set_canonical_time(path);
-    }
-    if meta.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            seal(&entry?.path())?;
-        }
-    }
-    let mode = if meta.mode() & 0o100 == 0 {
-        0o444
-    } else {
-        0o555
-    };
-    std::fs::set_permissions(path, Permissions::from_mode(mode))?;
-    set_canonical_time(path)
-}
-
-/// Unpacks the NAR at `dest` as it streams in, and fails unless its size and
-/// hash match. The caller moves the tree into the store only after that.
+/// Unpacks the NAR at `dest` as it streams in, with Nix's canonical modes and
+/// modification time, and fails unless its size and hash match. The caller
+/// moves the tree into the store only after that.
 /// `bytes` counts the NAR bytes read so far.
 async fn unpack_nar(
     body: impl AsyncBufRead + Send + Unpin + 'static,
@@ -607,7 +585,10 @@ async fn unpack_nar(
             NarWriteError::create_file_error(dest.clone(), io::ErrorKind::InvalidData.into())
         })
     });
-    let restored = restore(events, &dest).await;
+    let restored = RestoreOptions::new()
+        .canonical(true)
+        .restore(events, &dest)
+        .await;
     if let Some(err) = parse_error {
         return Err(anyhow::Error::from(err).context("parsing the NAR"));
     }
@@ -682,6 +663,11 @@ fn pump(
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    use harmonia_file_nar::NarByteStream;
+
     use super::*;
     use crate::metrics::tests::sample;
     use crate::narinfo::tests::{
@@ -711,6 +697,30 @@ mod tests {
             nar.resize(nar.len().next_multiple_of(8), 0);
         }
         nar
+    }
+
+    /// Checks that the tree at `path` serializes to the NAR with `nar_hash`,
+    /// and that every entry has Nix's canonical metadata: modification time
+    /// 1, and mode 0o555 for directories and executables and 0o444 for other
+    /// files. The modes need the umask 022, which `main` sets.
+    async fn assert_canonical(path: &Path, nar_hash: Hash) {
+        let mut hasher = harmonia_utils_hash::Context::new(Algorithm::SHA256);
+        let mut nar = NarByteStream::new(path.to_owned());
+        while let Some(chunk) = nar.next().await {
+            hasher.update(chunk.unwrap());
+        }
+        assert_eq!(hasher.finish(), nar_hash, "{}", path.display());
+        for entry in walkdir::WalkDir::new(path).follow_root_links(false) {
+            let entry = entry.unwrap();
+            let (meta, at) = (entry.metadata().unwrap(), entry.path().display());
+            assert_eq!((meta.mtime(), meta.mtime_nsec()), (1, 0), "{at}");
+            let mode = meta.mode() & 0o7777;
+            if meta.is_dir() {
+                assert_eq!(mode, 0o555, "{at}");
+            } else if meta.is_file() {
+                assert!(matches!(mode, 0o444 | 0o555), "{at} has mode {mode:o}");
+            }
+        }
     }
 
     async fn unpack(
@@ -805,6 +815,7 @@ mod tests {
             return;
         };
         let hello = fixture_root(&dir, "hello.path");
+        rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
         let tmp = scratch();
         // A copy of the cache, since the test deletes it below.
         let cache = tmp.path().join("cache");
@@ -839,15 +850,9 @@ mod tests {
         assert_eq!(count(store.dir()), 5);
         assert_eq!(count(state.join("narinfo")), 5);
         assert_eq!(count(state.join("tmp")), 0);
-        let hello_dir = store.unpacked(&hello);
-        for (file, mode) in [
-            (hello_dir.clone(), 0o555),
-            (hello_dir.join("bin/hello"), 0o555),
-            (hello_dir.join("share/man/man1/hello.1.gz"), 0o444),
-        ] {
-            let meta = std::fs::symlink_metadata(&file).unwrap();
-            assert_eq!(meta.mode() & 0o7777, mode, "{}", file.display());
-            assert_eq!(meta.mtime(), 1, "{}", file.display());
+        for path in paths.iter() {
+            let info = fixture_narinfo(&dir, "cache-zstd", path);
+            assert_canonical(&store.unpacked(path), info.nar_hash()).await;
         }
 
         // A new instance needs no cache for the paths it has.

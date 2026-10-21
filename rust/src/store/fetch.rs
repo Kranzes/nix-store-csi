@@ -8,16 +8,16 @@ use anyhow::{Context, bail, ensure};
 use backon::{ConstantBuilder, Retryable};
 use bytesize::ByteSize;
 use foldhash::HashMap;
-use futures::StreamExt;
 use futures::future::{BoxFuture, FutureExt, Shared};
-use harmonia_file_nar::{NarWriteError, RestoreOptions, parse_nar};
+use futures::{Stream, StreamExt, TryStreamExt};
+use harmonia_file_nar::{NarWriteError, RestoreOptions, parse_nar_stream};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, Hash};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
-use tokio_util::io::{InspectReader, ReaderStream, StreamReader};
+use tokio_util::io::{ReaderStream, StreamReader};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::closure::Entry;
@@ -569,15 +569,15 @@ async fn unpack_nar(
 ) -> anyhow::Result<()> {
     let mut size = 0;
     // Reading one byte past the expected size catches a NAR that's too long.
-    let (body, hashed) = decode_apart(compression.decoder(body).take(nar_size + 1));
-    let mut nar = InspectReader::new(body, |b| {
-        size += b.len() as u64;
+    let (chunks, hashed) = decode_apart(compression.decoder(body).take(nar_size + 1));
+    let mut nar = chunks.inspect_ok(|chunk| {
+        size += chunk.len() as u64;
         bytes.store(size, Ordering::Relaxed);
     });
     // `restore` rejects entries that would leave `dest`, so a NAR that isn't
     // verified yet can't write elsewhere.
     let mut parse_error = None;
-    let events = parse_nar(&mut nar).map(|event| {
+    let events = parse_nar_stream(&mut nar).map(|event| {
         event.map_err(|err| {
             // `restore` only takes its own error type, so the parser's error
             // goes in `parse_error`.
@@ -594,8 +594,7 @@ async fn unpack_nar(
     }
     restored?;
     // Bytes after the end of the archive count towards the size too.
-    tokio::io::copy(&mut nar, &mut tokio::io::sink()).await?;
-    drop(nar);
+    while nar.try_next().await?.is_some() {}
     ensure!(size <= nar_size, "NAR is longer than {nar_size} bytes");
     ensure!(
         size == nar_size,
@@ -613,18 +612,18 @@ async fn unpack_nar(
 /// read it, since the transport may read credentials and resume the
 /// download.
 fn relay(body: impl AsyncRead + Send + Unpin + 'static) -> impl AsyncBufRead + Send + Unpin {
-    pump(body, None)
+    StreamReader::new(pump(body, None))
 }
 
 /// Reads `decoded` in one task and hashes it in another, so decompression,
-/// hashing and parsing each get a core. Returns a reader of the data and a task
-/// that yields its SHA-256. The hash covers all the data once the reader has
-/// read to the end. On a 4-vCPU host, tokio workers fetched cold about 15%
-/// faster than blocking threads.
+/// hashing and parsing each get a core. Returns the data's chunks and a task
+/// that yields its SHA-256. The hash covers all the data once the chunks have
+/// run out. On a 4-vCPU host, tokio workers fetched cold about 15% faster than
+/// blocking threads.
 fn decode_apart(
     decoded: impl AsyncRead + Send + 'static,
 ) -> (
-    impl AsyncBufRead + Send + Unpin,
+    impl Stream<Item = io::Result<Bytes>> + Send + Unpin,
     tokio::task::JoinHandle<Hash>,
 ) {
     let (to_hash, mut hashing) = tokio::sync::mpsc::channel::<Bytes>(4);
@@ -638,15 +637,17 @@ fn decode_apart(
     (pump(decoded, Some(to_hash)), hashed)
 }
 
-/// Reads `src` in a task, and sends each chunk to the returned reader and to
+const CHUNK_SIZE: usize = 256 * 1024;
+
+/// Reads `src` in a task, and sends each chunk to the returned stream and to
 /// `tee`.
 fn pump(
     src: impl AsyncRead + Send + 'static,
     tee: Option<tokio::sync::mpsc::Sender<Bytes>>,
-) -> impl AsyncBufRead + Send + Unpin {
+) -> impl Stream<Item = io::Result<Bytes>> + Send + Unpin {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
-        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(src, 256 * 1024));
+        let mut chunks = std::pin::pin!(ReaderStream::with_capacity(src, CHUNK_SIZE));
         while let Some(chunk) = chunks.next().await {
             if let (Some(tee), Ok(chunk)) = (&tee, &chunk)
                 && tee.send(chunk.clone()).await.is_err()
@@ -658,7 +659,7 @@ fn pump(
             }
         }
     });
-    StreamReader::new(ReceiverStream::new(rx))
+    ReceiverStream::new(rx)
 }
 
 #[cfg(test)]
@@ -799,6 +800,17 @@ mod tests {
             panic!("unpacked garbage");
         };
         assert!(format!("{err:#}").contains("parsing the NAR"), "{err:#}");
+
+        // A byte after the archive counts even in a chunk the parser never
+        // reads.
+        let mut nar = file_nar(&vec![0; CHUNK_SIZE - file_nar(b"").len()]);
+        assert_eq!(nar.len(), CHUNK_SIZE);
+        nar.push(0);
+        let size = CHUNK_SIZE as u64;
+        let Err(err) = unpack(&nar, Compression::None, &sha256(&nar), size).await else {
+            panic!("unpacked a NAR with a byte after it");
+        };
+        assert!(format!("{err:#}").contains("longer"), "{err:#}");
     }
 
     #[test]

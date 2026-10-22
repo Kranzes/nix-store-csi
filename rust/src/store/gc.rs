@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, ensure};
 use foldhash::{HashMap, HashMapExt, HashSet};
 use harmonia_store_path::StorePath;
+use rayon::prelude::*;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -204,7 +205,7 @@ impl Store {
             (path, inodes)
         };
         let paths = list_store_paths(&self.dir)?;
-        Ok(paths.into_iter().map(count).collect())
+        Ok(paths.into_par_iter().map(count).collect())
     }
 }
 

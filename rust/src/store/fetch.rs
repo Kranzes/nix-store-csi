@@ -1,4 +1,6 @@
+use std::fs::Permissions;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -25,7 +27,7 @@ use crate::narinfo::Compression;
 use crate::store_path::Names;
 use crate::transport;
 
-use super::fs::{Scratch, rename_tree};
+use super::fs::{Scratch, rename_writable};
 use super::{Store, write_unsynced};
 
 /// Restarts a NAR download that the transport couldn't resume.
@@ -229,17 +231,8 @@ impl Store {
             let span = info_span!(parent: None, "fetch", store_path = %path);
             let task = tokio::spawn(
                 async move {
-                    let leave = Leave(this.clone(), path.clone());
-                    let result = this.install(entry, &read).await;
-                    drop(leave);
-                    if let Ok(true) = result {
-                        tokio::spawn(async move {
-                            if let Err(e) = this.sync(&path).await {
-                                warn!("{e:#}");
-                            }
-                        });
-                    }
-                    result.map(drop).map_err(|e| Arc::new(format!("{e:#}")))
+                    let _leave = Leave(this.clone(), path);
+                    (this.install(entry, &read).await).map_err(|e| Arc::new(format!("{e:#}")))
                 }
                 .instrument(span),
             );
@@ -249,19 +242,19 @@ impl Store {
         (fetch.clone(), bytes.clone(), started)
     }
 
-    /// Counts the NAR bytes it reads in `bytes`, and returns whether it
-    /// fetched the path.
+    /// Counts the NAR bytes it reads in `bytes`, and starts a sync for the
+    /// path once it's in store/.
     async fn install(
         self: &Arc<Self>,
         mut entry: Arc<Entry>,
         bytes: &Arc<AtomicU64>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         let path = entry.info.path().clone();
         let _permit = self.jobs.acquire().await?;
         // Another fetch may have finished while this one waited.
         if self.present(&path) {
             bytes.store(entry.info.nar_size(), Ordering::Relaxed);
-            return Ok(false);
+            return Ok(());
         }
         self.flush().await?;
         let mut tried = Vec::new();
@@ -270,7 +263,9 @@ impl Store {
             let Some(cache) = entry.cache else {
                 entry = (self.caches.next(&entry, &tried).await)
                     .and_then(|next| next.context("no cache has it"))
-                    .with_context(|| format!("fetching {path}"))?;
+                    .with_context(|| {
+                        format!("fetching {}", self.caches.store_dir().display(&path))
+                    })?;
                 continue;
             };
             tried.push(cache);
@@ -283,8 +278,19 @@ impl Store {
                 entry.info.nar_size(),
             );
             let error = match fetched {
-                Ok(()) => return Ok(true),
-                Err(e) => e.context(format!("fetching {path}")),
+                Ok(()) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = this.sync(&path).await {
+                            warn!("{e:#}");
+                        }
+                    });
+                    return Ok(());
+                }
+                Err(e) => e.context(format!(
+                    "fetching {}",
+                    self.caches.store_dir().display(&path)
+                )),
             };
             match self.caches.next(&entry, &tried).await {
                 Ok(Some(next)) => {
@@ -349,28 +355,33 @@ impl Store {
         let text = info.to_text();
         let dest = self.unpacked(info.path());
         (self.unsynced.lock().unwrap()).insert(info.path().clone(), failed_syncs);
-        let moved = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        // An inner error means only setting the mode failed after the move,
+        // and the store object is whole without it.
+        let moved = tokio::task::spawn_blocking(move || -> anyhow::Result<io::Result<()>> {
             let _part = part;
             // The narinfo goes in before the path, so every path in store/
             // has one. Its modification time is the path's last use, and a
             // fetch counts as a use.
             write_unsynced(&unsynced, &text)?;
-            rename_tree(&unpacked, &dest)
-                .with_context(|| format!("moving {} into the node store", unpacked.display()))
+            let dir = rename_writable(&unpacked, &dest)
+                .with_context(|| format!("moving {} into the node store", unpacked.display()))?;
+            Ok(if dir {
+                std::fs::set_permissions(&dest, Permissions::from_mode(0o555))
+            } else {
+                Ok(())
+            })
         })
         .await
         .map_err(anyhow::Error::from)
         .flatten();
         self.installs.fetch_add(1, Ordering::SeqCst);
         match moved {
-            // Setting the path's mode is the only step that can fail after
-            // the move, and the path is whole without it.
-            Err(e) if self.present(info.path()) => warn!("{e:#}; keeping the store object"),
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("making the store object read-only: {e}; keeping it"),
             Err(e) => {
                 self.unsynced.lock().unwrap().remove(info.path());
                 return Err(e);
             }
-            Ok(()) => {}
         }
         if let Some(size) = &self.size {
             size.fetch_add(info.nar_size(), Ordering::Relaxed);
@@ -670,7 +681,8 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
-    use harmonia_file_nar::NarByteStream;
+    use harmonia_file_nar::archive::write_nar;
+    use harmonia_file_nar::{NarByteStream, NarEvent};
 
     use super::*;
     use crate::metrics::tests::sample;
@@ -686,21 +698,13 @@ mod tests {
 
     /// A NAR of one regular file.
     fn file_nar(contents: &[u8]) -> Vec<u8> {
-        let mut nar = Vec::new();
-        for s in [
-            &b"nix-archive-1"[..],
-            b"(",
-            b"type",
-            b"regular",
-            b"contents",
-            contents,
-            b")",
-        ] {
-            nar.extend((s.len() as u64).to_le_bytes());
-            nar.extend(s);
-            nar.resize(nar.len().next_multiple_of(8), 0);
-        }
-        nar
+        let file = NarEvent::File {
+            name: Bytes::new(),
+            executable: false,
+            size: contents.len() as u64,
+            reader: std::io::Cursor::new(contents.to_vec().into()),
+        };
+        write_nar([&file]).into()
     }
 
     /// Checks that the tree at `path` serializes to the NAR with `nar_hash`,

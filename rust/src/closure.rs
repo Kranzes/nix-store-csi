@@ -74,7 +74,6 @@ impl Caches {
     /// doesn't hold up the others.
     pub fn new(
         urls: &[String],
-        store_dir: StoreDir,
         trusted_keys: Option<Vec<PublicKey>>,
         local: Option<Narinfos>,
         netrc: Option<&Path>,
@@ -100,11 +99,11 @@ impl Caches {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         for cache in &list {
-            tokio::spawn(cache.clone().open(store_dir.clone()));
+            tokio::spawn(cache.clone().open());
         }
         Ok(Self {
             list,
-            store_dir,
+            store_dir: StoreDir::default(),
             trusted_keys,
             local,
         })
@@ -280,7 +279,12 @@ impl Caches {
         tiers: &OnceCell<Vec<Vec<usize>>>,
     ) -> anyhow::Result<Lookup> {
         match self.local_info(path) {
-            Ok(Some(info)) => return Ok(Lookup::Found(Arc::new(Entry { cache: None, info }))),
+            Ok(Some(info)) => {
+                // A local hit never waits. Without this, a warm resolve would
+                // block its runtime thread until the whole closure resolves.
+                tokio::task::consume_budget().await;
+                return Ok(Lookup::Found(Arc::new(Entry { cache: None, info })));
+            }
             Ok(None) => {}
             Err(e) => tracing::warn!("{e:#}; looking in the caches"),
         }
@@ -332,7 +336,7 @@ impl Caches {
             }
         }
         match error {
-            Some(e) => Err(e.context(format!("looking up {path}"))),
+            Some(e) => Err(e.context(format!("looking up {}", self.store_dir.display(path)))),
             None => Ok(Lookup::Missing(untrusted)),
         }
     }
@@ -359,34 +363,32 @@ impl Caches {
         let mut untrusted = Vec::new();
         while let Some((cache, answer)) = answers.next().await {
             let name = &self.list[cache].name;
-            let info = match answer {
+            let parsed = match answer {
                 Ok(Some(text)) => self.parse(text, path, name),
                 Ok(None) => continue,
                 Err(e) => Err(e),
             };
-            match info {
-                Ok(mut info) => match self.trust(&mut info) {
-                    Err(signers) => {
-                        // The error says so if no cache has a trusted one.
-                        tracing::debug!(store_path = %path, cache = %name, "no trusted signature");
-                        untrusted.push(match signers.as_slice() {
-                            [] => format!("{name} has it unsigned"),
-                            _ => format!("{name} has it signed by {}", self.signers(&signers)),
-                        });
-                    }
-                    Ok(()) if accept(&info) => {
-                        tracing::trace!(store_path = %path, cache = %name, "found narinfo");
-                        return Ok(Lookup::Found(Arc::new(Entry {
-                            cache: Some(cache),
-                            info,
-                        })));
-                    }
-                    Ok(()) => {}
-                },
+            let mut info = match parsed {
+                Ok(info) => info,
                 Err(e) => {
                     tracing::debug!("{e:#}");
                     error.get_or_insert(e);
+                    continue;
                 }
+            };
+            if let Err(signers) = self.trust(&mut info) {
+                // The error says so if no cache has a trusted one.
+                tracing::debug!(store_path = %path, cache = %name, "no trusted signature");
+                untrusted.push(match signers.as_slice() {
+                    [] => format!("{name} has it unsigned"),
+                    _ => format!("{name} has it signed by {}", self.signers(&signers)),
+                });
+            } else if accept(&info) {
+                tracing::trace!(store_path = %path, cache = %name, "found narinfo");
+                return Ok(Lookup::Found(Arc::new(Entry {
+                    cache: Some(cache),
+                    info,
+                })));
             }
         }
         error.map_or(Ok(Lookup::Missing(untrusted)), Err)
@@ -441,9 +443,9 @@ impl Caches {
 }
 
 impl Cache {
-    async fn open(self: Arc<Self>, store_dir: StoreDir) {
+    async fn open(self: Arc<Self>) {
         loop {
-            match self.read_info(&store_dir).await {
+            match self.read_info().await {
                 Ok(priority) => {
                     self.state.send_replace(Some(Ok(priority)));
                     return;
@@ -460,7 +462,7 @@ impl Cache {
     /// Returns the cache's priority. It refuses a cache for another store dir.
     /// It tries once, because lookups wait for it and [`Cache::open`] tries
     /// again later.
-    async fn read_info(&self, store_dir: &StoreDir) -> anyhow::Result<i32> {
+    async fn read_info(&self) -> anyhow::Result<i32> {
         // S3 answers 403 `AccessDenied` both for a missing file and for a
         // missing permission.
         let text = match self.transport.get_once("nix-cache-info").await {
@@ -470,8 +472,9 @@ impl Cache {
             result => result?,
         };
         let info: CacheInfo = String::from_utf8_lossy(&text).parse()?;
+        let store_dir = StoreDir::default();
         if let Some(dir) = &info.store_dir
-            && dir != store_dir
+            && *dir != store_dir
         {
             bail!("it holds paths for {dir}, not {store_dir}");
         }
@@ -542,14 +545,7 @@ mod tests {
 
     fn with_local(stores: &[String], trusted_key: Option<&str>, local: &Path) -> Caches {
         let keys = trusted_key.map(|k| vec![k.parse().unwrap()]);
-        Caches::new(
-            stores,
-            StoreDir::default(),
-            keys,
-            Some(Narinfos::new(local.to_owned())),
-            None,
-        )
-        .unwrap()
+        Caches::new(stores, keys, Some(Narinfos::new(local.to_owned())), None).unwrap()
     }
 
     impl Caches {

@@ -28,22 +28,25 @@ pub(super) fn copy_cache(src: &Path, dst: &Path) {
     assert!(status.success());
 }
 
-pub(super) fn config(fixtures: &Path, cache: &Path, state: &Path) -> Config {
+/// A config for `cache` that trusts any narinfo.
+pub(crate) fn unsigned_config(cache: &Path, state: &Path) -> Config {
     Config {
         stores: vec![file_store(cache)],
-        trusted_keys: Some(vec![
-            std::fs::read_to_string(fixtures.join("public.key"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap(),
-        ]),
+        trusted_keys: None,
         state_dir: state.to_owned(),
         jobs: 2,
         netrc_file: None,
         max_closure_size: None,
         ensure_free: EnsureFree::Bytes(1 << 30),
         measure: true,
+    }
+}
+
+pub(super) fn config(fixtures: &Path, cache: &Path, state: &Path) -> Config {
+    let key = std::fs::read_to_string(fixtures.join("public.key")).unwrap();
+    Config {
+        trusted_keys: Some(vec![key.trim().parse().unwrap()]),
+        ..unsigned_config(cache, state)
     }
 }
 

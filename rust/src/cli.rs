@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use clap::{Parser, Subcommand};
 
-use crate::store::{self, EnsureFree};
+use crate::store::EnsureFree;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -131,7 +131,7 @@ pub enum Command {
             value_name = "SIZE",
             env = "NIX_STORE_CSI_ENSURE_FREE",
             default_value = "20%",
-            value_parser = store::parse_ensure_free
+            value_parser = parse_ensure_free
         )]
         ensure_free: EnsureFree,
         /// Serve Prometheus metrics at `/metrics` on ADDRESS, like
@@ -145,7 +145,7 @@ pub enum Command {
             long,
             value_name = "SIZE",
             env = "NIX_STORE_CSI_MAX_CLOSURE_SIZE",
-            value_parser = store::parse_size
+            value_parser = parse_size
         )]
         max_closure_size: Option<u64>,
         /// Keep the closures of the store paths listed in DIR fetched, even
@@ -182,6 +182,48 @@ fn parse_interval(s: &str) -> anyhow::Result<Duration> {
     let interval = humantime::parse_duration(s)?;
     ensure!(!interval.is_zero(), "the interval cannot be 0");
     Ok(interval)
+}
+
+/// Parses `--ensure-free` like harmonia-gc does: a percentage like `20%`, or a
+/// size for [`parse_size`].
+fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
+    let s = s.trim();
+    if let Some(p) = s.strip_suffix('%') {
+        let p: f64 = (p.trim().parse()).with_context(|| format!("invalid percentage {s:?}"))?;
+        ensure!(
+            (0.0..=100.0).contains(&p),
+            "{s:?} is not between 0% and 100%"
+        );
+        return Ok(EnsureFree::Percent(p));
+    }
+    parse_size(s).map(EnsureFree::Bytes)
+}
+
+/// Parses a size like `50G`, where K, M, G and T are powers of 1024.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "the size is checked to fit"
+)]
+fn parse_size(s: &str) -> anyhow::Result<u64> {
+    let s = s.trim();
+    let (number, shift) = match s.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&s[..s.len() - 1], 10),
+        Some('M') => (&s[..s.len() - 1], 20),
+        Some('G') => (&s[..s.len() - 1], 30),
+        Some('T') => (&s[..s.len() - 1], 40),
+        _ => (s, 0),
+    };
+    let n: f64 = number
+        .parse()
+        .with_context(|| format!("invalid size {s:?}"))?;
+    let bytes = n * (1u64 << shift) as f64;
+    ensure!(
+        (0.0..=u64::MAX as f64).contains(&bytes),
+        "{s:?} is out of range"
+    );
+    Ok(bytes as u64)
 }
 
 #[cfg(test)]
@@ -222,5 +264,23 @@ mod tests {
         };
         assert!(csi("0s").is_err());
         assert!(csi("1h").is_ok());
+    }
+
+    #[test]
+    fn parses_ensure_free() {
+        for (s, want) in [
+            ("20%", EnsureFree::Percent(20.0)),
+            ("12.5 %", EnsureFree::Percent(12.5)),
+            ("512", EnsureFree::Bytes(512)),
+            ("1K", EnsureFree::Bytes(1 << 10)),
+            ("50G", EnsureFree::Bytes(50 << 30)),
+            ("1.5g", EnsureFree::Bytes(3 << 29)),
+            ("2T", EnsureFree::Bytes(2 << 40)),
+        ] {
+            assert_eq!(parse_ensure_free(s).unwrap(), want, "{s}");
+        }
+        for s in ["", "101%", "-1G", "x%", "50GB", "NaN%", "inf"] {
+            assert!(parse_ensure_free(s).is_err(), "{s}");
+        }
     }
 }

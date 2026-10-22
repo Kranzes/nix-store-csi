@@ -232,8 +232,8 @@ mod tests {
 
     use super::*;
     use crate::metrics::tests::sample;
-    use crate::narinfo::tests::{empty_cache, file_store, fixture_root, fixtures};
-    use crate::store::test_utils::{ALL, UNBOUND, count};
+    use crate::narinfo::tests::{empty_cache, fixture_root, fixtures};
+    use crate::store::test_utils::{ALL, UNBOUND, count, unsigned_config};
     use crate::store::{Config, TooBig};
 
     const A: &str = "/nix/store/xl1h9i29pgq2q5cszjhm5wpfxfbbqwyi-hello-2.12.3";
@@ -241,15 +241,9 @@ mod tests {
 
     fn prefetch(cache: &Path, dir: &Path) -> Prefetch {
         let store = Store::new(Config {
-            stores: vec![file_store(cache)],
-            trusted_keys: None,
-            state_dir: dir.with_extension("state"),
-            jobs: 2,
-            netrc_file: None,
             // Every closure is over it, and prefetches have no limit.
             max_closure_size: Some(1),
-            ensure_free: crate::store::EnsureFree::Bytes(0),
-            measure: true,
+            ..unsigned_config(cache, &dir.with_extension("state"))
         });
         Prefetch::new(Arc::new(store.unwrap()), dir.to_owned())
     }

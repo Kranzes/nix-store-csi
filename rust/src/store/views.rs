@@ -277,8 +277,10 @@ impl Volume {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("reading {}", record.display())),
         };
-        let newline = (bytes.iter().position(|&b| b == b'\n'))
-            .with_context(|| format!("{} has no newline", record.display()))?;
+        // Only a temporary file that a kill cut short has no newline.
+        let Some(newline) = bytes.iter().position(|&b| b == b'\n') else {
+            return Ok(None);
+        };
         Ok(Some(Self {
             key: String::from_utf8_lossy(&bytes[..newline]).into_owned(),
             target: std::ffi::OsString::from_vec(bytes[newline + 1..].to_vec()).into(),
@@ -439,6 +441,19 @@ mod tests {
 
         store.prune_views(UNBOUND).await.unwrap();
         assert!(store.measured.lock().unwrap().is_empty());
+    }
+
+    /// A kill between creating a record and renaming it into place leaves an
+    /// empty temporary file in volumes/. Pruning deletes it.
+    #[tokio::test]
+    async fn prunes_cut_short_records() {
+        let tmp = scratch();
+        let state = tmp.path().join("state");
+        let store = Arc::new(Store::new(unsigned_config(tmp.path(), &state)).unwrap());
+        let leftover = state.join("volumes/.tmpAbC123");
+        std::fs::write(&leftover, "").unwrap();
+        store.prune_views(UNBOUND).await.unwrap();
+        assert!(!leftover.exists());
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, bail, ensure};
 use foldhash::{HashMap, HashSet, HashSetExt};
-use harmonia_store_path::{StoreDir, StorePath};
+use harmonia_store_path::StorePath;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Timespec, Timestamps, UTIME_NOW, flock, utimensat};
 use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore};
 use tracing::{info, warn};
@@ -33,7 +33,7 @@ use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 
 pub use self::fetch::{Ensuring, TooBig};
-pub use self::gc::{EnsureFree, Excess, parse_ensure_free, parse_size};
+pub use self::gc::{EnsureFree, Excess};
 pub use self::narinfos::Narinfos;
 pub use self::views::{Usage, check_volume, root_links};
 
@@ -183,7 +183,6 @@ impl Store {
         let mut store = Self {
             caches: Caches::new(
                 &config.stores,
-                StoreDir::default(),
                 config.trusted_keys,
                 Some(narinfos.clone()),
                 config.netrc_file.as_deref(),
@@ -666,7 +665,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::narinfo::tests::{file_store, fixture_path, fixture_root, fixtures};
+    use crate::narinfo::tests::{fixture_path, fixture_root, fixtures};
     use crate::store::test_utils::*;
 
     /// Start-up records the layout version in a state dir that has none, and
@@ -674,16 +673,7 @@ mod tests {
     #[tokio::test]
     async fn checks_layout_version() {
         let tmp = scratch();
-        let config = |state: &Path| Config {
-            stores: vec![file_store(tmp.path())],
-            trusted_keys: None,
-            state_dir: state.to_owned(),
-            jobs: 1,
-            netrc_file: None,
-            max_closure_size: None,
-            ensure_free: EnsureFree::Bytes(0),
-            measure: false,
-        };
+        let config = |state: &Path| unsigned_config(tmp.path(), state);
         let new = tmp.path().join("new");
         drop(Store::new(config(&new)).unwrap());
         assert_eq!(std::fs::read_to_string(new.join("version")).unwrap(), "1");

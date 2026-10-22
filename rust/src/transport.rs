@@ -201,7 +201,7 @@ impl From<reqwest::Error> for Failure {
                 || e.is_body()
                 || e.is_decode())
                 && !failed_tls(&e),
-            // retry() adds the URL.
+            // Callers name the URL.
             error: e.without_url().into(),
             retry_after: None,
         }
@@ -224,14 +224,9 @@ fn failed_tls(e: &reqwest::Error) -> bool {
     if !e.is_connect() {
         return false;
     }
-    let mut source = std::error::Error::source(e);
-    while let Some(e) = source {
-        if (e.downcast_ref::<io::Error>()).is_some_and(|e| e.kind() == io::ErrorKind::InvalidData) {
-            return true;
-        }
-        source = e.source();
-    }
-    false
+    std::iter::successors(std::error::Error::source(e), |e| e.source()).any(|e| {
+        (e.downcast_ref::<io::Error>()).is_some_and(|e| e.kind() == io::ErrorKind::InvalidData)
+    })
 }
 
 /// The response's `Content-Encoding`. Nix sets it on the narinfos it
@@ -418,7 +413,7 @@ where
             tracing::warn!(%url, "{:#}; retrying in {:?}", f.error, crate::millis(delay));
         })
         .await
-        .map_err(|f| f.error.context(format!("fetching {url}")))
+        .map_err(|f| f.error)
 }
 
 /// `url` without its user info, which can hold a password or token.
@@ -548,6 +543,7 @@ impl Transport {
                     Ok(decode(body, encoding).await?)
                 })
                 .await
+                .with_context(|| format!("fetching {url}"))
             }
         }
     }
@@ -1287,17 +1283,15 @@ pub(crate) mod tests {
         let t = open(&server.replace("://", "://user:secret@")).unwrap();
         assert_eq!(t.get("private").await.unwrap().unwrap(), BODY);
         assert_eq!(read_all(&t, "private").await.unwrap(), BODY);
-        // No error message shows the credentials.
-        for err in [
-            t.get("big").await.unwrap_err(),
-            read_all(&t, "missing").await.unwrap_err(),
-        ] {
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains("127.0.0.1") && !msg.contains("secret"),
-                "{msg}"
-            );
-        }
+        // No error message shows the credentials. Only `get` adds the URL,
+        // since a NAR's caller names the NAR.
+        let msg = format!("{:#}", t.get("big").await.unwrap_err());
+        assert!(
+            msg.contains("127.0.0.1") && !msg.contains("secret"),
+            "{msg}"
+        );
+        let msg = format!("{:#}", read_all(&t, "missing").await.unwrap_err());
+        assert!(!msg.contains("secret"), "{msg}");
     }
 
     #[tokio::test]

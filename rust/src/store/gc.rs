@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use foldhash::{HashMap, HashMapExt, HashSet};
 use harmonia_store_path::StorePath;
 use rayon::iter::Either;
@@ -288,48 +288,6 @@ pub enum EnsureFree {
     Bytes(u64),
     /// A percentage of the filesystem's size.
     Percent(f64),
-}
-
-/// Parses `--ensure-free` like harmonia-gc does: a percentage like `20%`, or a
-/// size for [`parse_size`].
-pub fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
-    let s = s.trim();
-    if let Some(p) = s.strip_suffix('%') {
-        let p: f64 = (p.trim().parse()).with_context(|| format!("invalid percentage {s:?}"))?;
-        ensure!(
-            (0.0..=100.0).contains(&p),
-            "{s:?} is not between 0% and 100%"
-        );
-        return Ok(EnsureFree::Percent(p));
-    }
-    parse_size(s).map(EnsureFree::Bytes)
-}
-
-/// Parses a size like `50G`, where K, M, G and T are powers of 1024.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "the size is checked to fit"
-)]
-pub fn parse_size(s: &str) -> anyhow::Result<u64> {
-    let s = s.trim();
-    let (number, shift) = match s.chars().last().map(|c| c.to_ascii_uppercase()) {
-        Some('K') => (&s[..s.len() - 1], 10),
-        Some('M') => (&s[..s.len() - 1], 20),
-        Some('G') => (&s[..s.len() - 1], 30),
-        Some('T') => (&s[..s.len() - 1], 40),
-        _ => (s, 0),
-    };
-    let n: f64 = number
-        .parse()
-        .with_context(|| format!("invalid size {s:?}"))?;
-    let bytes = n * (1u64 << shift) as f64;
-    ensure!(
-        (0.0..=u64::MAX as f64).contains(&bytes),
-        "{s:?} is out of range"
-    );
-    Ok(bytes as u64)
 }
 
 #[cfg(test)]
@@ -719,23 +677,5 @@ mod tests {
                 inodes: 400
             }
         );
-    }
-
-    #[test]
-    fn parses_ensure_free() {
-        for (s, want) in [
-            ("20%", EnsureFree::Percent(20.0)),
-            ("12.5 %", EnsureFree::Percent(12.5)),
-            ("512", EnsureFree::Bytes(512)),
-            ("1K", EnsureFree::Bytes(1 << 10)),
-            ("50G", EnsureFree::Bytes(50 << 30)),
-            ("1.5g", EnsureFree::Bytes(3 << 29)),
-            ("2T", EnsureFree::Bytes(2 << 40)),
-        ] {
-            assert_eq!(parse_ensure_free(s).unwrap(), want, "{s}");
-        }
-        for s in ["", "101%", "-1G", "x%", "50GB", "NaN%", "inf"] {
-            assert!(parse_ensure_free(s).is_err(), "{s}");
-        }
     }
 }

@@ -9,6 +9,14 @@
   it resolves, so a cache that speaks only HTTP/1.1 gets at most 128
   connections for narinfos.
 
+### Fixed
+
+- The plugin starts again after it was killed while writing a volume's
+  record. The empty temporary file that the kill left in `volumes/` used to
+  fail every start and every garbage collection.
+- Pod events for a failed fetch or lookup name store paths in full, and name
+  a failed NAR's URL once instead of twice.
+
 ## 0.1.7 - 2026-10-21
 
 ### Changed

@@ -25,12 +25,7 @@ impl Scratch {
     pub(super) fn move_in(tmp: &Path, from: &Path) -> io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let trash = Self(tmp.join(format!("trash-{}", NEXT.fetch_add(1, Ordering::Relaxed))));
-        // Like `rename_tree`, but the trash stays writable.
-        let meta = std::fs::symlink_metadata(from)?;
-        if meta.is_dir() && meta.permissions().readonly() {
-            std::fs::set_permissions(from, Permissions::from_mode(0o755))?;
-        }
-        std::fs::rename(from, &trash.0)?;
+        rename_writable(from, &trash.0)?;
         Ok(trash)
     }
 
@@ -96,16 +91,17 @@ pub(super) fn deletes() -> &'static rayon::ThreadPool {
     })
 }
 
-/// Renames `from` to `to`, and makes a directory writable for the move.
-/// Moving a directory into another needs write access to it, to update its
-/// `..`, and a restored directory is read-only.
-pub(super) fn rename_tree(from: &Path, to: &Path) -> io::Result<()> {
-    if !std::fs::symlink_metadata(from)?.is_dir() {
-        return std::fs::rename(from, to);
+/// Renames `from` to `to`, and returns whether it moved a directory. Moving
+/// a directory into another needs write access to it, to update its `..`.
+/// A restored directory is read-only, so this makes a directory writable
+/// first.
+pub(super) fn rename_writable(from: &Path, to: &Path) -> io::Result<bool> {
+    let dir = std::fs::symlink_metadata(from)?.is_dir();
+    if dir {
+        std::fs::set_permissions(from, Permissions::from_mode(0o755))?;
     }
-    std::fs::set_permissions(from, Permissions::from_mode(0o755))?;
     std::fs::rename(from, to)?;
-    std::fs::set_permissions(to, Permissions::from_mode(0o555))
+    Ok(dir)
 }
 
 /// Deletes the file at `path`, if there is one.

@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
 use clap::Parser;
-use harmonia_store_path::StoreDir;
 use rustix::fs::Mode;
 use rustix::io::Errno;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit, umask};
@@ -158,7 +157,6 @@ async fn unpack(config: Config, roots: &[String], dry_run: bool) -> anyhow::Resu
     if dry_run {
         let caches = Caches::new(
             &config.stores,
-            StoreDir::default(),
             config.trusted_keys,
             None,
             config.netrc_file.as_deref(),
@@ -295,6 +293,8 @@ async fn serve(endpoint: &str, plugin: Arc<Plugin>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use harmonia_store_path::StoreDir;
+
     use super::*;
     use crate::narinfo::tests::{fixture_narinfos, fixtures, without_lines};
 

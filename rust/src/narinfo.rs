@@ -2,7 +2,7 @@ use std::cell::LazyCell;
 use std::collections::BTreeSet;
 use std::pin::Pin;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{bail, ensure};
 use async_compression::tokio::bufread::{
     BrotliDecoder, BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder,
 };
@@ -73,17 +73,14 @@ pub struct NarInfo {
 impl NarInfo {
     pub fn parse(store_dir: &StoreDir, text: &str) -> anyhow::Result<Self> {
         let parsed = harmonia_store_nar_info::parse_narinfo_txt(store_dir, text)?;
-        let url = parsed.info.url.as_deref().context("narinfo has no URL")?;
+        let url = parsed.info.url.as_deref().unwrap_or_default();
         ensure!(!url.is_empty(), "narinfo has an empty URL");
         ensure!(
             url.len() <= MAX_URL,
             "narinfo has a URL longer than {MAX_URL} bytes"
         );
-        // Nix uses bzip2 when the field is missing or empty.
-        let name = (parsed.info.compression.as_deref())
-            .filter(|c| !c.is_empty())
-            .unwrap_or("bzip2");
-        let compression = Compression::parse(name)?;
+        let compression =
+            Compression::parse(parsed.info.compression.as_deref().unwrap_or_default())?;
         Ok(Self {
             compression,
             parsed,

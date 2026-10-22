@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, ensure};
 use foldhash::{HashMap, HashMapExt, HashSet};
 use harmonia_store_path::StorePath;
+use rayon::iter::Either;
 use rayon::prelude::*;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -124,21 +125,25 @@ impl Store {
             bytes: self.nar_size(path),
             inodes: inodes.get(path).map_or(1, |n| n + 1),
         };
-        let mut doomed = Vec::new();
-        let mut spared = Vec::new();
-        for path in list_store_paths(&self.dir)? {
+        let paths = list_store_paths(&self.dir)?;
+        let candidates: Vec<_> = {
+            let unsynced = self.unsynced.lock().unwrap();
             // A fetch marks its path unsynced before moving it in.
-            if in_use.contains(&path) || self.unsynced.lock().unwrap().contains_key(&path) {
-                continue;
-            }
-            let used = self.last_use(&path);
-            if old(used) {
-                let cost = cost(&path);
-                doomed.push((path, cost));
-            } else {
-                spared.push((used, path));
-            }
-        }
+            (paths.into_iter())
+                .filter(|path| !in_use.contains(path) && !unsynced.contains_key(path))
+                .collect()
+        };
+        // Publishes wait for this, so it reads the last uses on all cores.
+        let (mut doomed, mut spared): (Vec<_>, Vec<_>) =
+            candidates.into_par_iter().partition_map(|path| {
+                let used = self.last_use(&path);
+                if old(used) {
+                    let cost = cost(&path);
+                    Either::Left((path, cost))
+                } else {
+                    Either::Right((used, path))
+                }
+            });
         let mut freed = Excess::default();
         for (_, cost) in &doomed {
             freed += *cost;

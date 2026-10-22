@@ -2,6 +2,7 @@ use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
@@ -73,11 +74,26 @@ pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
         std::fs::remove_dir(dir)
     }
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => remove_dir(path),
+        Ok(meta) if meta.is_dir() => deletes().install(|| remove_dir(path)),
         Ok(_) => std::fs::remove_file(path),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// A thread pool for deletes, so a big one doesn't hold up the global pool,
+/// which builds views for publishes.
+pub(super) fn deletes() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        (rayon::ThreadPoolBuilder::new())
+            .thread_name(|i| format!("delete-{i}"))
+            // A thread waiting on a subdirectory runs other subdirectories'
+            // deletes on its own stack, so deep trees need more than 2 MiB.
+            .stack_size(16 << 20)
+            .build()
+            .expect("starting the delete threads")
+    })
 }
 
 /// Renames `from` to `to`, and makes a directory writable for the move.

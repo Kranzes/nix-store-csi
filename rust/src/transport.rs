@@ -1067,9 +1067,15 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn server(mode: Mode) -> String {
+        server_counting(mode).await.0
+    }
+
+    /// Like [`server`], and also counts the requests it gets.
+    pub(crate) async fn server_counting(mode: Mode) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
         tokio::spawn(async move {
             loop {
                 let (sock, _) = listener.accept().await.unwrap();
@@ -1119,7 +1125,7 @@ pub(crate) mod tests {
                 });
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), counted)
     }
 
     #[tokio::test]

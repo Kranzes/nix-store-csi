@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Resolving a closure looks up 128 narinfos in parallel instead of 32. Each
+  cache gets at most 128 lookups at a time from a node, however many closures
+  it resolves, so a cache that speaks only HTTP/1.1 gets at most 128
+  connections for narinfos.
+
 ## 0.1.7 - 2026-10-21
 
 ### Changed

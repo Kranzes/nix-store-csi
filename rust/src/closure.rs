@@ -11,7 +11,7 @@ use futures::stream::{FuturesOrdered, FuturesUnordered};
 use harmonia_store_nar_info::CacheInfo;
 use harmonia_store_path::{StoreDir, StorePath};
 use tokio::io::AsyncBufRead;
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::{OnceCell, Semaphore, watch};
 use tokio::time::Instant;
 use url::Url;
 
@@ -22,8 +22,10 @@ use crate::transport::{self, Transport};
 /// Nix's priority for a cache whose `nix-cache-info` sets none.
 const DEFAULT_PRIORITY: i32 = 0;
 
-/// How many narinfo lookups run at once while resolving a closure.
-const LOOKUPS: usize = 32;
+/// How many narinfo lookups each closure keeps in flight, and how many each
+/// cache gets at a time from all the closures being resolved. A cache that
+/// speaks only HTTP/1.1 gets a connection for each.
+const LOOKUPS: usize = 128;
 
 /// How long a cache is skipped after a request to it fails.
 const PAUSE: Duration = Duration::from_mins(1);
@@ -49,6 +51,9 @@ struct Cache {
     state: watch::Sender<Option<Result<i32, String>>>,
     /// When a request last failed, and why.
     failed: Mutex<Option<(Instant, String)>>,
+    /// Permits for [`LOOKUPS`]. Each cache has its own, so one that stalls
+    /// doesn't hold up lookups that the others answer.
+    lookups: Semaphore,
 }
 
 pub struct Entry {
@@ -90,6 +95,7 @@ impl Caches {
                     transport,
                     state: watch::Sender::new(None),
                     failed: Mutex::default(),
+                    lookups: Semaphore::new(LOOKUPS),
                 }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -343,7 +349,10 @@ impl Caches {
         let mut answers: FuturesUnordered<_> = (tier.iter())
             .map(|&cache| {
                 let c = &*self.list[cache];
-                async move { (cache, c.request(c.transport.get(file)).await) }
+                async move {
+                    let _permit = c.lookups.acquire().await;
+                    (cache, c.request(c.transport.get(file)).await)
+                }
             })
             .collect();
         let mut error = None;
@@ -869,5 +878,67 @@ mod tests {
             .unwrap();
         assert_eq!(closure.len(), 5);
         assert!(closure.contains_key(&StorePath::from_base_path(GLIBC).unwrap()));
+    }
+
+    /// Store paths that no cache has.
+    fn ghosts(range: std::ops::Range<usize>) -> Vec<StorePath> {
+        (range.map(|i| StorePath::from_base_path(&format!("{i:0>32}-ghost")).unwrap())).collect()
+    }
+
+    /// Returns once `requests` reaches `n`.
+    async fn wait_for(requests: &AtomicUsize, n: usize) {
+        let reached = async {
+            while requests.load(Ordering::SeqCst) < n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        (tokio::time::timeout(Duration::from_secs(30), reached).await)
+            .expect("waited for the requests");
+    }
+
+    #[tokio::test]
+    async fn limits_lookups_across_closures() {
+        use crate::transport::tests::{Mode, server_counting};
+        let (url, requests) = server_counting(Mode::Hangs).await;
+        let caches = caches(&[url], None);
+        let (a, b) = (ghosts(0..LOOKUPS), ghosts(LOOKUPS..2 * LOOKUPS));
+        // The cache never answers, so every lookup it gets stays in flight.
+        let both = futures::future::join(caches.closure(&a), caches.closure(&b));
+        // The other request reads nix-cache-info.
+        let limit = async {
+            wait_for(&requests, LOOKUPS + 1).await;
+            // Any lookup past the limit would arrive by now.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        tokio::select! {
+            _ = both => panic!("resolving finished"),
+            () = limit => {}
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), LOOKUPS + 1);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_cache_holds_up_only_its_own_lookups() {
+        use crate::transport::tests::{Mode, server_counting};
+        let Some(dir) = fixtures() else { return };
+        let (hung, requests) = server_counting(Mode::Hangs).await;
+        let stores = [
+            format!("{}?priority=10", file_store(&dir.join("cache-zstd"))),
+            format!("{hung}?priority=20"),
+        ];
+        let caches = caches(&stores, Some(TEST_KEY));
+        // The first cache lacks these, so their lookups wait on the hung one.
+        let ghosts = ghosts(0..LOOKUPS);
+        let roots = [fixture_root(&dir, "hello.path")];
+        let hello = async {
+            wait_for(&requests, LOOKUPS + 1).await;
+            let closure = tokio::time::timeout(Duration::from_secs(10), caches.closure(&roots));
+            closure.await.expect("waited for the hung cache").unwrap()
+        };
+        let closure = tokio::select! {
+            _ = caches.closure(&ghosts) => panic!("resolving finished"),
+            closure = hello => closure,
+        };
+        assert_eq!(sources(&closure), [Some(0)].into());
     }
 }

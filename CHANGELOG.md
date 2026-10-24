@@ -6,6 +6,8 @@
 
 - A NAR URL that leaves a GCS cache's bucket, like `./https:host/x`, fails
   the request. The plugin used to send its GCP token to that host.
+- Decoding an xz NAR uses at most 256 MiB. A cache could make each fetch
+  allocate up to 4 GiB before the NarHash check failed.
 
 ## 0.1.8 - 2026-10-23
 

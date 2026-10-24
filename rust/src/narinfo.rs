@@ -17,6 +17,11 @@ pub use harmonia_utils_signature::PublicKey;
 /// without a cap a cache could make each narinfo the node store keeps huge.
 const MAX_URL: usize = 4096;
 
+/// liblzma's limit for decoding a NAR. `xz -9` needs 65 MiB. Without a
+/// limit, the dictionary size in a NAR's header, up to 4 GiB, decides how
+/// much the decoder allocates before the `NarHash` check can fail.
+const XZ_MEMLIMIT: u64 = 256 << 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     None,
@@ -47,19 +52,19 @@ impl Compression {
         body: impl AsyncBufRead + Send + Unpin + 'static,
     ) -> Pin<Box<dyn AsyncRead + Send>> {
         macro_rules! decoder {
-            ($decoder:ident) => {{
-                let mut d = $decoder::new(body);
+            ($decoder:expr) => {{
+                let mut d = $decoder;
                 d.multiple_members(true);
                 Box::pin(d)
             }};
         }
         match self {
             Self::None => Box::pin(body),
-            Self::Xz => decoder!(XzDecoder),
-            Self::Zstd => decoder!(ZstdDecoder),
-            Self::Bzip2 => decoder!(BzDecoder),
-            Self::Gzip => decoder!(GzipDecoder),
-            Self::Brotli => decoder!(BrotliDecoder),
+            Self::Xz => decoder!(XzDecoder::with_mem_limit(body, XZ_MEMLIMIT)),
+            Self::Zstd => decoder!(ZstdDecoder::new(body)),
+            Self::Bzip2 => decoder!(BzDecoder::new(body)),
+            Self::Gzip => decoder!(GzipDecoder::new(body)),
+            Self::Brotli => decoder!(BrotliDecoder::new(body)),
         }
     }
 }

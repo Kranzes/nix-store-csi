@@ -97,7 +97,14 @@ impl Http {
             }
             Some(Auth::Gcs { token, objects }) => {
                 let token = token.get_credential().await?;
+                // The https join can read a path that stayed within the s3://
+                // cache differently, as with `http:host/x` or `..\x`.
                 let object = objects.join(url.path().trim_start_matches('/'))?;
+                ensure!(
+                    within(&object, objects),
+                    "bad path in binary cache: {:?}",
+                    url.path()
+                );
                 self.client.get(object).bearer_auth(&token.bearer)
             }
         })
@@ -849,13 +856,14 @@ pub fn request_url(base: &Url, path: &str) -> anyhow::Result<Url> {
         dir.set_path(&format!("{}/", dir.path()));
     }
     let url = dir.join(path)?;
-    // Unlike `Url::origin`, this works for s3:// too.
-    ensure!(
-        url[..Position::BeforePath] == dir[..Position::BeforePath]
-            && url.path().starts_with(dir.path()),
-        "bad path in binary cache: {path:?}"
-    );
+    ensure!(within(&url, &dir), "bad path in binary cache: {path:?}");
     Ok(url)
+}
+
+/// Whether `url` is under the directory `dir`. Unlike `Url::origin`, this
+/// works for s3:// too.
+fn within(url: &Url, dir: &Url) -> bool {
+    url[..Position::BeforePath] == dir[..Position::BeforePath] && url.path().starts_with(dir.path())
 }
 
 fn file_path(base: &Path, path: &str) -> anyhow::Result<PathBuf> {
@@ -1519,6 +1527,11 @@ pub(crate) mod tests {
             }),
         });
         assert_eq!(t.get("whoami").await.unwrap().unwrap(), b"Bearer token");
+        // The server is http, so https changes the scheme.
+        for path in ["./https:other/x", r"..\..\other\x"] {
+            let err = t.get(path).await.unwrap_err();
+            assert!(format!("{err:#}").contains("bad path"), "{path}: {err:#}");
+        }
     }
 
     fn keys() -> AmazonS3Builder {

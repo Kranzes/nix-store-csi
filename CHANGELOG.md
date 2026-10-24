@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A NAR URL that leaves a GCS cache's bucket, like `./https:host/x`, fails
+  the request. The plugin used to send its GCP token to that host.
+
 ## 0.1.8 - 2026-10-23
 
 ### Changed

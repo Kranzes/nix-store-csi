@@ -277,8 +277,9 @@ testers.runNixOSTest {
         ROOT_ACCESS_KEY = "nix";
         ROOT_SECRET_KEY = "secret";
       };
-      # versitygw keeps metadata in xattrs, which the VM's store lacks.
-      serviceConfig.ExecStart = "${lib.getExe versitygw} --port 127.0.0.1:9000 posix --nometa ${fixtures}";
+      # versitygw keeps metadata in xattrs, which the VM's store lacks. It
+      # also cannot create lock files there, since the store is read-only.
+      serviceConfig.ExecStart = "${lib.getExe versitygw} --port 127.0.0.1:9000 posix --nometa --object-lock-mode none ${fixtures}";
     };
     services.nginx = {
       enable = true;

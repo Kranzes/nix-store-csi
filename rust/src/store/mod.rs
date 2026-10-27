@@ -412,8 +412,8 @@ impl Store {
         let trash = Scratch::move_in(&self.tmp, &tree)
             .with_context(|| format!("moving {} out of the node store", tree.display()))?;
         if let Some(total) = &self.size {
-            let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
-                Some(total.saturating_sub(size))
+            total.update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+                total.saturating_sub(size)
             });
         }
         Ok(trash)

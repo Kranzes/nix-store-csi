@@ -1050,26 +1050,28 @@ mod tests {
             ..zstd_config(&dir, tmp.path())
         };
         let store = Arc::new(Store::new(config).unwrap());
+        let hello = fixture_root(&dir, "hello.path");
+        // With glibc's closure present, warm's ensure fetches warm and
+        // busybox, and hello's fetches hello.
+        (store.ensure(&[fixture_path(&dir, "glibc")]).done().await).unwrap();
+        let glibc = count(store.dir());
         let slot = store.jobs.acquire().await.unwrap();
-        let mut hello = store.ensure(&[fixture_root(&dir, "hello.path")]);
-        resolved(&hello).await;
-        let mut busybox = store.ensure(&[fixture_path(&dir, "busybox")]);
-        resolved(&busybox).await;
+        let mut a = store.ensure(&[fixture_path(&dir, "warm")]);
+        resolved(&a).await;
+        let mut b = store.ensure(std::slice::from_ref(&hello));
+        resolved(&b).await;
         // The test queues for a slot behind both feeds.
         let mut next = std::pin::pin!(store.jobs.acquire());
         assert!(next.as_mut().now_or_never().is_none());
         drop(slot);
         let slot = next.await.unwrap();
-        // Both closures list libidn2 first, then libunistring. hello's feed
-        // starts libidn2, and busybox's feed starts libunistring, which
-        // hello's ensure created.
-        let present = |name| store.present(&fixture_path(&dir, name));
-        assert!(present("libidn2") && present("libunistring"));
-        assert!(!present("hello") && !present("busybox") && !present("glibc"));
+        // Each feed had one turn.
+        assert!(store.present(&hello));
+        assert_eq!(count(store.dir()), glibc + 2);
 
         drop(slot);
-        hello.done().await.unwrap();
-        busybox.done().await.unwrap();
+        a.done().await.unwrap();
+        b.done().await.unwrap();
     }
 
     /// An ensure carries on after its caller stops waiting. When kubelet gives

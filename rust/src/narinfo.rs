@@ -277,7 +277,10 @@ Sig: test-1:uLy+NsnprYjac4dL2b/QKAqXkcZ2kMJmSWAGrfdHnRb4ycbZsCv7MMXVqp4aPJci0GM6
         fixture_narinfos(dir, "cache-none")
             .into_iter()
             .map(|(_, _, info)| info.path().clone())
-            .find(|path| path.name().to_string().starts_with(&format!("{pname}-")))
+            .find(|path| {
+                let name = path.name().to_string();
+                name == pname || name.starts_with(&format!("{pname}-"))
+            })
             .unwrap_or_else(|| panic!("no {pname} in the fixtures"))
     }
 

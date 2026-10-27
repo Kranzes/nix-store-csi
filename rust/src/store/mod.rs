@@ -24,7 +24,7 @@ use rustix::fs::{AtFlags, CWD, FlockOperation, Timespec, Timestamps, UTIME_NOW, 
 use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore};
 use tracing::{info, warn};
 
-use self::fetch::Fetch;
+use self::fetch::Underway;
 use self::fs::{Scratch, remove_file, remove_tree};
 use self::gc::Space;
 use self::sandbox::Sandbox;
@@ -82,7 +82,8 @@ pub struct Store {
     tmp: PathBuf,
     /// Unpacks NARs into tmp/.
     sandbox: Sandbox,
-    jobs: Semaphore,
+    /// A slot for each fetch that may run at once.
+    jobs: Arc<Semaphore>,
     max_jobs: usize,
     max_closure_size: Option<u64>,
     ensure_free: EnsureFree,
@@ -106,7 +107,7 @@ pub struct Store {
     /// Fetches under way, each with the NAR bytes it has read. Volumes that
     /// need the same path share its fetch. A fetch leaves the map when it
     /// ends, so a publish after a failure starts a new one.
-    fetching: Mutex<HashMap<StorePath, (Fetch, Arc<AtomicU64>)>>,
+    fetching: Mutex<HashMap<StorePath, Underway>>,
     /// The paths of closures under [`Store::ensure`] or [`Store::prefetch`],
     /// each with its number of holds. Collection spares them however full the
     /// disk is.
@@ -197,7 +198,7 @@ impl Store {
             measured: Mutex::default(),
             sandbox: Sandbox::new(&tmp, config.jobs)?,
             tmp,
-            jobs: Semaphore::new(config.jobs),
+            jobs: Arc::new(Semaphore::new(config.jobs)),
             max_jobs: config.jobs,
             max_closure_size: config.max_closure_size,
             ensure_free: config.ensure_free,

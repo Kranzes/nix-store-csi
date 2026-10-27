@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- A volume's fetches no longer wait behind all the fetches of a closure that
+  came first, like the prefetch list on a node that just started. Publishes
+  and prefetching take turns at the `--max-substitution-jobs` slots.
+
 ### Fixed
 
 - A NAR URL that leaves a GCS cache's bucket, like `./https:host/x`, fails

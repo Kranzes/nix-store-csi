@@ -16,7 +16,7 @@ use harmonia_file_nar::{NarWriteError, RestoreOptions, parse_nar_stream};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, Hash};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -34,6 +34,14 @@ use super::{Store, write_unsynced};
 const NAR_RESTARTS: ConstantBuilder = ConstantBuilder::new().with_max_times(2);
 
 pub(super) type Fetch = Shared<BoxFuture<'static, Result<(), Arc<String>>>>;
+
+/// A fetch under way, the NAR bytes it has read, and the sender that gives
+/// the fetch its slot, until a feed takes it.
+pub(super) type Underway = (
+    Fetch,
+    Arc<AtomicU64>,
+    Option<oneshot::Sender<OwnedSemaphorePermit>>,
+);
 
 impl Store {
     /// Starts fetching the paths in the closure of `roots` that the store
@@ -122,6 +130,9 @@ impl Store {
                 (fetch, bytes)
             })
             .collect();
+        if !missing.is_empty() {
+            tokio::spawn(self.clone().feed(missing.clone()));
+        }
         let fetching: u64 = missing.iter().map(|p| closure[p].info.nar_size()).sum();
         // Fetching can take a while, and each fetch holds the entry it needs.
         drop(closure);
@@ -222,24 +233,43 @@ impl Store {
         let path = entry.info.path().clone();
         let mut fetching = self.fetching.lock().unwrap();
         let mut started = false;
-        let (fetch, bytes) = fetching.entry(path.clone()).or_insert_with(|| {
+        let (fetch, bytes, _) = fetching.entry(path.clone()).or_insert_with(|| {
             started = true;
             let (this, bytes) = (self.clone(), Arc::<AtomicU64>::default());
             let read = bytes.clone();
+            let (start, slot) = oneshot::channel();
             // Shared by every volume that needs the path, so no publish's span
             // is its parent.
             let span = info_span!(parent: None, "fetch", store_path = %path);
             let task = tokio::spawn(
                 async move {
                     let _leave = Leave(this.clone(), path);
+                    let _slot = slot.await.expect("a feed starts every fetch");
                     (this.install(entry, &read).await).map_err(|e| Arc::new(format!("{e:#}")))
                 }
                 .instrument(span),
             );
             let fetch = async move { task.await.unwrap_or_else(|e| Err(Arc::new(e.to_string()))) };
-            (fetch.boxed().shared(), bytes)
+            (fetch.boxed().shared(), bytes, Some(start))
         });
         (fetch.clone(), bytes.clone(), started)
+    }
+
+    /// Starts the fetches of `paths` that wait for a slot, one slot at a time.
+    /// Each ensure has a feed of its own, and slots go to the feeds in the
+    /// order they asked, so ensures take turns. A feed can also start a fetch
+    /// that another ensure created.
+    async fn feed(self: Arc<Self>, paths: Vec<StorePath>) {
+        let mut paths = paths.into_iter();
+        while let Ok(slot) = self.jobs.clone().acquire_owned().await {
+            // Skips the paths that no longer wait, like those that another
+            // ensure started meanwhile.
+            let take = |path| self.fetching.lock().unwrap().get_mut(&path)?.2.take();
+            let Some(start) = paths.find_map(take) else {
+                return;
+            };
+            drop(start.send(slot));
+        }
     }
 
     /// Counts the NAR bytes it reads in `bytes`, and starts a sync for the
@@ -250,7 +280,6 @@ impl Store {
         bytes: &Arc<AtomicU64>,
     ) -> anyhow::Result<()> {
         let path = entry.info.path().clone();
-        let _permit = self.jobs.acquire().await?;
         // Another fetch may have finished while this one waited.
         if self.present(&path) {
             bytes.store(entry.info.nar_size(), Ordering::Relaxed);
@@ -1006,6 +1035,41 @@ mod tests {
         // Each fetch leaves the map when it ends, so a later failure starts
         // a new one.
         assert!(store.fetching.lock().unwrap().is_empty());
+    }
+
+    /// Ensures take turns at the slots, so a closure doesn't wait for every
+    /// fetch of one that came before it.
+    #[tokio::test]
+    async fn takes_turns() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let config = crate::store::Config {
+            jobs: 1,
+            ..zstd_config(&dir, tmp.path())
+        };
+        let store = Arc::new(Store::new(config).unwrap());
+        let slot = store.jobs.acquire().await.unwrap();
+        let mut hello = store.ensure(&[fixture_root(&dir, "hello.path")]);
+        resolved(&hello).await;
+        let mut busybox = store.ensure(&[fixture_path(&dir, "busybox")]);
+        resolved(&busybox).await;
+        // The test queues for a slot behind both feeds.
+        let mut next = std::pin::pin!(store.jobs.acquire());
+        assert!(next.as_mut().now_or_never().is_none());
+        drop(slot);
+        let slot = next.await.unwrap();
+        // Both closures list libidn2 first, then libunistring. hello's feed
+        // starts libidn2, and busybox's feed starts libunistring, which
+        // hello's ensure created.
+        let present = |name| store.present(&fixture_path(&dir, name));
+        assert!(present("libidn2") && present("libunistring"));
+        assert!(!present("hello") && !present("busybox") && !present("glibc"));
+
+        drop(slot);
+        hello.done().await.unwrap();
+        busybox.done().await.unwrap();
     }
 
     /// An ensure carries on after its caller stops waiting. When kubelet gives

@@ -202,9 +202,8 @@ impl Store {
             return Ok(HashMap::new());
         }
         let count = |path: StorePath| {
-            let tree = self.unpacked(&path);
-            let inodes = count_inodes(&tree).unwrap_or_else(|e| {
-                warn!("counting the inodes in {}: {e}; using 0", tree.display());
+            let inodes = count_inodes(&self.unpacked(&path)).unwrap_or_else(|e| {
+                warn!(store_path = %path, "counting the inodes: {e}; using 0");
                 0
             });
             (path, inodes)

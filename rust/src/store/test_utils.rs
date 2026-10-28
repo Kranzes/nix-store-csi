@@ -83,19 +83,30 @@ pub(super) async fn settled(store: &Arc<Store>) {
     }
 }
 
-/// Runs `f` while every thread of `pool` waits, and returns whether `f`
-/// ended within a few seconds.
-pub(super) fn ends_while_busy(pool: &rayon::ThreadPool, f: impl FnOnce() + Send + 'static) -> bool {
+/// Runs `f` while every thread of `pool`, or of the global pool if `None`,
+/// waits, and returns whether `f` ended within a few seconds.
+pub(super) fn ends_while_busy(
+    pool: Option<&rayon::ThreadPool>,
+    f: impl FnOnce() + Send + 'static,
+) -> bool {
     // Each thread waits at the barrier twice, first to show it is busy, then
     // until `f` ends or the wait times out.
-    let barrier = Arc::new(Barrier::new(pool.current_num_threads() + 1));
-    pool.spawn_broadcast({
+    let threads = pool.map_or_else(
+        rayon::current_num_threads,
+        rayon::ThreadPool::current_num_threads,
+    );
+    let barrier = Arc::new(Barrier::new(threads + 1));
+    let wait = {
         let barrier = barrier.clone();
-        move |_| {
+        move |_: rayon::BroadcastContext<'_>| {
             barrier.wait();
             barrier.wait();
         }
-    });
+    };
+    match pool {
+        Some(pool) => pool.spawn_broadcast(wait),
+        None => rayon::spawn_broadcast(wait),
+    }
     barrier.wait();
     let (done, ended) = mpsc::channel();
     let task = std::thread::spawn(move || {

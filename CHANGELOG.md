@@ -8,7 +8,8 @@
   came first, like the prefetch list on a node that just started. Publishes
   and prefetching take turns at the `--max-substitution-jobs` slots.
 - A publish no longer waits while the plugin deletes views or store objects
-  in the background.
+  in the background, or while garbage collection counts the node store's
+  inodes.
 
 ### Fixed
 

@@ -397,6 +397,12 @@ pub fn lacks_file(e: &anyhow::Error) -> bool {
     e.chain().any(<dyn std::error::Error>::is::<Missing>)
 }
 
+/// Whether `e` says the cache couldn't be reached.
+pub fn unreachable(e: &anyhow::Error) -> bool {
+    (e.chain())
+        .any(|e| (e.downcast_ref::<reqwest::Error>()).is_some_and(reqwest::Error::is_connect))
+}
+
 /// Whether `status`, with the S3 error if the body has one, means a missing
 /// file. Without `s3:ListBucket`, S3 answers 403 `AccessDenied` for a missing
 /// file. Other 403s, like `SignatureDoesNotMatch`, are errors.
@@ -858,6 +864,11 @@ pub fn request_url(base: &Url, path: &str) -> anyhow::Result<Url> {
     let url = dir.join(path)?;
     ensure!(within(&url, &dir), "bad path in binary cache: {path:?}");
     Ok(url)
+}
+
+/// [`request_url`] for messages, or `path` itself if it is bad.
+pub fn display_url(base: &Url, path: &str) -> String {
+    request_url(base, path).map_or_else(|_| path.to_owned(), |url| url.to_string())
 }
 
 /// Whether `url` is under the directory `dir`. Unlike `Url::origin`, this

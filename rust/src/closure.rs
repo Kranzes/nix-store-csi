@@ -28,7 +28,7 @@ const DEFAULT_PRIORITY: i32 = 0;
 /// speaks only HTTP/1.1 gets a connection for each.
 const LOOKUPS: usize = 128;
 
-/// How long a cache is skipped after a request to it fails.
+/// How long a file, or a whole cache, is skipped after a request fails.
 const PAUSE: Duration = Duration::from_mins(1);
 
 /// How long to wait before reading a cache's `nix-cache-info` again after a
@@ -57,8 +57,8 @@ struct Cache {
     /// `None` until the first read of `nix-cache-info` ends. Then it holds the
     /// cache's priority or the error.
     state: watch::Sender<Option<Result<i32, String>>>,
-    /// When a request last failed, and why.
-    failed: Mutex<Option<(Instant, String)>>,
+    /// The last request that failed.
+    failed: Mutex<Option<Failure>>,
     /// Permits for [`LOOKUPS`]. Each cache has its own, so one that stalls
     /// doesn't hold up lookups that the others answer.
     lookups: Semaphore,
@@ -131,7 +131,7 @@ impl Caches {
         let cache = &*self.list[cache];
         cache.transport.check(path)?;
         cache
-            .request(cache.transport.stream(path, compression))
+            .request(path, cache.transport.stream(path, compression))
             .await
     }
 
@@ -143,14 +143,15 @@ impl Caches {
         self.list.iter().map(|cache| &cache.name)
     }
 
-    /// Each cache, and whether it is paused after a failed request. A cache
+    /// Each cache, and whether it is paused after failed requests. A cache
     /// whose `nix-cache-info` read failed counts as paused, since
     /// [`Caches::tiers`] leaves it out until [`Cache::open`] reads the file.
     pub fn paused(&self) -> Vec<(String, bool)> {
         (self.list.iter())
             .map(|cache| {
                 let unopened = matches!(*cache.state.borrow(), Some(Err(_)));
-                let failed = pause_reason(cache.failed.lock().unwrap().as_ref()).is_some();
+                let failed = (cache.failed.lock().unwrap().as_ref())
+                    .is_some_and(|failed| failed.fresh() && failed.file.is_none());
                 (cache.name.to_string(), unopened || failed)
             })
             .collect()
@@ -362,7 +363,7 @@ impl Caches {
                 let c = &*self.list[cache];
                 async move {
                     let _permit = c.lookups.acquire().await;
-                    (cache, c.request(c.transport.get(file)).await)
+                    (cache, c.request(file, c.transport.get(file)).await)
                 }
             })
             .collect();
@@ -484,35 +485,66 @@ impl Cache {
         Ok((self.priority.or(info.priority)).unwrap_or(DEFAULT_PRIORITY))
     }
 
-    /// Skips the cache for [`PAUSE`] after a request to it fails, so a cache
-    /// that is down costs one timeout rather than one per path. A cache that
-    /// answers that it lacks a file is up, so it stays in use for the paths it
-    /// has.
+    /// Skips `file` for [`PAUSE`] after a request for it fails. Skips the whole
+    /// cache if it couldn't be reached or another file fails within that time,
+    /// so a cache that is down costs one or two timeouts, not one per path. An
+    /// answer that the cache lacks the file skips nothing.
     async fn request<T>(
         &self,
+        file: &str,
         request: impl Future<Output = anyhow::Result<T>>,
     ) -> anyhow::Result<T> {
-        if let Some(e) = pause_reason(self.failed.lock().unwrap().as_ref()) {
-            bail!("skipped {} for a minute after: {e}", self.name);
+        if let Some(failed) = (self.failed.lock().unwrap().as_ref()).filter(|f| f.skips(file)) {
+            // The saved error or the caller names the file.
+            match failed.file {
+                Some(_) => bail!("skipped the file for a minute after: {}", failed.error),
+                None => bail!("skipped {} for a minute after: {}", self.name, failed.error),
+            }
         }
         let result = request.await;
         if let Err(e) = &result
             && !transport::lacks_file(e)
         {
             let mut failed = self.failed.lock().unwrap();
-            if pause_reason(failed.as_ref()).is_none() {
-                tracing::warn!(cache = %self.name, "{e:#}; skipping the cache for a minute");
-            }
-            *failed = Some((Instant::now(), format!("{e:#}")));
+            let skips = match &*failed {
+                Some(f) if f.skips(file) => f.file.clone(),
+                f if f.as_ref().is_some_and(Failure::fresh) || transport::unreachable(e) => {
+                    tracing::warn!(cache = %self.name, "{e:#}; skipping the cache for a minute");
+                    None
+                }
+                _ => {
+                    let url = transport::display_url(&self.name, file);
+                    tracing::warn!(cache = %self.name, url, "{e:#}; skipping the file for a minute");
+                    Some(file.to_owned())
+                }
+            };
+            *failed = Some(Failure {
+                at: Instant::now(),
+                file: skips,
+                error: format!("{e:#}"),
+            });
         }
         result
     }
 }
 
-/// Why the last request to a cache failed, if it failed less than [`PAUSE`]
-/// ago.
-fn pause_reason(failed: Option<&(Instant, String)>) -> Option<&str> {
-    (failed.filter(|(at, _)| at.elapsed() < PAUSE)).map(|(_, e)| e.as_str())
+/// A request to a cache that failed.
+struct Failure {
+    at: Instant,
+    /// The file it asked for, or `None` once it skips the whole cache.
+    file: Option<String>,
+    error: String,
+}
+
+impl Failure {
+    fn fresh(&self) -> bool {
+        self.at.elapsed() < PAUSE
+    }
+
+    /// Whether it still skips `file`.
+    fn skips(&self, file: &str) -> bool {
+        self.fresh() && self.file.as_deref().is_none_or(|f| f == file)
+    }
 }
 
 /// The URL's `?priority=`, which overrides the one in `nix-cache-info`.
@@ -789,17 +821,21 @@ mod tests {
         caches.closure(&roots).await.unwrap();
     }
 
+    /// A failed lookup skips its narinfo, and a second one skips the cache.
     #[tokio::test(start_paused = true)]
     async fn pauses_a_failing_cache() {
         let Some(dir) = fixtures() else { return };
         let hello = fixture_root(&dir, "hello.path");
+        let warm = fixture_path(&dir, "warm");
         let glibc = fixture_path(&dir, "glibc");
-        // Every narinfo but hello's reads fine.
+        // Every narinfo but hello's and warm's reads fine.
         let flaky = empty_cache();
         copy_narinfos(&dir, "cache-none", flaky.path(), |t| t);
-        let file = flaky.path().join(format!("{}.narinfo", hello.hash()));
-        std::fs::remove_file(&file).unwrap();
-        std::fs::create_dir(&file).unwrap();
+        for path in [&hello, &warm] {
+            let file = flaky.path().join(format!("{}.narinfo", path.hash()));
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap();
+        }
         let caches = caches(
             &[
                 format!("{}?priority=10", file_store(flaky.path())),
@@ -808,16 +844,18 @@ mod tests {
             Some(TEST_KEY),
         );
 
-        let closure = caches.closure(&[hello]).await.unwrap();
-        assert_eq!(sources(&closure), [Some(1)].into());
-        let closure = caches.closure(std::slice::from_ref(&glibc)).await.unwrap();
+        let closure = caches.closure(std::slice::from_ref(&hello)).await.unwrap();
+        assert_eq!(closure[&hello].cache, Some(1));
+        assert_eq!(sources(&closure), [Some(0), Some(1)].into());
+        let closure = caches.closure(&[warm]).await.unwrap();
         assert_eq!(sources(&closure), [Some(1)].into());
         tokio::time::advance(PAUSE).await;
         let closure = caches.closure(&[glibc]).await.unwrap();
         assert_eq!(sources(&closure), [Some(0)].into());
     }
 
-    /// A missing NAR fails only its own path.
+    /// A missing NAR fails only its own path, and so does the first NAR that
+    /// fails. A second one skips the cache.
     #[tokio::test]
     async fn keeps_a_cache_that_lacks_a_file() {
         use crate::transport::tests::{Mode, server};
@@ -826,8 +864,41 @@ mod tests {
         assert!(stream("missing").await.is_err());
         assert!(stream("obj").await.is_ok());
         assert!(stream("private").await.is_err());
-        let Err(e) = stream("obj").await else {
-            panic!("a cache was used right after it failed");
+        let Err(e) = stream("private").await else {
+            panic!("a file was fetched right after it failed");
+        };
+        assert!(format!("{e:#}").contains("skipped"), "{e:#}");
+        assert!(stream("obj").await.is_ok());
+        assert!(stream("bad").await.is_err());
+        assert!(stream("obj").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn names_a_skipped_file_once() {
+        use crate::transport::tests::{Mode, server};
+        let caches = caches(&[server(Mode::Normal).await], None);
+        let cache = &caches.list[0];
+        let get = || cache.request("private", cache.transport.get("private"));
+        assert!(get().await.is_err());
+        let skipped = format!("{:#}", get().await.unwrap_err());
+        let url = transport::display_url(&cache.name, "private");
+        assert!(
+            skipped.starts_with("skipped the file") && skipped.matches(&url).count() == 1,
+            "{skipped}"
+        );
+    }
+
+    /// The plugin skips a cache that it can't reach after one failed request.
+    #[tokio::test(start_paused = true)]
+    async fn pauses_an_unreachable_cache() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let caches = caches(&[url], None);
+        let stream = |path| caches.stream(0, path, Compression::None);
+        assert!(stream("obj").await.is_err());
+        let Err(e) = stream("other").await else {
+            panic!("an unreachable cache was used right after it failed");
         };
         assert!(format!("{e:#}").contains("skipped"), "{e:#}");
     }

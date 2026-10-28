@@ -345,8 +345,7 @@ impl Store {
     ) -> anyhow::Result<()> {
         let info = &entry.info;
         let name = self.caches.name(cache);
-        let url = transport::request_url(name, info.url())
-            .map_or_else(|_| info.url().to_owned(), |url| url.to_string());
+        let url = transport::display_url(name, info.url());
         debug!(cache = %name, %url, nar_size = info.nar_size(), "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();

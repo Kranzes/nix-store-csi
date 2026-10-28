@@ -69,7 +69,11 @@ pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
         std::fs::remove_dir(dir)
     }
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => deletes().install(|| remove_dir(path)),
+        // Fetches and view builds delete emptied scratch dirs, which shouldn't
+        // wait for a big delete on the pool.
+        Ok(meta) if meta.is_dir() => {
+            std::fs::remove_dir(path).or_else(|_| deletes().install(|| remove_dir(path)))
+        }
         Ok(_) => std::fs::remove_file(path),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -124,6 +128,7 @@ pub(super) fn count_inodes(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_utils::{count, ends_while_busy};
 
     /// It deletes read-only trees, and a symlink without what it points at.
     #[test]
@@ -151,5 +156,14 @@ mod tests {
         assert!(link.symlink_metadata().is_err());
         assert!(outside.join("kept").exists());
         remove_tree(&link).unwrap();
+    }
+
+    #[test]
+    fn removes_empty_dirs_while_deleting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_owned();
+        let empty = move || drop(Scratch::new_in(&dir).unwrap());
+        assert!(ends_while_busy(deletes(), empty));
+        assert_eq!(count(tmp.path()), 0);
     }
 }

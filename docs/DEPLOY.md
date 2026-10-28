@@ -82,7 +82,7 @@ plugin's ServiceAccount, which the chart names after the release, a role that
 can `s3:GetObject` on the bucket. Without `s3:ListBucket`, S3 answers 403
 `AccessDenied` for a missing file, which the plugin treats like a 404. Other
 403 codes, like `SignatureDoesNotMatch`, are errors, so the plugin skips the
-cache for a minute.
+file for a minute, and the whole cache once a second file fails.
 
 ```yaml
 # values.yaml

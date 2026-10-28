@@ -373,7 +373,7 @@ impl Collector for StoreGauges {
         )?;
         let mut paused = encoder.encode_descriptor(
             "cache_paused",
-            "Whether a cache is skipped for a minute after a failed request",
+            "Whether a cache is skipped for a minute after failed requests",
             None,
             MetricType::Gauge,
         )?;

@@ -12,6 +12,9 @@
   inodes.
 - After a failed read of a cache's `nix-cache-info`, the plugin tries again
   after a second instead of a minute, and doubles the wait after each failure.
+- After a request to a cache fails, the plugin skips only that file for a
+  minute, not the whole cache, unless a second file fails or the cache can't
+  be reached.
 
 ### Fixed
 

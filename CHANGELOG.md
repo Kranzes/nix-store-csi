@@ -10,6 +10,8 @@
 - A publish no longer waits while the plugin deletes views or store objects
   in the background, or while garbage collection counts the node store's
   inodes.
+- After a failed read of a cache's `nix-cache-info`, the plugin tries again
+  after a second instead of a minute, and doubles the wait after each failure.
 
 ### Fixed
 

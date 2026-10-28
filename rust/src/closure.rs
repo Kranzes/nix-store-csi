@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
+use backon::{ExponentialBuilder, Retryable};
 use futures::StreamExt;
 use futures::stream::{FuturesOrdered, FuturesUnordered};
 use harmonia_store_nar_info::CacheInfo;
@@ -29,6 +30,13 @@ const LOOKUPS: usize = 128;
 
 /// How long a cache is skipped after a request to it fails.
 const PAUSE: Duration = Duration::from_mins(1);
+
+/// How long to wait before reading a cache's `nix-cache-info` again after a
+/// failed read.
+const REOPENS: ExponentialBuilder = ExponentialBuilder::new()
+    .with_min_delay(Duration::from_secs(1))
+    .with_max_delay(PAUSE)
+    .without_max_times();
 
 pub struct Caches {
     /// In the order given.
@@ -69,9 +77,8 @@ enum Lookup {
 }
 
 impl Caches {
-    /// Reads each cache's `nix-cache-info` in the background. It skips a cache
-    /// that fails and tries it again every minute, so a cache that is down
-    /// doesn't hold up the others.
+    /// Reads each cache's `nix-cache-info` in the background, and again after
+    /// a read fails.
     pub fn new(
         urls: &[String],
         trusted_keys: Option<Vec<PublicKey>>,
@@ -444,19 +451,15 @@ impl Caches {
 
 impl Cache {
     async fn open(self: Arc<Self>) {
-        loop {
-            match self.read_info().await {
-                Ok(priority) => {
-                    self.state.send_replace(Some(Ok(priority)));
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(cache = %self.name, "{e:#}; skipping the cache for a minute");
-                    self.state.send_replace(Some(Err(format!("{e:#}"))));
-                }
-            }
-            tokio::time::sleep(PAUSE).await;
-        }
+        let read = (|| self.read_info())
+            .retry(REOPENS)
+            .notify(|e, wait| {
+                tracing::warn!(cache = %self.name, "{e:#}; skipping the cache, retrying in {wait:?}");
+                self.state.send_replace(Some(Err(format!("{e:#}"))));
+            })
+            .await;
+        self.state
+            .send_replace(Some(read.map_err(|e| format!("{e:#}"))));
     }
 
     /// Returns the cache's priority. It refuses a cache for another store dir.
@@ -765,6 +768,25 @@ mod tests {
                 && msg.contains("holds paths for /other/store"),
             "{msg}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reopens_a_cache_soon() {
+        let Some(dir) = fixtures() else { return };
+        let roots = [fixture_root(&dir, "hello.path")];
+        let cache = empty_cache();
+        copy_narinfos(&dir, "cache-none", cache.path(), |t| t);
+        let (info, hidden) = (
+            cache.path().join("nix-cache-info"),
+            cache.path().join("hidden"),
+        );
+        std::fs::rename(&info, &hidden).unwrap();
+        let caches = caches(&[file_store(cache.path())], Some(TEST_KEY));
+        let msg = resolve_err(&caches, &roots).await;
+        assert!(msg.contains("; skipped "), "{msg}");
+        std::fs::rename(&hidden, &info).unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        caches.closure(&roots).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

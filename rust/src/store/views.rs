@@ -65,6 +65,21 @@ impl Store {
         {
             return Ok(self.views.join(old.key));
         }
+        // A failed sync misses the paths that fetches were still unpacking,
+        // and they stay in store/ until their own syncs delete them.
+        let lost = {
+            let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
+            let unsynced = self.unsynced.lock().unwrap();
+            (unsynced.iter())
+                .find(|&(p, &since)| since < failed_syncs && paths.binary_search(p).is_ok())
+                .map(|(p, _)| p.clone())
+        };
+        if let Some(path) = lost {
+            bail!(
+                "{} may have lost data in a failed sync of the node store; a later try fetches it again",
+                self.caches.store_dir().display(&path)
+            );
+        }
         let links = root_links(roots)?;
         let volume = Volume {
             key: view_key(self.generation.load(Ordering::SeqCst), &links, paths),
@@ -555,5 +570,26 @@ mod tests {
                 .unwrap(),
             after
         );
+    }
+
+    #[tokio::test]
+    async fn refuses_paths_a_failed_sync_missed() {
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        unsync(&store, &hello);
+        store.failed_syncs.store(1, Ordering::SeqCst);
+        let err = (store.view("v1", roots, &paths, &target, UNBOUND)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("may have lost data in a failed sync"),
+            "{err:#}"
+        );
+        assert_eq!(count(tmp.path().join("views")), 0);
+        store.sync(&hello).await.unwrap();
+        let paths = store.ensure(roots).done().await.unwrap();
+        store.view("v1", roots, &paths, &target, UNBOUND).unwrap();
     }
 }

@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- After a failed sync of the node store, a publish no longer links store
+  objects that the plugin was fetching during that sync, which may have lost
+  data. It fails until the plugin fetches them again.
 - A NAR URL that leaves a GCS cache's bucket, like `./https:host/x`, fails
   the request. The plugin used to send its GCP token to that host.
 - Decoding an xz NAR uses at most 256 MiB. A cache could make each fetch

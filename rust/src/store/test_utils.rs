@@ -1,7 +1,7 @@
 //! Helpers that the store's tests share.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, SystemTime};
 
 use harmonia_store_path::StorePath;
@@ -81,6 +81,31 @@ pub(super) async fn settled(store: &Arc<Store>) {
     while Arc::strong_count(store) > 1 {
         tokio::task::yield_now().await;
     }
+}
+
+/// Runs `f` while every thread of `pool` waits, and returns whether `f`
+/// ended within a few seconds.
+pub(super) fn ends_while_busy(pool: &rayon::ThreadPool, f: impl FnOnce() + Send + 'static) -> bool {
+    // Each thread waits at the barrier twice, first to show it is busy, then
+    // until `f` ends or the wait times out.
+    let barrier = Arc::new(Barrier::new(pool.current_num_threads() + 1));
+    pool.spawn_broadcast({
+        let barrier = barrier.clone();
+        move |_| {
+            barrier.wait();
+            barrier.wait();
+        }
+    });
+    barrier.wait();
+    let (done, ended) = mpsc::channel();
+    let task = std::thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    let ended = ended.recv_timeout(Duration::from_secs(5)).is_ok();
+    barrier.wait();
+    task.join().unwrap();
+    ended
 }
 
 /// Waits for `ensuring` to resolve its closure and start its fetches.

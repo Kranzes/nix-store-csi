@@ -7,6 +7,8 @@
 - A volume's fetches no longer wait behind all the fetches of a closure that
   came first, like the prefetch list on a node that just started. Publishes
   and prefetching take turns at the `--max-substitution-jobs` slots.
+- A publish no longer waits while the plugin deletes views or store objects
+  in the background.
 
 ### Fixed
 

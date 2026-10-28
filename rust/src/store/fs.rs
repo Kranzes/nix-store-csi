@@ -72,7 +72,7 @@ pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
         // Fetches and view builds delete emptied scratch dirs, which shouldn't
         // wait for a big delete on the pool.
         Ok(meta) if meta.is_dir() => {
-            std::fs::remove_dir(path).or_else(|_| deletes().install(|| remove_dir(path)))
+            std::fs::remove_dir(path).or_else(|_| background().install(|| remove_dir(path)))
         }
         Ok(_) => std::fs::remove_file(path),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -80,18 +80,18 @@ pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
     }
 }
 
-/// A thread pool for deletes, so a big one doesn't hold up the global pool,
-/// which builds views for publishes.
-pub(super) fn deletes() -> &'static rayon::ThreadPool {
+/// A thread pool for deletes and inode counts, so they don't hold up the
+/// global pool, which builds views for publishes.
+pub(super) fn background() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
         (rayon::ThreadPoolBuilder::new())
-            .thread_name(|i| format!("delete-{i}"))
+            .thread_name(|i| format!("background-{i}"))
             // A thread waiting on a subdirectory runs other subdirectories'
             // deletes on its own stack, so deep trees need more than 2 MiB.
             .stack_size(16 << 20)
             .build()
-            .expect("starting the delete threads")
+            .expect("starting the background threads")
     })
 }
 
@@ -163,7 +163,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_owned();
         let empty = move || drop(Scratch::new_in(&dir).unwrap());
-        assert!(ends_while_busy(deletes(), empty));
+        assert!(ends_while_busy(Some(background()), empty));
         assert_eq!(count(tmp.path()), 0);
     }
 }

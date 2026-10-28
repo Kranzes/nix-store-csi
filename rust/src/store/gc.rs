@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use super::fs::{Scratch, count_inodes, remove_file};
+use super::fs::{Scratch, background, count_inodes, remove_file};
 use super::narinfos;
 use super::{Store, list_store_paths};
 
@@ -210,7 +210,7 @@ impl Store {
             (path, inodes)
         };
         let paths = list_store_paths(&self.dir)?;
-        Ok(paths.into_par_iter().map(count).collect())
+        Ok(background().install(|| paths.into_par_iter().map(count).collect()))
     }
 }
 
@@ -451,6 +451,16 @@ mod tests {
         assert_eq!(collect(inodes[2]).await.unwrap(), 1);
         let left: Vec<_> = lru.iter().filter(|path| store.present(path)).collect();
         assert_eq!(left, [&lru[3], &lru[4]]);
+    }
+
+    #[tokio::test]
+    async fn counts_inodes_off_the_global_pool() {
+        let tmp = scratch();
+        let Some((store, _, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let count = move || assert_eq!(store.inode_counts(ALL).unwrap().len(), paths.len());
+        assert!(ends_while_busy(None, count));
     }
 
     /// Deletion renames what it deletes straight into tmp/, since a

@@ -3,13 +3,12 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, bail, ensure};
 use backon::{ConstantBuilder, Retryable};
 use bytesize::ByteSize;
-use foldhash::HashMap;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use futures::{Stream, StreamExt, TryStreamExt};
 use harmonia_file_nar::{NarWriteError, RestoreOptions, parse_nar_stream};
@@ -28,6 +27,7 @@ use crate::store_path::Names;
 use crate::transport;
 
 use super::fs::{Scratch, rename_writable};
+use super::holds::Held;
 use super::{Store, write_unsynced};
 
 /// Restarts a NAR download that the transport couldn't resume.
@@ -105,15 +105,15 @@ impl Store {
         // before this checks the limit and the store for the paths.
         let (held, missing) = {
             let _gc = self.gc_guard().await;
-            let held = self.hold(&paths, prefetch);
+            let held = (
+                self.ensuring.hold(&paths),
+                prefetch.then(|| self.prefetched.hold(&paths)),
+            );
             if let Some(limit) = self.max_closure_size.filter(|_| !prefetch) {
-                let counted = {
-                    let prefetched = self.prefetched.lock().unwrap();
-                    (closure.iter())
-                        .filter(|(path, _)| !prefetched.contains_key(*path))
-                        .map(|(_, e)| e.info.nar_size())
-                        .sum()
-                };
+                let counted = (closure.iter())
+                    .filter(|(path, _)| !self.prefetched.contains(path))
+                    .map(|(_, e)| e.info.nar_size())
+                    .sum();
                 if counted > limit {
                     return Err(TooBig {
                         size: total,
@@ -198,27 +198,6 @@ impl Store {
             }
         }
         Ok(())
-    }
-
-    /// Makes collection spare `paths` until the result drops. A prefetch's
-    /// paths also don't count towards the limit until then.
-    fn hold(self: &Arc<Self>, paths: &Arc<[StorePath]>, prefetch: bool) -> Held {
-        for holds in self.holds(prefetch) {
-            let mut holds = holds.lock().unwrap();
-            for path in paths.iter() {
-                *holds.entry(path.clone()).or_default() += 1;
-            }
-        }
-        Held {
-            store: self.clone(),
-            paths: paths.clone(),
-            prefetch,
-        }
-    }
-
-    /// The maps that count a hold: `ensuring`, and for a prefetch, `prefetched`.
-    fn holds(&self, prefetch: bool) -> impl Iterator<Item = &Mutex<HashMap<StorePath, usize>>> {
-        std::iter::once(&self.ensuring).chain(prefetch.then_some(&self.prefetched))
     }
 
     /// Records a use of the paths the store has, and returns the rest.
@@ -460,32 +439,11 @@ struct Fetching {
     start_bytes: u64,
     /// The fetch of each other path.
     fetches: Vec<Fetch>,
-    /// Lasts until both the fetches and the caller are done with it, so
-    /// collection spares the closure until the caller has it in a view.
-    _held: Held,
-}
-
-/// Paths that collection spares, from [`Store::hold`].
-struct Held {
-    store: Arc<Store>,
-    paths: Arc<[StorePath]>,
-    prefetch: bool,
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        for holds in self.store.holds(self.prefetch) {
-            let mut holds = holds.lock().unwrap();
-            for path in self.paths.iter() {
-                if let Some(n) = holds.get_mut(path) {
-                    *n -= 1;
-                    if *n == 0 {
-                        holds.remove(path);
-                    }
-                }
-            }
-        }
-    }
+    /// The holds in [`Store::ensuring`], and for a prefetch in
+    /// [`Store::prefetched`]. They last until both the fetches and the caller
+    /// are done with them, so garbage collection spares the closure until the
+    /// caller has it in a view.
+    _held: (Held, Option<Held>),
 }
 
 impl Ensuring {
@@ -935,7 +893,7 @@ mod tests {
         } = err.downcast_ref().unwrap();
         assert_eq!((counted, limit), (size, 1));
         settled(&store).await;
-        assert!(store.ensuring.lock().unwrap().is_empty());
+        assert_eq!(store.ensuring.paths(), []);
         assert_eq!(count(store.dir()), 0);
         assert_eq!(count(tmp.path().join("narinfo")), 0);
 
@@ -951,7 +909,7 @@ mod tests {
         assert!(format!("{err:#}").contains("without prefetched store paths"));
         drop((jobs, glibc));
         settled(&store).await;
-        assert!(store.prefetched.lock().unwrap().is_empty());
+        assert_eq!(store.prefetched.paths(), []);
 
         let store = reopen(store, || limited(size)).await;
         assert_eq!(ensure(&store).done().await.unwrap().len(), 5);

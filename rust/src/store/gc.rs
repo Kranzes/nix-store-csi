@@ -48,7 +48,7 @@ impl Store {
             let (collected, deleting) = self
                 .exclusively(move |this, trash| {
                     let mut in_use = this.drop_unmounted(trash, is_bound)?;
-                    in_use.extend(this.ensuring.lock().unwrap().keys().cloned());
+                    in_use.extend(this.ensuring.paths());
                     this.drop_unused(trash, &in_use, keep_recent, excess, &inodes)
                 })
                 .await?;

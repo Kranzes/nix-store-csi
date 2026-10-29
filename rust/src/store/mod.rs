@@ -4,6 +4,7 @@
 mod fetch;
 mod fs;
 mod gc;
+mod holds;
 mod narinfos;
 mod sandbox;
 #[cfg(test)]
@@ -27,6 +28,7 @@ use tracing::{info, warn};
 use self::fetch::Underway;
 use self::fs::{Scratch, remove_file, remove_tree};
 use self::gc::Space;
+use self::holds::Holds;
 use self::sandbox::Sandbox;
 use crate::closure::Caches;
 use crate::metrics::Metrics;
@@ -108,13 +110,12 @@ pub struct Store {
     /// fetch leaves the map when it ends, so a publish after a failure starts
     /// a new one.
     fetching: Mutex<HashMap<StorePath, Underway>>,
-    /// The paths of closures under [`Store::ensure`] or [`Store::prefetch`],
-    /// each with its number of holds. Collection spares them however full the
-    /// disk is.
-    ensuring: Mutex<HashMap<StorePath, usize>>,
-    /// The paths of closures under [`Store::prefetch`], each with its number
-    /// of holds. They don't count towards `max_closure_size`.
-    prefetched: Mutex<HashMap<StorePath, usize>>,
+    /// The paths of closures under [`Store::ensure`] or [`Store::prefetch`].
+    /// Garbage collection spares them however full the disk is.
+    ensuring: Holds,
+    /// The paths of closures under [`Store::prefetch`]. They don't count
+    /// towards `max_closure_size`.
+    prefetched: Holds,
     /// Closures that [`Store::ensure`] or [`Store::prefetch`] is resolving or
     /// fetching, for the metrics.
     ensures: AtomicUsize,
@@ -214,8 +215,8 @@ impl Store {
             failed_record: state.join("sync-failed"),
             syncing: tokio::sync::Mutex::default(),
             fetching: Mutex::default(),
-            ensuring: Mutex::default(),
-            prefetched: Mutex::default(),
+            ensuring: Holds::default(),
+            prefetched: Holds::default(),
             ensures: AtomicUsize::default(),
             installs: AtomicU64::default(),
             size: None,

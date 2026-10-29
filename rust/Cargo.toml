@@ -25,6 +25,7 @@ harmonia-utils-hash = { git = "https://github.com/nix-community/harmonia" }
 harmonia-utils-signature = { git = "https://github.com/nix-community/harmonia" }
 httpdate = "1.0.3"
 humantime = "2"
+inotify = "0.11.5"
 # With huge pages, mimalloc held several times the memory and was no faster.
 mimalloc = { version = "0.1.52", features = ["no_thp"] }
 # Only for credentials and S3 signatures. Requests go through reqwest.

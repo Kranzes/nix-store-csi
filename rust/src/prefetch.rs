@@ -4,15 +4,14 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
+use futures::StreamExt;
 use harmonia_store_path::StorePath;
-use rustix::fs::inotify;
-use tokio::io::unix::AsyncFd;
+use inotify::{EventStream, Inotify, WatchMask};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, instrument, warn};
 
@@ -69,7 +68,7 @@ impl Prefetch {
         loop {
             tokio::select! {
                 _ = ticks.tick() => self.tick(),
-                changed = changed(watch.as_ref()) => match changed {
+                changed = changed(watch.as_mut()) => match changed {
                     Ok(()) => self.tick(),
                     Err(e) => {
                         unwatched(e);
@@ -161,34 +160,21 @@ impl Prefetch {
 
 /// Watches `dir` for kubelet's rename of `..data`, and for files written or
 /// deleted in a plain directory.
-fn watch(dir: &Path) -> io::Result<AsyncFd<OwnedFd>> {
-    let fd = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC)?;
-    let events = inotify::WatchFlags::MOVED_TO
-        | inotify::WatchFlags::CLOSE_WRITE
-        | inotify::WatchFlags::DELETE;
-    inotify::add_watch(&fd, dir, events)?;
-    // SAFETY: the `AsyncFd` takes ownership of `fd`, so nothing else can close
-    // it, and this module only reads through `get_inner`, so the descriptor
-    // stays the same until the `AsyncFd` is dropped.
-    unsafe { AsyncFd::register(fd) }.map_err(|err| err.into_parts().1)
+fn watch(dir: &Path) -> io::Result<EventStream<[u8; 4096]>> {
+    let inotify = Inotify::init()?;
+    let events = WatchMask::MOVED_TO | WatchMask::CLOSE_WRITE | WatchMask::DELETE;
+    inotify.watches().add(dir, events)?;
+    inotify.into_event_stream([0; 4096])
 }
 
-/// Waits for events on `watch`, and discards them.
-async fn changed(watch: Option<&AsyncFd<OwnedFd>>) -> io::Result<()> {
+/// Waits for the next event on `watch`.
+async fn changed(watch: Option<&mut EventStream<[u8; 4096]>>) -> io::Result<()> {
     let Some(watch) = watch else {
         return std::future::pending().await;
     };
-    let mut ready = watch.readable().await?;
-    let mut events = [0; 4096];
-    loop {
-        match rustix::io::read(ready.get_inner(), &mut events) {
-            Ok(_) => {}
-            Err(rustix::io::Errno::AGAIN) => {
-                ready.clear_ready();
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
-        }
+    match watch.next().await {
+        Some(event) => event.map(drop),
+        None => Err(io::ErrorKind::UnexpectedEof.into()),
     }
 }
 
@@ -331,8 +317,9 @@ mod tests {
     #[tokio::test]
     async fn wakes_on_kubelets_updates() {
         let tmp = tempfile::tempdir().unwrap();
-        let watch = watch(tmp.path()).unwrap();
-        let changed = || tokio::time::timeout(Duration::from_secs(5), changed(Some(&watch)));
+        let mut watch = watch(tmp.path()).unwrap();
+        let wait = Duration::from_secs(5);
+        let mut changed = async || tokio::time::timeout(wait, changed(Some(&mut watch))).await;
         update(tmp.path(), "1", &[("storePaths", A)]);
         changed().await.unwrap().unwrap();
         std::fs::write(tmp.path().join("revision"), "r1").unwrap();

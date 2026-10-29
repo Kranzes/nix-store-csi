@@ -894,11 +894,17 @@ fn check_path(path: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::fmt::Write as _;
+    use std::convert::Infallible;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use http_body_util::{BodyExt, Full};
+    use hyper::Response;
+    use hyper::body::{Body, Incoming};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, LOCATION};
     use tokio::net::TcpListener;
 
     use super::*;
@@ -970,49 +976,27 @@ pub(crate) mod tests {
         range: Option<usize>,
     }
 
-    /// The next request, or `None` once the client has closed the
-    /// connection.
-    async fn read_request(reader: &mut (impl AsyncBufRead + Unpin)) -> Option<Request> {
-        let mut request_line = String::new();
-        if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
-            return None;
-        }
-        let path = request_line.split(' ').nth(1).unwrap();
-        // Serves the same files under `/prefix`, for bases with a path.
-        let path = path.strip_prefix("/prefix").unwrap_or(path);
-        // Serves them under `/bucket` too, to presigned path-style S3 requests.
-        let path = path.strip_prefix("/bucket").unwrap_or(path);
-        let path = path
-            .split_once("?X-Amz-")
-            .map_or(path, |(p, _)| p)
-            .to_owned();
-        let (mut authorization, mut accept_encoding) = (String::new(), String::new());
-        let (mut if_range, mut range) = (String::new(), None);
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            if line == "\r\n" {
-                let range = range.filter(|_| [r#""x""#, LAST_MODIFIED].contains(&&*if_range));
-                return Some(Request {
-                    path,
-                    authorization,
-                    accept_encoding,
-                    range,
-                });
-            }
-            let (name, value) = line.split_once(':').unwrap();
-            let value = value.trim().to_owned();
-            match &*name.to_ascii_lowercase() {
-                "authorization" => authorization = value,
-                "accept-encoding" => accept_encoding = value,
-                "if-range" => if_range = value,
-                "range" => range = range_start(&value),
-                _ => {}
-            }
-        }
-    }
-
     impl Request {
+        fn new(req: &hyper::Request<Incoming>) -> Self {
+            let header = |name| {
+                let value = req.headers().get(name).and_then(|v| v.to_str().ok());
+                value.unwrap_or_default().to_owned()
+            };
+            let path = req.uri().path_and_query().unwrap().as_str();
+            // Serves the same files under `/prefix`, for bases with a path.
+            let path = path.strip_prefix("/prefix").unwrap_or(path);
+            // Serves them under `/bucket` too, to presigned path-style S3 requests.
+            let path = path.strip_prefix("/bucket").unwrap_or(path);
+            let path = path.split_once("?X-Amz-").map_or(path, |(p, _)| p);
+            let validated = [r#""x""#, LAST_MODIFIED].contains(&&*header(IF_RANGE));
+            Self {
+                path: path.to_owned(),
+                authorization: header(AUTHORIZATION),
+                accept_encoding: header(ACCEPT_ENCODING),
+                range: range_start(&header(RANGE)).filter(|_| validated),
+            }
+        }
+
         /// Whether `Accept-Encoding` lists `coding`, whatever its weight.
         fn accepts(&self, coding: &str) -> bool {
             (self.accept_encoding.split(',')).any(|c| c.split(';').next().unwrap().trim() == coding)
@@ -1021,69 +1005,79 @@ pub(crate) mod tests {
 
     /// The status, headers and body of the response to `req`, before
     /// `Mode::Encodes` or `Mode::Cache` encodes it.
-    async fn answer(mode: Mode, req: &Request, hit: usize) -> (&'static str, String, Vec<u8>) {
+    async fn answer(mode: Mode, req: &Request, hit: usize) -> (StatusCode, HeaderMap, Vec<u8>) {
         let path = req.path.as_str();
-        let mut headers = String::new();
+        let mut headers = HeaderMap::new();
         let (mut status, mut body) = match (path, mode) {
-            ("/nix-cache-info", Mode::Hangs) => ("200 OK", b"StoreDir: /nix/store\n".to_vec()),
+            ("/nix-cache-info", Mode::Hangs) => {
+                (StatusCode::OK, b"StoreDir: /nix/store\n".to_vec())
+            }
             (_, Mode::Hangs) => std::future::pending().await,
-            (_, Mode::FlakyOnce) if hit == 0 => ("502 Bad Gateway", Vec::new()),
+            (_, Mode::FlakyOnce) if hit == 0 => (StatusCode::BAD_GATEWAY, Vec::new()),
             (_, Mode::Cache { coding, .. }) if !req.accepts(coding) => {
-                ("406 Not Acceptable", Vec::new())
+                (StatusCode::NOT_ACCEPTABLE, Vec::new())
             }
             (_, Mode::Cache { dir, .. }) => match std::fs::read(dir.join(&path[1..])) {
-                Ok(file) => ("200 OK", file),
-                Err(_) => ("404 Not Found", Vec::new()),
+                Ok(file) => (StatusCode::OK, file),
+                Err(_) => (StatusCode::NOT_FOUND, Vec::new()),
             },
             // user:secret
             ("/private", _) if req.authorization != "Basic dXNlcjpzZWNyZXQ=" => {
-                ("401 Unauthorized", Vec::new())
+                (StatusCode::UNAUTHORIZED, Vec::new())
             }
-            ("/whoami", _) => ("200 OK", req.authorization.clone().into_bytes()),
-            ("/accept-encoding", _) => ("200 OK", req.accept_encoding.clone().into_bytes()),
+            ("/whoami", _) => (StatusCode::OK, req.authorization.clone().into_bytes()),
+            ("/accept-encoding", _) => (StatusCode::OK, req.accept_encoding.clone().into_bytes()),
             (p, _) if p.starts_with("/redirect?to=") => {
                 let to = &p["/redirect?to=".len()..];
-                write!(headers, "Location: {to}\r\n").unwrap();
-                ("307 Temporary Redirect", Vec::new())
+                headers.insert(LOCATION, to.parse().unwrap());
+                (StatusCode::TEMPORARY_REDIRECT, Vec::new())
             }
-            ("/private" | "/obj" | "/harmonia.nar?hash=x", _) => ("200 OK", BODY.to_vec()),
-            ("/large", _) => ("200 OK", large()),
-            ("/denied", _) => ("403 Forbidden", SIGNATURE_ERROR.to_vec()),
+            ("/private" | "/obj" | "/harmonia.nar?hash=x", _) => (StatusCode::OK, BODY.to_vec()),
+            ("/large", _) => (StatusCode::OK, large()),
+            ("/denied", _) => (StatusCode::FORBIDDEN, SIGNATURE_ERROR.to_vec()),
             ("/hidden", _) => (
-                "403 Forbidden",
+                StatusCode::FORBIDDEN,
                 b"<Error><Code>AccessDenied</Code></Error>".to_vec(),
             ),
-            ("/forbidden", _) => ("403 Forbidden", Vec::new()),
-            ("/bad", _) => ("400 Bad Request", b"no such\n  thing".to_vec()),
-            ("/big", _) => ("200 OK", vec![0; usize::try_from(MAX_GET).unwrap() + 1]),
+            ("/forbidden", _) => (StatusCode::FORBIDDEN, Vec::new()),
+            ("/bad", _) => (StatusCode::BAD_REQUEST, b"no such\n  thing".to_vec()),
+            ("/big", _) => (
+                StatusCode::OK,
+                vec![0; usize::try_from(MAX_GET).unwrap() + 1],
+            ),
             ("/identity" | "/aws-chunked", _) => {
-                write!(headers, "Content-Encoding: {}\r\n", &path[1..]).unwrap();
-                ("200 OK", BODY.to_vec())
+                headers.insert(CONTENT_ENCODING, path[1..].parse().unwrap());
+                (StatusCode::OK, BODY.to_vec())
             }
             ("/not-zstd", _) => {
-                headers.push_str("Content-Encoding: zstd\r\n");
-                ("200 OK", BODY.to_vec())
+                headers.insert(CONTENT_ENCODING, "zstd".parse().unwrap());
+                (StatusCode::OK, BODY.to_vec())
             }
-            _ => ("404 Not Found", Vec::new()),
+            _ => (StatusCode::NOT_FOUND, Vec::new()),
         };
         // Whether a range stops one byte short, for the paths that take one.
         let ranged = match mode {
             Mode::BreaksOnce { ranges, short } if path == "/obj" => {
-                headers.push_str("ETag: \"x\"\r\n");
+                headers.insert(ETAG, r#""x""#.parse().unwrap());
                 ranges.then_some(short)
             }
             // Like Caddy, which gives a compressed body an ETag of its own.
             Mode::Encodes { .. } if path == "/large" => {
-                write!(headers, "ETag: \"y\"\r\nLast-Modified: {LAST_MODIFIED}\r\n").unwrap();
+                headers.insert(ETAG, r#""y""#.parse().unwrap());
+                headers.insert(
+                    reqwest::header::LAST_MODIFIED,
+                    LAST_MODIFIED.parse().unwrap(),
+                );
                 Some(false)
             }
             _ => None,
         };
         if let (Some(short), Some(from)) = (ranged, req.range) {
-            status = "206 Partial Content";
+            status = StatusCode::PARTIAL_CONTENT;
             let len = body.len();
             let last = len - 1 - usize::from(short);
-            write!(headers, "Content-Range: bytes {from}-{last}/{len}\r\n").unwrap();
+            let range = format!("bytes {from}-{last}/{len}");
+            headers.insert(CONTENT_RANGE, range.parse().unwrap());
             body = body[from..=last].to_vec();
         }
         (status, headers, body)
@@ -1103,52 +1097,53 @@ pub(crate) mod tests {
             loop {
                 let (sock, _) = listener.accept().await.unwrap();
                 let hits = hits.clone();
-                tokio::spawn(async move {
-                    let (reader, mut writer) = sock.into_split();
-                    let mut reader = BufReader::new(reader);
-                    loop {
-                        let Some(req) = read_request(&mut reader).await else {
-                            return;
-                        };
-                        let hit = hits.fetch_add(1, Ordering::SeqCst);
-                        let (status, mut headers, mut body) = answer(mode, &req, hit).await;
-                        let coding = match mode {
-                            Mode::Encodes { coding, stored } if stored || req.accepts(coding) => {
-                                Some(coding)
-                            }
-                            Mode::Cache { coding, .. } => Some(coding),
-                            _ => None,
-                        };
-                        // Like harmonia and Caddy, it leaves an encoded body
-                        // as it is.
-                        if let Some(coding) = coding
-                            && status.starts_with('2')
-                            && !headers.contains("Content-Encoding")
-                        {
-                            write!(headers, "Content-Encoding: {coding}\r\n").unwrap();
-                            body = encode(Compression::parse(coding).unwrap(), &body).await;
-                        }
-                        let head = format!(
-                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{headers}\r\n",
-                            body.len()
-                        );
-                        writer.write_all(head.as_bytes()).await.unwrap();
-                        let sent = match mode {
-                            Mode::BreaksOnce { .. } if hit == 0 => body.len() / 2,
-                            Mode::Encodes { .. } if req.path == "/large" && req.range.is_none() => {
-                                body.len() / 2
-                            }
-                            Mode::Truncated => body.len().saturating_sub(1),
-                            _ => body.len(),
-                        };
-                        if writer.write_all(&body[..sent]).await.is_err() || sent < body.len() {
-                            return;
-                        }
-                    }
+                let service = service_fn(move |req| {
+                    respond(
+                        mode,
+                        Request::new(&req),
+                        hits.fetch_add(1, Ordering::SeqCst),
+                    )
                 });
+                tokio::spawn(http1::Builder::new().serve_connection(TokioIo::new(sock), service));
             }
         });
         (format!("http://{addr}"), counted)
+    }
+
+    async fn respond(
+        mode: Mode,
+        req: Request,
+        hit: usize,
+    ) -> Result<Response<impl Body<Data = Bytes, Error = Infallible>>, Infallible> {
+        let (status, mut headers, mut body) = answer(mode, &req, hit).await;
+        let coding = match mode {
+            Mode::Encodes { coding, stored } if stored || req.accepts(coding) => Some(coding),
+            Mode::Cache { coding, .. } => Some(coding),
+            _ => None,
+        };
+        // Like harmonia and Caddy, it leaves an encoded body as it is.
+        if let Some(coding) = coding
+            && status.is_success()
+            && !headers.contains_key(CONTENT_ENCODING)
+        {
+            headers.insert(CONTENT_ENCODING, coding.parse().unwrap());
+            body = encode(Compression::parse(coding).unwrap(), &body).await;
+        }
+        let sent = match mode {
+            Mode::BreaksOnce { .. } if hit == 0 => body.len() / 2,
+            Mode::Encodes { .. } if req.path == "/large" && req.range.is_none() => body.len() / 2,
+            Mode::Truncated => body.len().saturating_sub(1),
+            _ => body.len(),
+        };
+        headers.insert(CONTENT_LENGTH, body.len().into());
+        body.truncate(sent);
+        // `map_frame` drops the body's size hint, so hyper sends the
+        // `Content-Length` above and closes the connection after a body that
+        // falls short of it.
+        let mut response = Response::new(Full::new(Bytes::from(body)).map_frame(|frame| frame));
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        Ok(response)
     }
 
     #[tokio::test]

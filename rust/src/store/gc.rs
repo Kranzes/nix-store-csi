@@ -316,7 +316,7 @@ mod tests {
         age(&store, &paths, 2);
         let t1 = tmp.path().join("t1");
         let view = store
-            .view(
+            .guarded_view(
                 "v1",
                 std::slice::from_ref(&hello),
                 std::slice::from_ref(&hello),
@@ -325,7 +325,7 @@ mod tests {
             )
             .unwrap();
         store
-            .view(
+            .guarded_view(
                 "v2",
                 std::slice::from_ref(&hello),
                 &paths,
@@ -358,7 +358,7 @@ mod tests {
 
         // Dropping a view counts as a use too.
         age(&store, std::slice::from_ref(&hello), 2);
-        store.drop_view("v1").unwrap();
+        store.guarded_drop_view("v1").unwrap();
         assert_eq!(store.collect(UNBOUND, day, NONE).await.unwrap(), 0);
         age(&store, std::slice::from_ref(&hello), 2);
         assert_eq!(store.collect(UNBOUND, day, NONE).await.unwrap(), 1);
@@ -380,7 +380,7 @@ mod tests {
         age(&store, std::slice::from_ref(oldest), 3);
         let target = tmp.path().join("target");
         let view = store
-            .view(
+            .guarded_view(
                 "v1",
                 std::slice::from_ref(&hello),
                 std::slice::from_ref(&hello),
@@ -476,7 +476,7 @@ mod tests {
             return;
         };
         let ino = |path: &Path| std::fs::symlink_metadata(path).unwrap().ino();
-        let view = (store.view(
+        let view = (store.guarded_view(
             "v1",
             std::slice::from_ref(&hello),
             &paths,
@@ -485,7 +485,7 @@ mod tests {
         ))
         .unwrap();
         let view_ino = ino(&view);
-        let trash = store.drop_view("v1").unwrap();
+        let trash = store.guarded_drop_view("v1").unwrap();
         assert_eq!(inodes(&tmp.path().join("tmp")), [view_ino]);
         drop(trash);
 

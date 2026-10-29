@@ -137,6 +137,13 @@ pub struct Store {
     _lock: std::fs::File,
 }
 
+/// A read guard of the `gc` lock, from [`Store::gc_guard`]. While it lives,
+/// garbage collection and [`Store::forget`] wait, so neither deletes a store
+/// object or view that a publish is using.
+pub struct GcGuard {
+    _read: OwnedRwLockReadGuard<()>,
+}
+
 /// Gauges that the metrics read at each scrape. A directory that can't be
 /// read leaves its gauge out.
 pub struct Gauges {
@@ -556,9 +563,10 @@ impl Store {
         forgot
     }
 
-    /// Holds off [`Store::collect`] until the guard drops.
-    pub async fn gc_guard(&self) -> OwnedRwLockReadGuard<()> {
-        self.gc.clone().read_owned().await
+    pub async fn gc_guard(&self) -> GcGuard {
+        GcGuard {
+            _read: self.gc.clone().read_owned().await,
+        }
     }
 
     /// Records a use of `paths`. [`Store::collect`] reads the modification

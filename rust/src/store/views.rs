@@ -22,7 +22,7 @@ use rustix::fs::{
 use tracing::info;
 
 use super::fs::{Scratch, count_inodes, remove_file};
-use super::{Store, list_names, list_store_paths, write_synced};
+use super::{GcGuard, Store, list_names, list_store_paths, write_synced};
 
 /// The directory in a view that links each root under its name without the
 /// hash. Pods reach a root there by the same path on every system.
@@ -45,10 +45,10 @@ impl Store {
     /// Returns the view of `paths`, the closure of `roots`, for `volume` to
     /// mount at `target`. `paths` must be in order, as [`Store::ensure`]
     /// returns them. Volumes with the same roots and closure share a view of
-    /// the current generation. Call it with the guard from
-    /// [`Store::gc_guard`] held.
+    /// the current generation.
     pub fn view(
         &self,
+        _gc: &GcGuard,
         volume: &str,
         roots: &[StorePath],
         paths: &[StorePath],
@@ -126,10 +126,10 @@ impl Store {
     }
 
     /// Forgets `volume`. If no other volume uses its view, moves the view
-    /// into a trash and returns the trash. Call it with the guard from
-    /// [`Store::gc_guard`] held. Drop the trash after giving up the guard,
-    /// since dropping it deletes the view, and deleting a big view is slow.
-    pub fn drop_view(&self, volume: &str) -> anyhow::Result<Option<Scratch>> {
+    /// into a trash and returns the trash. Drop the trash after giving up the
+    /// guard, since dropping it deletes the view, and deleting a big view is
+    /// slow.
+    pub fn drop_view(&self, _gc: &GcGuard, volume: &str) -> anyhow::Result<Option<Scratch>> {
         let record = self.volumes.join(check_volume(volume)?);
         let _views = self.views_lock.lock().unwrap();
         let old = Volume::read(&record)?;
@@ -363,7 +363,7 @@ mod tests {
         let roots = std::slice::from_ref(&hello);
 
         let target = tmp.path().join("target");
-        let view = store.view("v1", roots, &paths, &target, UNBOUND).unwrap();
+        let view = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
         // The closure and .roots.
         assert_eq!(count(&view), 6);
         let link = view.join(ROOTS).join(&**hello.name());
@@ -391,42 +391,42 @@ mod tests {
         let other_target = tmp.path().join("other");
         assert_eq!(
             store
-                .view("v2", roots, &paths, &other_target, UNBOUND)
+                .guarded_view("v2", roots, &paths, &other_target, UNBOUND)
                 .unwrap(),
             view
         );
         assert_eq!(
-            store.view("v1", roots, &paths, &target, UNBOUND).unwrap(),
+            (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap(),
             view
         );
         let other = store
-            .view("v3", &paths[..1], &paths[..1], &other_target, UNBOUND)
+            .guarded_view("v3", &paths[..1], &paths[..1], &other_target, UNBOUND)
             .unwrap();
         assert_ne!(other, view);
         assert_eq!(count(&other), 2);
         assert_eq!(count(tmp.path().join("views")), 2);
         // Other roots get another view of the same closure.
         let more_roots = store
-            .view("v4", &paths, &paths, &other_target, UNBOUND)
+            .guarded_view("v4", &paths, &paths, &other_target, UNBOUND)
             .unwrap();
         assert!(more_roots != view && more_roots != other);
         assert_eq!(count(more_roots.join(ROOTS)), paths.len());
-        store.drop_view("v3").unwrap();
-        store.drop_view("v4").unwrap();
+        store.guarded_drop_view("v3").unwrap();
+        store.guarded_drop_view("v4").unwrap();
 
         // Dropping the last volume that uses a view deletes the view.
-        store.drop_view("v1").unwrap();
+        store.guarded_drop_view("v1").unwrap();
         assert!(view.exists());
-        store.drop_view("v2").unwrap();
+        store.guarded_drop_view("v2").unwrap();
         assert!(!view.exists());
-        store.drop_view("v2").unwrap();
-        assert!(store.view("..", roots, &paths, &target, UNBOUND).is_err());
+        store.guarded_drop_view("v2").unwrap();
+        assert!((store.guarded_view("..", roots, &paths, &target, UNBOUND)).is_err());
 
         // A view that can't be read, here a symlink loop, is an error, not a
         // missing view.
         std::os::unix::fs::symlink(view.file_name().unwrap(), &view).unwrap();
         let err = store
-            .view("v1", roots, &paths, &target, UNBOUND)
+            .guarded_view("v1", roots, &paths, &target, UNBOUND)
             .unwrap_err();
         assert_eq!(err.to_string(), format!("reading {}", view.display()));
     }
@@ -439,7 +439,7 @@ mod tests {
         };
         let roots = std::slice::from_ref(&hello);
         let target = tmp.path().join("target");
-        let view = store.view("v1", roots, &paths, &target, UNBOUND).unwrap();
+        let view = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
         let usage = store.usage("v1", &target).unwrap().unwrap();
         let nar_size = |path| store.caches.local_info(path).unwrap().unwrap().nar_size();
         assert_eq!(usage.bytes, paths.iter().map(nar_size).sum::<u64>());
@@ -532,7 +532,7 @@ mod tests {
         let roots = std::slice::from_ref(&hello);
         let target = |name: &str| tmp.path().join(name);
         let old = store
-            .view("v1", roots, &paths, &target("t1"), UNBOUND)
+            .guarded_view("v1", roots, &paths, &target("t1"), UNBOUND)
             .unwrap();
 
         // The sync loses a store object, and the next ensure fetches it again.
@@ -543,7 +543,7 @@ mod tests {
         assert!(!store.present(lost));
         store.ensure(roots).done().await.unwrap();
         let new = store
-            .view("v2", roots, &paths, &target("t2"), UNBOUND)
+            .guarded_view("v2", roots, &paths, &target("t2"), UNBOUND)
             .unwrap();
         assert_ne!(new, old);
         assert_eq!(count(&new), paths.len() + 1);
@@ -552,21 +552,27 @@ mod tests {
         // A retried publish keeps the view that is mounted at its target.
         let t1 = target("t1");
         let bound = |v: &Path, t: &Path| Ok(v == old && t == t1);
-        assert_eq!(store.view("v1", roots, &paths, &t1, bound).unwrap(), old);
-        assert_eq!(store.view("v1", roots, &paths, &t1, UNBOUND).unwrap(), new);
+        assert_eq!(
+            (store.guarded_view("v1", roots, &paths, &t1, bound)).unwrap(),
+            old
+        );
+        assert_eq!(
+            (store.guarded_view("v1", roots, &paths, &t1, UNBOUND)).unwrap(),
+            new
+        );
 
         std::fs::write(&store.failed_record, "").unwrap();
         let config = || zstd_config(&dir, tmp.path());
         let store = reopen(store, config).await;
         let after = store
-            .view("v3", roots, &paths, &target("t3"), UNBOUND)
+            .guarded_view("v3", roots, &paths, &target("t3"), UNBOUND)
             .unwrap();
         assert!(after != new && after != old);
         // A restart with nothing lost keeps the generation.
         let store = reopen(store, config).await;
         assert_eq!(
             store
-                .view("v4", roots, &paths, &target("t4"), UNBOUND)
+                .guarded_view("v4", roots, &paths, &target("t4"), UNBOUND)
                 .unwrap(),
             after
         );
@@ -582,7 +588,7 @@ mod tests {
         let target = tmp.path().join("target");
         unsync(&store, &hello);
         store.failed_syncs.store(1, Ordering::SeqCst);
-        let err = (store.view("v1", roots, &paths, &target, UNBOUND)).unwrap_err();
+        let err = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap_err();
         assert!(
             format!("{err:#}").contains("may have lost data in a failed sync"),
             "{err:#}"
@@ -590,6 +596,6 @@ mod tests {
         assert_eq!(count(tmp.path().join("views")), 0);
         store.sync(&hello).await.unwrap();
         let paths = store.ensure(roots).done().await.unwrap();
-        store.view("v1", roots, &paths, &target, UNBOUND).unwrap();
+        (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
     }
 }

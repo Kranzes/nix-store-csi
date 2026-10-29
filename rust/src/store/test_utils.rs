@@ -1,6 +1,6 @@
 //! Helpers that the store's tests share.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, SystemTime};
 
@@ -8,7 +8,7 @@ use harmonia_store_path::StorePath;
 
 use super::fetch::{Ensuring, Progress};
 use super::fs::Scratch;
-use super::{Config, EnsureFree, Store};
+use super::{Config, EnsureFree, GcGuard, Store};
 use crate::narinfo::tests::{file_store, fixture_root, fixtures};
 
 pub(super) fn scratch() -> Scratch {
@@ -117,6 +117,35 @@ pub(super) fn ends_while_busy(
     barrier.wait();
     task.join().unwrap();
     ended
+}
+
+impl Store {
+    /// [`Store::view`] with a guard held for the call, as a publish holds one.
+    pub(super) fn guarded_view(
+        &self,
+        volume: &str,
+        roots: &[StorePath],
+        paths: &[StorePath],
+        target: &Path,
+        is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<PathBuf> {
+        self.view(&self.try_gc_guard(), volume, roots, paths, target, is_bound)
+    }
+
+    /// [`Store::drop_view`] with a guard held for the call, as an unpublish
+    /// holds one.
+    pub(super) fn guarded_drop_view(&self, volume: &str) -> anyhow::Result<Option<Scratch>> {
+        self.drop_view(&self.try_gc_guard(), volume)
+    }
+
+    /// Like [`Store::gc_guard`], but panics instead of waiting while garbage
+    /// collection or [`Store::forget`] holds the lock.
+    fn try_gc_guard(&self) -> GcGuard {
+        let read = self.gc.clone().try_read_owned();
+        GcGuard {
+            _read: read.expect("no garbage collection or forget holds the lock"),
+        }
+    }
 }
 
 /// Waits for `ensuring` to resolve its closure and start its fetches.

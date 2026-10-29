@@ -8,7 +8,7 @@ use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
 
 use crate::mounts;
-use crate::store::{self, Store};
+use crate::store::{self, GcGuard, Store};
 use crate::store_path::{self, Names, STORE_PATHS, system};
 
 pub mod proto {
@@ -122,8 +122,8 @@ impl Plugin {
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
         let view_roots = roots.clone();
-        self.for_volume(&request.volume_id, move |store| {
-            let view = store.view(&volume, &view_roots, &names, &target, mounts::is_bound)?;
+        self.for_volume(&request.volume_id, move |store, gc| {
+            let view = store.view(gc, &volume, &view_roots, &names, &target, mounts::is_bound)?;
             mounts::publish(&view, &target)
         })
         .await?;
@@ -142,9 +142,9 @@ impl Plugin {
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
         let trash = self
-            .for_volume(&request.volume_id, move |store| {
+            .for_volume(&request.volume_id, move |store, gc| {
                 mounts::unpublish(&target)?;
-                store.drop_view(&volume)
+                store.drop_view(gc, &volume)
             })
             .await?;
         // Deleting a big view is slow, so it happens after the hold on
@@ -192,7 +192,7 @@ impl Plugin {
     async fn for_volume<T: Send + 'static>(
         &self,
         volume: &str,
-        f: impl FnOnce(&Store) -> anyhow::Result<T> + Send + 'static,
+        f: impl FnOnce(&Store, &GcGuard) -> anyhow::Result<T> + Send + 'static,
     ) -> Result<T, Status> {
         let lock = {
             let mut volumes = self.volumes.lock().unwrap();
@@ -200,11 +200,11 @@ impl Plugin {
             volumes.retain(|_, lock| Arc::strong_count(lock) > 1);
             volumes.entry(volume.to_owned()).or_default().clone()
         };
-        let held = (lock.lock_owned().await, self.store.gc_guard().await);
+        let (turn, gc) = (lock.lock_owned().await, self.store.gc_guard().await);
         let store = self.store.clone();
         blocking(move || {
-            let _held = held;
-            f(&store)
+            let _turn = turn;
+            f(&store, &gc)
         })
         .await
     }

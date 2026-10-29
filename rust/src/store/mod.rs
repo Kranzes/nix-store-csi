@@ -104,9 +104,9 @@ pub struct Store {
     /// One sync holds it at a time, so the paths that come in during a sync
     /// share the next one.
     syncing: tokio::sync::Mutex<()>,
-    /// Fetches under way, each with the NAR bytes it has read. Volumes that
-    /// need the same path share its fetch. A fetch leaves the map when it
-    /// ends, so a publish after a failure starts a new one.
+    /// Fetches under way. Volumes that need the same path share its fetch. A
+    /// fetch leaves the map when it ends, so a publish after a failure starts
+    /// a new one.
     fetching: Mutex<HashMap<StorePath, Underway>>,
     /// The paths of closures under [`Store::ensure`] or [`Store::prefetch`],
     /// each with its number of holds. Collection spares them however full the

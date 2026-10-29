@@ -33,15 +33,20 @@ use super::{Store, write_unsynced};
 /// Restarts a NAR download that the transport couldn't resume.
 const NAR_RESTARTS: ConstantBuilder = ConstantBuilder::new().with_max_times(2);
 
-pub(super) type Fetch = Shared<BoxFuture<'static, Result<(), Arc<String>>>>;
+/// A fetch under way, which every ensure that needs its path shares.
+#[derive(Clone)]
+struct Fetch {
+    done: Shared<BoxFuture<'static, Result<(), Arc<String>>>>,
+    /// The NAR bytes it has read.
+    bytes: Arc<AtomicU64>,
+}
 
-/// A fetch under way, the NAR bytes it has read, and the sender that gives
-/// the fetch its slot, until a feed takes it.
-pub(super) type Underway = (
-    Fetch,
-    Arc<AtomicU64>,
-    Option<oneshot::Sender<OwnedSemaphorePermit>>,
-);
+/// A fetch in [`Store::fetching`].
+pub(super) struct Underway {
+    fetch: Fetch,
+    /// Gives the fetch its slot, until a feed takes it.
+    start: Option<oneshot::Sender<OwnedSemaphorePermit>>,
+}
 
 impl Store {
     /// Starts fetching the paths in the closure of `roots` that the store
@@ -125,9 +130,9 @@ impl Store {
         let mut started = 0;
         let fetches: Vec<_> = (missing.iter())
             .map(|path| {
-                let (fetch, bytes, new) = self.fetch_shared(closure[path].clone());
+                let (fetch, new) = self.fetch_shared(closure[path].clone());
                 started += usize::from(new);
-                (fetch, bytes)
+                fetch
             })
             .collect();
         if !missing.is_empty() {
@@ -158,7 +163,7 @@ impl Store {
         futures::future::try_join_all(
             fetches
                 .into_iter()
-                .map(|(fetch, _)| async move { fetch.await.map_err(|e| anyhow::anyhow!("{e}")) }),
+                .map(|fetch| async move { fetch.done.await.map_err(|e| anyhow::anyhow!("{e}")) }),
         )
         .await?;
         // Only fetches change the node store's narinfos.
@@ -226,14 +231,14 @@ impl Store {
 
     /// Runs the fetch of `entry`'s path in its own task, so it finishes even
     /// if no publish waits for it any more. Every publish that needs the path
-    /// shares the fetch. Also returns the NAR bytes the fetch has read so far,
-    /// and whether this call started the fetch. The fetch ends once the path
-    /// is in store/, and the path's sync runs after that.
-    fn fetch_shared(self: &Arc<Self>, entry: Arc<Entry>) -> (Fetch, Arc<AtomicU64>, bool) {
+    /// shares the fetch. Also returns whether this call started the fetch.
+    /// The fetch ends once the path is in store/, and the path's sync runs
+    /// after that.
+    fn fetch_shared(self: &Arc<Self>, entry: Arc<Entry>) -> (Fetch, bool) {
         let path = entry.info.path().clone();
         let mut fetching = self.fetching.lock().unwrap();
         let mut started = false;
-        let (fetch, bytes, _) = fetching.entry(path.clone()).or_insert_with(|| {
+        let underway = fetching.entry(path.clone()).or_insert_with(|| {
             started = true;
             let (this, bytes) = (self.clone(), Arc::<AtomicU64>::default());
             let read = bytes.clone();
@@ -249,10 +254,16 @@ impl Store {
                 }
                 .instrument(span),
             );
-            let fetch = async move { task.await.unwrap_or_else(|e| Err(Arc::new(e.to_string()))) };
-            (fetch.boxed().shared(), bytes, Some(start))
+            let done = async move { task.await.unwrap_or_else(|e| Err(Arc::new(e.to_string()))) };
+            Underway {
+                fetch: Fetch {
+                    done: done.boxed().shared(),
+                    bytes,
+                },
+                start: Some(start),
+            }
         });
-        (fetch.clone(), bytes.clone(), started)
+        (underway.fetch.clone(), started)
     }
 
     /// Starts the fetches of `paths` that wait for a slot, one slot at a time.
@@ -264,7 +275,7 @@ impl Store {
         while let Ok(slot) = self.jobs.clone().acquire_owned().await {
             // Skips the paths that no longer wait, like those that another
             // ensure started meanwhile.
-            let take = |path| self.fetching.lock().unwrap().get_mut(&path)?.2.take();
+            let take = |path| self.fetching.lock().unwrap().get_mut(&path)?.start.take();
             let Some(start) = paths.find_map(take) else {
                 return;
             };
@@ -447,8 +458,8 @@ struct Fetching {
     /// fetch that another ensure started may have read some already.
     start: Instant,
     start_bytes: u64,
-    /// The fetch of each other path, and the NAR bytes it has read.
-    fetches: Vec<(Fetch, Arc<AtomicU64>)>,
+    /// The fetch of each other path.
+    fetches: Vec<Fetch>,
     /// Lasts until both the fetches and the caller are done with it, so
     /// collection spares the closure until the caller has it in a view.
     _held: Held,
@@ -495,7 +506,7 @@ impl Ensuring {
             let bytes = u128::from(fetched.saturating_sub(f.start_bytes));
             u64::try_from(bytes * 1000 / ms).unwrap_or(u64::MAX)
         });
-        let done = (f.fetches.iter()).filter(|(fetch, _)| matches!(fetch.peek(), Some(Ok(()))));
+        let done = (f.fetches.iter()).filter(|fetch| matches!(fetch.done.peek(), Some(Ok(()))));
         Progress::Fetching {
             bytes: f.present_bytes + fetched,
             total_bytes: f.total_bytes,
@@ -507,8 +518,9 @@ impl Ensuring {
 }
 
 /// The NAR bytes that `fetches` have read.
-fn read(fetches: &[(Fetch, Arc<AtomicU64>)]) -> u64 {
-    fetches.iter().map(|(_, b)| b.load(Ordering::Relaxed)).sum()
+fn read(fetches: &[Fetch]) -> u64 {
+    let bytes = |f: &Fetch| f.bytes.load(Ordering::Relaxed);
+    fetches.iter().map(bytes).sum()
 }
 
 /// How far an [`Ensuring`] has got. It reads as the rest of a sentence, like
@@ -1016,7 +1028,7 @@ mod tests {
         let (a_fetches, b_fetches) = (fetches(&a), fetches(&b));
         assert!(!b_fetches.is_empty() && b_fetches.len() < a_fetches.len());
         for fetch in &b_fetches {
-            assert!(a_fetches.iter().any(|a| Arc::ptr_eq(&a.1, &fetch.1)));
+            assert!((a_fetches.iter()).any(|a| Arc::ptr_eq(&a.bytes, &fetch.bytes)));
         }
         assert_eq!(store.fetching.lock().unwrap().len(), a_fetches.len());
         // No fetch can start while the test holds the jobs.
@@ -1100,7 +1112,7 @@ mod tests {
         let retry = store.ensure(std::slice::from_ref(&hello));
         resolved(&retry).await;
         for fetch in fetches(&retry) {
-            assert!(started.iter().any(|s| Arc::ptr_eq(&s.1, &fetch.1)));
+            assert!(started.iter().any(|s| Arc::ptr_eq(&s.bytes, &fetch.bytes)));
         }
 
         // With no caller left, the fetches and their syncs still finish.
@@ -1193,14 +1205,14 @@ mod tests {
         // Another ensure's fetch gets hello from the narinfo with references.
         let jobs = store.jobs.acquire_many(2).await.unwrap();
         let info = fixture_narinfo(&dir, "cache-zstd", &hello);
-        let (fetch, _, _) = store.fetch_shared(Arc::new(Entry {
+        let (fetch, _) = store.fetch_shared(Arc::new(Entry {
             cache: Some(1),
             info,
         }));
         let mut ensuring = store.ensure(std::slice::from_ref(&hello));
         resolved(&ensuring).await;
         drop(jobs);
-        fetch.await.unwrap();
+        fetch.done.await.unwrap();
         let err = ensuring.done().await.unwrap_err();
         assert!(format!("{err:#}").contains("the next try"), "{err:#}");
         // The next try finds hello in the node store, with its references.

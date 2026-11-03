@@ -1,13 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1125 395" width="1125" height="395">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1125 420" width="1125" height="420">
   <style>
-    svg { --text: #1f2328; --muted: #59636e; --line: #768390; --box: #f6f8fa; --edge: #d1d9e0; --accent: #ddf4ff; --accent-edge: #0969da; }
+    svg { --text: #1f2328; --muted: #59636e; --line: #768390; --box: rgba(31, 35, 40, 0.04); --edge: #d1d9e0; --accent: rgba(84, 174, 255, 0.2); --accent-edge: #0969da; }
     @media (prefers-color-scheme: dark) {
-      svg { --text: #f0f6fc; --muted: #9198a1; --line: #768390; --box: #151b23; --edge: #3d444d; --accent: #0c2d6b; --accent-edge: #4493f8; }
+      svg { --text: #f0f6fc; --muted: #9198a1; --line: #768390; --box: rgba(240, 246, 252, 0.04); --edge: #3d444d; --accent: rgba(56, 139, 253, 0.15); --accent-edge: #4493f8; }
     }
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 16px; fill: var(--text); }
     .title { font-weight: 600; }
     .sub { font-size: 14px; fill: var(--muted); }
     .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; fill: var(--muted); }
+    .code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; }
     .label { font-size: 14px; fill: var(--line); }
     .page { fill: var(--line); }
     .box { fill: var(--box); stroke: var(--edge); stroke-width: 1.5; }
@@ -16,10 +17,234 @@
     .group { fill: none; stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
     .arrow { fill: none; stroke: var(--line); stroke-width: 1.5; marker-end: url(#head); }
     .head { fill: var(--line); }
+    .obj { fill: var(--line); transform-box: fill-box; transform-origin: center; }
+    .obj.new { fill: var(--accent-edge); }
+    .packet { opacity: 0; transform-box: fill-box; transform-origin: center; }
+    .ripple { fill: none; stroke: var(--accent-edge); stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: 0; transform-box: fill-box; transform-origin: center; }
+    .flash { fill: none; stroke: var(--accent-edge); stroke-width: 1.5; marker-end: url(#head-on); opacity: 0; }
+    .head-on { fill: var(--accent-edge); }
+    .k-hl-kubelet { animation: k-hl-kubelet 15s linear infinite both; }
+    .k-label-publish { animation: k-label-publish 15s linear infinite both; }
+    .k-flash-publish { animation: k-flash-publish 15s linear infinite both; }
+    .k-hl-plugin { animation: k-hl-plugin 15s linear infinite both; }
+    .k-hl-store { animation: k-hl-store 15s linear infinite both; }
+    .k-store1 { animation: k-store1 15s linear infinite both; }
+    .k-ripple-store1 { animation: k-ripple-store1 15s linear infinite both; }
+    .k-label-fetch { animation: k-label-fetch 15s linear infinite both; }
+    .k-nars-move { animation: k-nars-move 15s linear infinite both; }
+    .k-nars { animation: k-nars 15s linear infinite both; }
+    .k-unpacks-move { animation: k-unpacks-move 15s linear infinite both; }
+    .k-unpacks { animation: k-unpacks 15s linear infinite both; }
+    .k-store-new { animation: k-store-new 15s linear infinite both; }
+    .k-ripple-store-new { animation: k-ripple-store-new 15s linear infinite both; }
+    .k-label-link { animation: k-label-link 15s linear infinite both; }
+    .k-hl-view { animation: k-hl-view 15s linear infinite both; }
+    .k-links-move { animation: k-links-move 15s linear infinite both; }
+    .k-links { animation: k-links 15s linear infinite both; }
+    .k-view { animation: k-view 15s linear infinite both; }
+    .k-ripple-view { animation: k-ripple-view 15s linear infinite both; }
+    .k-label-mount { animation: k-label-mount 15s linear infinite both; }
+    .k-flash-mount { animation: k-flash-mount 15s linear infinite both; }
+    .k-mount { animation: k-mount 15s linear infinite both; }
+    .k-pod { animation: k-pod 15s linear infinite both; }
+    @keyframes k-hl-kubelet {
+      0% { stroke: var(--edge); stroke-width: 1.5 }
+      1.33% { stroke: var(--edge); stroke-width: 1.5 }
+      3.33% { stroke: var(--accent-edge); stroke-width: 2.5 }
+      10.67% { stroke: var(--accent-edge); stroke-width: 2.5 }
+      13.33% { stroke: var(--edge); stroke-width: 1.5 }
+      100% { stroke: var(--edge); stroke-width: 1.5 }
+    }
+    @keyframes k-label-publish {
+      0% { fill: var(--line) }
+      2.67% { fill: var(--line); animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      6% { fill: var(--accent-edge) }
+      10.67% { fill: var(--accent-edge) }
+      13.33% { fill: var(--line) }
+      100% { fill: var(--line) }
+    }
+    @keyframes k-flash-publish {
+      0% { opacity: 0 }
+      2.67% { opacity: 0; animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      6% { opacity: 1 }
+      10.67% { opacity: 1 }
+      13.33% { opacity: 0 }
+      100% { opacity: 0 }
+    }
+    @keyframes k-hl-plugin {
+      0% { stroke-width: 1.5 }
+      6.67% { stroke-width: 1.5 }
+      8.67% { stroke-width: 2.5 }
+      36% { stroke-width: 2.5 }
+      38.67% { stroke-width: 1.5 }
+      100% { stroke-width: 1.5 }
+    }
+    @keyframes k-hl-store {
+      0% { stroke: var(--edge); stroke-width: 1.5 }
+      14.67% { stroke: var(--edge); stroke-width: 1.5 }
+      16.67% { stroke: var(--accent-edge); stroke-width: 2.5 }
+      37.33% { stroke: var(--accent-edge); stroke-width: 2.5 }
+      40% { stroke: var(--edge); stroke-width: 1.5 }
+      100% { stroke: var(--edge); stroke-width: 1.5 }
+    }
+    @keyframes k-store1 {
+      0% { fill: var(--line); transform: scale(1) }
+      16.67% { fill: var(--line); transform: scale(1) }
+      17.67% { fill: var(--accent-edge); transform: scale(1.25) }
+      18.67% { fill: var(--accent-edge); transform: scale(1) }
+      94.67% { fill: var(--accent-edge); transform: scale(1) }
+      98% { fill: var(--line); transform: scale(1) }
+      100% { fill: var(--line); transform: scale(1) }
+    }
+    @keyframes k-ripple-store1 {
+      0% { opacity: 0; transform: scale(1) }
+      17.4% { opacity: 0; transform: scale(1) }
+      17.47% { opacity: .8; transform: scale(1); animation-timing-function: ease-out }
+      20.8% { opacity: 0; transform: scale(1.8) }
+      100% { opacity: 0; transform: scale(1.8) }
+    }
+    @keyframes k-label-fetch {
+      0% { fill: var(--line) }
+      20% { fill: var(--line) }
+      22% { fill: var(--accent-edge) }
+      36% { fill: var(--accent-edge) }
+      38.67% { fill: var(--line) }
+      100% { fill: var(--line) }
+    }
+    @keyframes k-nars-move {
+      0% { transform: translate(0, 0) }
+      21.33% { transform: translate(0, 0); animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      28% { transform: translate(78px, 0px) }
+      100% { transform: translate(78px, 0px) }
+    }
+    @keyframes k-nars {
+      0% { opacity: 0; transform: scale(0) }
+      21.33% { opacity: 0; transform: scale(0); animation-timing-function: ease-out }
+      22.67% { opacity: 1; transform: scale(1) }
+      26.67% { opacity: 1; transform: scale(1); animation-timing-function: ease-in }
+      28% { opacity: 0; transform: scale(0) }
+      100% { opacity: 0; transform: scale(0) }
+    }
+    @keyframes k-unpacks-move {
+      0% { transform: translate(0, 0) }
+      29% { transform: translate(0, 0); animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      35.67% { transform: translate(0px, 78px) }
+      100% { transform: translate(0px, 78px) }
+    }
+    @keyframes k-unpacks {
+      0% { opacity: 0; transform: scale(0) }
+      29% { opacity: 0; transform: scale(0); animation-timing-function: ease-out }
+      30.33% { opacity: 1; transform: scale(1) }
+      34.33% { opacity: 1; transform: scale(1); animation-timing-function: ease-in }
+      35.67% { opacity: 0; transform: scale(0) }
+      100% { opacity: 0; transform: scale(0) }
+    }
+    @keyframes k-store-new {
+      0% { opacity: 0; transform: scale(.3) }
+      35.33% { opacity: 0; transform: scale(.3) }
+      36.33% { opacity: 1; transform: scale(1.25) }
+      37.33% { opacity: 1; transform: scale(1) }
+      94.67% { opacity: 1; transform: scale(1) }
+      98% { opacity: 0; transform: scale(1) }
+      100% { opacity: 0; transform: scale(.3) }
+    }
+    @keyframes k-ripple-store-new {
+      0% { opacity: 0; transform: scale(1) }
+      36.07% { opacity: 0; transform: scale(1) }
+      36.13% { opacity: .8; transform: scale(1); animation-timing-function: ease-out }
+      39.47% { opacity: 0; transform: scale(1.8) }
+      100% { opacity: 0; transform: scale(1.8) }
+    }
+    @keyframes k-label-link {
+      0% { fill: var(--line) }
+      40% { fill: var(--line) }
+      42% { fill: var(--accent-edge) }
+      49.33% { fill: var(--accent-edge) }
+      52% { fill: var(--line) }
+      100% { fill: var(--line) }
+    }
+    @keyframes k-hl-view {
+      0% { stroke: var(--edge); stroke-width: 1.5 }
+      44% { stroke: var(--edge); stroke-width: 1.5 }
+      46% { stroke: var(--accent-edge); stroke-width: 2.5 }
+      50.67% { stroke: var(--accent-edge); stroke-width: 2.5 }
+      53.33% { stroke: var(--edge); stroke-width: 1.5 }
+      100% { stroke: var(--edge); stroke-width: 1.5 }
+    }
+    @keyframes k-links-move {
+      0% { transform: translate(0, 0) }
+      41.33% { transform: translate(0, 0); animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      48% { transform: translate(78px, 0px) }
+      100% { transform: translate(78px, 0px) }
+    }
+    @keyframes k-links {
+      0% { opacity: 0; transform: scale(0) }
+      41.33% { opacity: 0; transform: scale(0); animation-timing-function: ease-out }
+      42.67% { opacity: 1; transform: scale(1) }
+      46.67% { opacity: 1; transform: scale(1); animation-timing-function: ease-in }
+      48% { opacity: 0; transform: scale(0) }
+      100% { opacity: 0; transform: scale(0) }
+    }
+    @keyframes k-view {
+      0% { opacity: 0; transform: scale(.3) }
+      47.67% { opacity: 0; transform: scale(.3) }
+      48.67% { opacity: 1; transform: scale(1.25) }
+      49.67% { opacity: 1; transform: scale(1) }
+      94.67% { opacity: 1; transform: scale(1) }
+      98% { opacity: 0; transform: scale(1) }
+      100% { opacity: 0; transform: scale(.3) }
+    }
+    @keyframes k-ripple-view {
+      0% { opacity: 0; transform: scale(1) }
+      48.4% { opacity: 0; transform: scale(1) }
+      48.47% { opacity: .8; transform: scale(1); animation-timing-function: ease-out }
+      51.8% { opacity: 0; transform: scale(1.8) }
+      100% { opacity: 0; transform: scale(1.8) }
+    }
+    @keyframes k-label-mount {
+      0% { fill: var(--line) }
+      54.67% { fill: var(--line); animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      58% { fill: var(--accent-edge) }
+      62.67% { fill: var(--accent-edge) }
+      65.33% { fill: var(--line) }
+      100% { fill: var(--line) }
+    }
+    @keyframes k-flash-mount {
+      0% { opacity: 0 }
+      54.67% { opacity: 0; animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      58% { opacity: 1 }
+      62.67% { opacity: 1 }
+      65.33% { opacity: 0 }
+      100% { opacity: 0 }
+    }
+    @keyframes k-mount {
+      0% { fill: var(--box); stroke: var(--edge); stroke-width: 1.5 }
+      54.67% { fill: var(--box); stroke: var(--edge); stroke-width: 1.5; animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      58% { fill: var(--accent); stroke: var(--accent-edge); stroke-width: 2.5 }
+      62.67% { fill: var(--accent); stroke: var(--accent-edge); stroke-width: 2.5 }
+      65.33% { fill: var(--accent); stroke: var(--accent-edge); stroke-width: 1.5 }
+      94.67% { fill: var(--accent); stroke: var(--accent-edge); stroke-width: 1.5 }
+      98% { fill: var(--box); stroke: var(--edge); stroke-width: 1.5 }
+      100% { fill: var(--box); stroke: var(--edge); stroke-width: 1.5 }
+    }
+    @keyframes k-pod {
+      0% { opacity: 0 }
+      54.67% { opacity: 0; animation-timing-function: cubic-bezier(.45, 0, .25, 1) }
+      58% { opacity: 1 }
+      94.67% { opacity: 1 }
+      98% { opacity: 0 }
+      100% { opacity: 0 }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; }
+    }
   </style>
   <defs>
     <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+    <marker id="head-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="head-on" d="M0,0 L10,5 L0,10 z"/>
     </marker>
   </defs>
 
@@ -32,41 +257,94 @@
   <rect class="node" x="210" y="20" width="905" height="360" rx="12"/>
   <text class="title page" x="230" y="44">Node</text>
 
-  <rect class="accent" x="250" y="60" width="200" height="70" rx="8"/>
+  <rect class="accent k-hl-plugin" x="250" y="60" width="200" height="70" rx="8"/>
   <text class="title" x="350" y="91" text-anchor="middle">nix-store-csi</text>
   <text class="sub" x="350" y="112" text-anchor="middle">node plugin</text>
 
-  <rect class="box" x="930" y="60" width="160" height="70" rx="8"/>
+  <rect class="box k-hl-kubelet" x="930" y="60" width="160" height="70" rx="8"/>
   <text class="title" x="1010" y="100" text-anchor="middle">kubelet</text>
 
   <rect class="group" x="232" y="176" width="600" height="184" rx="10"/>
   <text class="label" x="820" y="194" text-anchor="end" style="font-weight: 600">state dir</text>
 
-  <path class="box" d="M250,220 v90 a100,10 0 0 0 200,0 v-90 a100,10 0 0 0 -200,0 z"/>
-  <ellipse class="box" cx="350" cy="220" rx="100" ry="10"/>
+  <path class="box k-hl-store" d="M250,220 v90 a100,10 0 0 0 200,0 v-90 a100,10 0 0 0 -200,0 z"/>
+  <ellipse class="box k-hl-store" cx="350" cy="220" rx="100" ry="10"/>
   <text class="title" x="350" y="262" text-anchor="middle">node store</text>
   <text class="sub" x="350" y="284" text-anchor="middle">all fetched store objects</text>
 
-  <path class="box" d="M530,220 v90 a135,10 0 0 0 270,0 v-90 a135,10 0 0 0 -270,0 z"/>
-  <ellipse class="box" cx="665" cy="220" rx="135" ry="10"/>
+  <path class="box k-hl-view" d="M530,220 v90 a135,10 0 0 0 270,0 v-90 a135,10 0 0 0 -270,0 z"/>
+  <ellipse class="box k-hl-view" cx="665" cy="220" rx="135" ry="10"/>
   <text class="title" x="665" y="262" text-anchor="middle">view</text>
   <text class="sub" x="665" y="284" text-anchor="middle">a closure's store objects and <tspan class="mono" style="font-size: 14px">.roots/</tspan></text>
   <text class="label" x="665" y="346" text-anchor="middle">shared by pods that list the same set of store paths</text>
 
-  <rect class="box" x="930" y="190" width="160" height="125" rx="8"/>
+  <rect class="box" x="930" y="190" width="160" height="130" rx="8"/>
   <text class="title" x="1010" y="212" text-anchor="middle">pod</text>
-  <rect class="accent" x="945" y="227" width="130" height="70" rx="6"/>
-  <text class="mono" x="1010" y="258" text-anchor="middle" style="fill: var(--text)">/nix/store</text>
-  <text class="sub" x="1010" y="278" text-anchor="middle">its closure only</text>
+  <rect class="accent k-mount" x="945" y="227" width="130" height="79" rx="6"/>
+  <text class="mono" x="1010" y="252" text-anchor="middle" style="fill: var(--text)">/nix/store</text>
+  <text class="sub" x="1010" y="272" text-anchor="middle">its closure only</text>
 
   <path class="arrow" d="M170,95 H248"/>
   <path class="arrow" d="M930,95 H452"/>
-  <text class="label" x="691" y="85" text-anchor="middle"><tspan class="mono" style="fill: var(--line); font-size: 14px">NodePublishVolume</tspan> with <tspan class="mono" style="fill: var(--line); font-size: 14px">storePaths</tspan> over gRPC</text>
+  <text class="label k-label-publish" x="691" y="85" text-anchor="middle"><tspan class="code">NodePublishVolume</tspan> with <tspan class="code">storePaths</tspan> over gRPC</text>
   <path class="arrow" d="M350,130 V208"/>
-  <text class="label" x="362" y="160">fetch, verify, unpack</text>
+  <text class="label k-label-fetch" x="376" y="160">fetch, verify, unpack</text>
   <path class="arrow" d="M450,262 H528"/>
-  <text class="label" x="490" y="252" text-anchor="middle">hard links</text>
+  <text class="label k-label-link" x="490" y="247" text-anchor="middle">hard links</text>
   <path class="arrow" d="M800,262 H943"/>
-  <text class="label" x="881" y="238" text-anchor="middle">read-only</text>
-  <text class="label" x="881" y="254" text-anchor="middle">bind mount</text>
+  <text class="label k-label-mount" x="881" y="238" text-anchor="middle">read-only</text>
+  <text class="label k-label-mount" x="881" y="254" text-anchor="middle">bind mount</text>
+
+  <!-- store objects: blue ones are in this pod's closure -->
+  <rect class="obj" x="308" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-store1" x="326" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-store-new" x="344" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-store-new" x="362" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-store-new" x="380" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-view" x="632" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-view" x="650" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-view" x="668" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-view" x="686" y="294" width="12" height="12" rx="2"/>
+  <rect class="obj new k-pod" x="977" y="284" width="12" height="12" rx="2"/>
+  <rect class="obj new k-pod" x="995" y="284" width="12" height="12" rx="2"/>
+  <rect class="obj new k-pod" x="1013" y="284" width="12" height="12" rx="2"/>
+  <rect class="obj new k-pod" x="1031" y="284" width="12" height="12" rx="2"/>
+  <rect class="obj new" x="210" y="395" width="10" height="10" rx="2"/>
+  <text class="sub" x="228" y="405">in this pod's closure</text>
+  <rect class="obj" x="380" y="395" width="10" height="10" rx="2"/>
+  <text class="sub" x="398" y="405">not in this pod's closure</text>
+
+  <!-- the rest only shows while animating -->
+  <path class="flash k-flash-publish" d="M930,95 H452"/>
+  <path class="flash k-flash-mount" d="M800,262 H943"/>
+  <rect class="ripple k-ripple-store1" x="326" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-store-new" x="344" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-store-new" x="362" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-store-new" x="380" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-view" x="632" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-view" x="650" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-view" x="668" y="294" width="12" height="12" rx="2"/>
+  <rect class="ripple k-ripple-view" x="686" y="294" width="12" height="12" rx="2"/>
+  <g class="k-nars-move">
+    <g class="packet k-nars">
+      <rect class="obj new" x="165" y="78" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="165" y="90" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="165" y="102" width="10" height="10" rx="2"/>
+    </g>
+  </g>
+  <g class="k-unpacks-move">
+    <g class="packet k-unpacks">
+      <rect class="obj new" x="333" y="125" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="345" y="125" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="357" y="125" width="10" height="10" rx="2"/>
+    </g>
+  </g>
+  <g class="k-links-move">
+    <g class="packet k-links">
+      <rect class="obj new" x="439" y="251" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="451" y="251" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="439" y="263" width="10" height="10" rx="2"/>
+      <rect class="obj new" x="451" y="263" width="10" height="10" rx="2"/>
+    </g>
+  </g>
 </svg>

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The CSI image's binary links glibc statically instead of musl, and its SBOM
+  lists glibc in place of musl.
+
 ## 0.1.9 - 2026-11-05
 
 ### Changed

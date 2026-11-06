@@ -7,12 +7,9 @@
 }:
 
 let
-  craneLibFor =
-    pkgs:
-    (crane.mkLib pkgs).overrideScope (
-      _: _: { stdenvSelector = p: p.stdenvAdapters.useMoldLinker p.stdenv; }
-    );
-  craneLib = craneLibFor pkgs;
+  craneLib = (crane.mkLib pkgs).overrideScope (
+    _: _: { stdenvSelector = p: p.stdenvAdapters.useMoldLinker p.stdenv; }
+  );
   bombonLib = import bombon { inherit pkgs; };
   # The images copy their contents in, so the SBOM names them as extraPaths.
   withSbom =
@@ -20,12 +17,7 @@ let
     image.overrideAttrs (
       finalAttrs: prev: {
         passthru = prev.passthru // {
-          sbom = bombonLib.buildBom finalAttrs.finalPackage {
-            inherit extraPaths;
-            # zstd under pkgsStatic propagates the bash that its scripts use,
-            # but the images don't contain it.
-            excludes = [ "-bash-static-" ];
-          };
+          sbom = bombonLib.buildBom finalAttrs.finalPackage { inherit extraPaths; };
         };
       }
     );
@@ -36,23 +28,23 @@ let
   packages = {
     nix-store-csi = pkgs.callPackage ./package.nix { inherit craneLib; };
 
-    # Linked statically against musl, so the plugin's image needs only the
+    # Linked statically against glibc, so the plugin's image needs only the
     # binary and CA certificates.
     # The vendored SBOM lists the crates in the SBOM of csi-image.
-    nix-store-csi-static =
-      let
-        package = pkgs.pkgsStatic.callPackage ./package.nix {
-          craneLib = craneLibFor pkgs.pkgsStatic;
-        };
-      in
-      bombonLib.passthruVendoredSbom.rust package { pkgs = pkgs.pkgsStatic; };
+    nix-store-csi-static = bombonLib.passthruVendoredSbom.rust (pkgs.callPackage ./package.nix {
+      inherit craneLib;
+      static = true;
+    }) { inherit pkgs; };
 
     csi-image =
       withSbom
-        [
-          packages.nix-store-csi-static
-          pkgs.dockerTools.caCertificates
-        ]
+        (
+          [
+            packages.nix-store-csi-static
+            pkgs.dockerTools.caCertificates
+          ]
+          ++ packages.nix-store-csi-static.linkedLibraries
+        )
         (
           pkgs.dockerTools.buildLayeredImage {
             inherit (package) name;

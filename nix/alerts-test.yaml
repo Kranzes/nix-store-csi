@@ -203,6 +203,30 @@ tests:
 
   - interval: 1m
     input_series:
+      - series: nix_store_csi_uncollectable_bytes{instance="node-a"}
+        values: 95x30
+      - series: nix_store_csi_max_store_size_bytes{instance="node-a"}
+        values: 100x30
+      - series: nix_store_csi_uncollectable_bytes{instance="node-b"}
+        values: 50x30
+      - series: nix_store_csi_max_store_size_bytes{instance="node-b"}
+        values: 100x30
+      # No limit.
+      - series: nix_store_csi_uncollectable_bytes{instance="node-c"}
+        values: 95x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NixStoreCsiStoreNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: node-a
+            exp_annotations:
+              summary: What garbage collection can't delete on node-a is at 95% of --max-store-size.
+              description: The plugin refuses a volume that needs a fetch if its closure would go over the limit, so its pod stays in ContainerCreating. Pods whose closures are on the node still start. Raise --max-store-size if the disk has room.
+
+  - interval: 1m
+    input_series:
       - series: nix_store_csi_build_info{instance="node-a", version="0.1.3"}
         values: 1x40
       - series: nix_store_csi_build_info{instance="node-b", version="0.1.3"}

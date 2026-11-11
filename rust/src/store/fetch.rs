@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, bail, ensure};
@@ -98,17 +99,13 @@ impl Store {
         resolved: &AtomicUsize,
     ) -> anyhow::Result<Arc<[StorePath]>> {
         let installs = self.installs.load(Ordering::SeqCst);
-        let closure = self.caches.resolve(roots, resolved).await?;
+        let closure = Arc::new(self.caches.resolve(roots, resolved).await?);
         let total: u64 = closure.values().map(|e| e.info.nar_size()).sum();
         let paths: Arc<[StorePath]> = closure.keys().cloned().collect();
         // Under the guard, a collection either sees the hold or finishes
-        // before this checks the limit and the store for the paths.
-        let (held, missing) = {
+        // before this checks the limits and the store for the paths.
+        let (held, prefetched, missing) = {
             let _gc = self.gc_guard().await;
-            let held = (
-                self.ensuring.hold(&paths),
-                prefetch.then(|| self.prefetched.hold(&paths)),
-            );
             if let Some(limit) = self.max_closure_size.filter(|_| !prefetch) {
                 let counted = (closure.iter())
                     .filter(|(path, _)| !self.prefetched.contains(path))
@@ -123,9 +120,8 @@ impl Store {
                     .into());
                 }
             }
-            let (this, all) = (self.clone(), paths.clone());
-            let missing = tokio::task::spawn_blocking(move || this.touch_present(&all)).await??;
-            (held, missing)
+            let (this, closure, paths) = (self.clone(), closure.clone(), paths.clone());
+            tokio::task::spawn_blocking(move || this.hold(&closure, &paths, prefetch)).await??
         };
         let mut started = 0;
         let fetches: Vec<_> = (missing.iter())
@@ -157,7 +153,7 @@ impl Store {
             start,
             start_bytes: read(&fetches),
             fetches: fetches.clone(),
-            _held: held,
+            _held: (held, prefetched),
         });
         // Returns at the first failure, and the other fetches carry on.
         futures::future::try_join_all(
@@ -200,12 +196,48 @@ impl Store {
         Ok(())
     }
 
-    /// Records a use of the paths the store has, and returns the rest.
-    fn touch_present(&self, paths: &[StorePath]) -> anyhow::Result<Vec<StorePath>> {
+    /// Holds `paths`, the keys of `closure`, records a use of those the store
+    /// has, and returns the holds and the rest. If the store lacks some of
+    /// them, an ensure first checks the closure against `max_store_size`.
+    fn hold(
+        &self,
+        closure: &BTreeMap<StorePath, Arc<Entry>>,
+        paths: &Arc<[StorePath]>,
+        prefetch: bool,
+    ) -> anyhow::Result<(Held, Option<Held>, Vec<StorePath>)> {
         let (present, missing): (Vec<_>, Vec<_>) =
             paths.iter().partition(|path| self.present(path));
+        let limit = self
+            .max_store_size
+            .filter(|_| !prefetch && !missing.is_empty());
+        let turn = (limit.map(|limit| self.check_store_size(closure, limit))).transpose()?;
+        let nar_size = |path: &StorePath| closure[path].info.nar_size();
+        let held = self.ensuring.hold(paths, nar_size);
+        let prefetched = prefetch.then(|| self.prefetched.hold(paths, nar_size));
+        drop(turn);
         self.touch(present)?;
-        Ok(missing.into_iter().cloned().collect())
+        Ok((held, prefetched, missing.into_iter().cloned().collect()))
+    }
+
+    /// Fails with [`StoreTooBig`] if the NARs that garbage collection can't
+    /// delete, with those of `closure`, add up to more than `limit`. Otherwise
+    /// returns a turn to hold until the closure is held.
+    fn check_store_size(
+        &self,
+        closure: &BTreeMap<StorePath, Arc<Entry>>,
+        limit: u64,
+    ) -> anyhow::Result<MutexGuard<'_, ()>> {
+        let turn = self.checking_size.lock().unwrap();
+        let uncollectable = self.uncollectable()?;
+        let size = uncollectable.values().sum();
+        let added = (closure.iter())
+            .filter(|(path, _)| !uncollectable.contains_key(path))
+            .map(|(_, e)| e.info.nar_size())
+            .sum();
+        if size + added > limit {
+            return Err(StoreTooBig { size, added, limit }.into());
+        }
+        Ok(turn)
     }
 
     /// Runs the fetch of `entry`'s path in its own task, so it finishes even
@@ -569,6 +601,29 @@ impl std::fmt::Display for TooBig {
 
 impl std::error::Error for TooBig {}
 
+/// A closure that would take the NARs that garbage collection can't delete
+/// over the store's limit.
+#[derive(Debug)]
+pub struct StoreTooBig {
+    /// The NARs that garbage collection can't delete.
+    pub size: u64,
+    /// The closure's NARs that aren't among them.
+    pub added: u64,
+    pub limit: u64,
+}
+
+impl std::fmt::Display for StoreTooBig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let [size, added, limit] = [self.size, self.added, self.limit].map(ByteSize);
+        write!(
+            f,
+            "garbage collection can't delete {size} of the node store, and the closure adds {added}, over the limit of {limit}"
+        )
+    }
+}
+
+impl std::error::Error for StoreTooBig {}
+
 /// Unpacks the NAR at `dest` as it streams in, with Nix's canonical modes and
 /// modification time, and fails unless its size and hash match. The caller
 /// moves the tree into the store only after that.
@@ -919,6 +974,59 @@ mod tests {
         assert!(err.is::<TooBig>(), "{err:#}");
     }
 
+    /// A closure the store lacks fails before any fetch starts if it would
+    /// take the NARs that garbage collection can't delete over the limit. A
+    /// closure the store has always passes.
+    #[tokio::test]
+    async fn limits_store_size() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let Some((store, hello, hello_paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let warm = fixture_path(&dir, "warm");
+        let warm_paths = store.ensure(std::slice::from_ref(&warm)).done().await;
+        let nar_size = |path: &StorePath| store.nar_size(path);
+        let hello_size: u64 = hello_paths.iter().map(nar_size).sum();
+        let added: u64 = (warm_paths.unwrap().iter())
+            .filter(|p| !hello_paths.contains(p))
+            .map(nar_size)
+            .sum();
+        let limit = hello_size + added - 1;
+        let store = reopen(store, || crate::store::Config {
+            max_store_size: Some(limit),
+            ..zstd_config(&dir, tmp.path())
+        })
+        .await;
+        let ensure = |root: &StorePath| store.ensure(std::slice::from_ref(root));
+
+        let roots = std::slice::from_ref(&hello);
+        (store.guarded_view("v1", roots, &hello_paths, &tmp.path().join("t1"), UNBOUND)).unwrap();
+        ensure(&warm).done().await.unwrap();
+        assert_eq!(store.gauges().uncollectable_size, Some(hello_size));
+
+        unsync(&store, &warm);
+        store.forget(vec![warm.clone()]).await.unwrap();
+        let too_big = async || {
+            let err = ensure(&warm).done().await.unwrap_err();
+            let &StoreTooBig { size, added, limit } = err.downcast_ref().unwrap();
+            assert!(!store.present(&warm));
+            (size, added, limit)
+        };
+        assert_eq!(too_big().await, (hello_size, added, limit));
+        assert_eq!(store.ensuring.paths(), []);
+
+        // A prefetch's closure counts too, until its hold ends.
+        store.guarded_drop_view("v1").unwrap();
+        let mut prefetch = store.prefetch(roots);
+        prefetch.done().await.unwrap();
+        assert_eq!(too_big().await, (hello_size, added, limit));
+        drop(prefetch);
+        ensure(&warm).done().await.unwrap();
+    }
+
     #[tokio::test]
     async fn counts_fetches() {
         let tmp = scratch();
@@ -944,6 +1052,8 @@ mod tests {
         #[allow(clippy::cast_precision_loss)]
         let size = size as f64;
         assert_eq!(metric("store_size_bytes"), Some(size));
+        assert_eq!(metric("uncollectable_bytes"), Some(0.0));
+        assert_eq!(metric("max_store_size_bytes"), None);
         assert_eq!(metric("closures_in_flight"), Some(0.0));
         assert_eq!(metric("unsynced_paths"), Some(0.0));
         assert_eq!(metric("nar_fetches_in_flight"), Some(0.0));

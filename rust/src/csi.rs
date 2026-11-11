@@ -104,7 +104,7 @@ impl Plugin {
             Ok(Ok(names)) => names,
             Ok(Err(e)) => {
                 warn!("{e:#}");
-                let code = if e.is::<store::TooBig>() {
+                let code = if e.is::<store::TooBig>() || e.is::<store::StoreTooBig>() {
                     tonic::Code::ResourceExhausted
                 } else {
                     tonic::Code::Internal

@@ -107,6 +107,33 @@ impl Store {
         Ok(background().install(|| paths.into_par_iter().filter_map(held).collect()))
     }
 
+    /// The NAR size of each store path that garbage collection can't delete:
+    /// those in the views of published volumes, in held closures, and those
+    /// waiting for a sync. It counts a view until collection finds its
+    /// volumes unmounted.
+    pub(super) fn uncollectable(&self) -> anyhow::Result<HashMap<StorePath, u64>> {
+        let mut sizes = self.ensuring.nar_sizes();
+        let unsynced: Vec<_> = self.unsynced.lock().unwrap().keys().cloned().collect();
+        for path in unsynced {
+            (sizes.entry(path)).or_insert_with_key(|path| self.nar_size(path));
+        }
+        for key in self.mounted_views(|_, _| Ok(true))?.0 {
+            match self.view_nar_sizes(&key) {
+                Ok(view) => {
+                    for (path, size) in view.iter() {
+                        sizes.entry(path.clone()).or_insert(*size);
+                    }
+                }
+                // An unpublish moved it to the trash meanwhile.
+                Err(e)
+                    if e.downcast_ref()
+                        .is_some_and(|e: &io::Error| e.kind() == io::ErrorKind::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(sizes)
+    }
+
     /// Returns how many bytes and inodes to free for the store's filesystem
     /// to have `--ensure-free` available.
     pub fn excess(&self) -> io::Result<Excess> {
@@ -664,12 +691,12 @@ mod tests {
             )
             .unwrap();
         let bound = move |v: &Path, t: &Path| Ok(v == view && t == t1);
-        let _fetching = store.ensuring.hold(&[others[0].clone()].into());
+        let _fetching = store.ensuring.hold(&[others[0].clone()].into(), |_| 0);
         // A prefetch holds its closure in both.
         let prefetch: Arc<[_]> = [hello.clone(), others[1].clone()].into();
         let _prefetch = (
-            store.ensuring.hold(&prefetch),
-            store.prefetched.hold(&prefetch),
+            store.ensuring.hold(&prefetch, |_| 0),
+            store.prefetched.hold(&prefetch, |_| 0),
         );
         store.touch([&others[2]]).unwrap();
         let reasons = held(&store, bound.clone());

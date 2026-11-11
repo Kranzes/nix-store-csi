@@ -253,6 +253,16 @@ it, so prefetching a big closure lets pods use it. Once its store paths leave
 store paths in `prefetch` for as long as you may roll back. Many pods with
 different closures can still fill the disk.
 
+`maxStoreSize`, like `200G`, limits the NAR size of what garbage collection
+can't delete: the closures of mounted volumes, of fetches under way and of
+prefetched store paths. The plugin refuses a volume whose closure would take
+that size over the limit before it fetches any of it. The pod's events show the
+limit, that size and what the closure adds. A closure that the node store
+already has always passes, since it takes no more disk space. Mounting it still
+makes it uncollectable if it was only recently used, so that size can go over
+the limit. Until volumes unmount, the plugin then refuses every volume that
+needs a fetch. The `uncollectable_bytes` metric shows that size on each node.
+
 A pod gets only its own closure, on a read-only mount.
 
 To allow the driver's volumes only in some namespaces, list them in
@@ -355,6 +365,8 @@ Every metric starts with `nix_store_csi_`:
 | `cache_paused` | gauge | `cache` |
 | `store_paths` | gauge | |
 | `store_size_bytes` | gauge | |
+| `uncollectable_bytes` | gauge | |
+| `max_store_size_bytes` | gauge | |
 | `unsynced_paths` | gauge | |
 | `failed_syncs_total` | counter | |
 | `views` | gauge | |
@@ -370,7 +382,9 @@ Every metric starts with `nix_store_csi_`:
 
 A publish that is still fetching after 90 seconds counts as `Unavailable`, and
 kubelet's retry counts again. `nar_fetched_bytes_total`,
-`gc_freed_bytes_total` and `store_size_bytes` count uncompressed NAR sizes.
+`gc_freed_bytes_total`, `store_size_bytes` and `uncollectable_bytes` count
+uncompressed NAR sizes. `uncollectable_bytes` is what `maxStoreSize` limits,
+and `max_store_size_bytes` is the limit, missing when there is none.
 `closures_in_flight` counts closures still being fetched, including those
 whose publish already returned `Unavailable`. `free_bytes` and `free_inodes`
 are free on the state dir's filesystem, and `ensure_free_bytes` and
@@ -409,4 +423,5 @@ Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 | `NixStoreCsiSyncErrors` | A sync failed in the last hour. |
 | `NixStoreCsiGcErrors` | Collections fail. |
 | `NixStoreCsiLowSpace` | The filesystem has less free space or inodes than `--ensure-free` keeps, so collection deletes store paths used within `--keep-recent`. |
+| `NixStoreCsiStoreNearLimit` | What garbage collection can't delete is over `ratio`, 90% by default, of `maxStoreSize`, so publishes that need a fetch may fail. |
 | `NixStoreCsiPrefetchBehind` | A node doesn't hold the current revision of its prefetch list. Set `for` above the time a node takes to fetch the list. With `nodePools` it needs the `pool` label. |

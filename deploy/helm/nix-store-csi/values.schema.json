@@ -12,6 +12,16 @@
         "for": { "$ref": "#/definitions/duration" },
         "severity": { "type": "string" }
       }
+    },
+    "ratioAlert": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "for": { "$ref": "#/definitions/duration" },
+        "severity": { "type": "string" },
+        "ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+      }
     }
   },
   "properties": {
@@ -75,6 +85,7 @@
       }
     },
     "maxClosureSize": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?[KMGTkmgt]?)?$" },
+    "maxStoreSize": { "$ref": "#/properties/maxClosureSize" },
     "prefetch": {
       "type": "object",
       "propertyNames": { "pattern": "^storePaths(\\..+)?$" },
@@ -136,20 +147,12 @@
                 "NixStoreCsiDown": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiPublishErrors": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiCacheUnreachable": { "$ref": "#/definitions/alert" },
-                "NixStoreCsiNarFetchErrors": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "for": { "$ref": "#/definitions/duration" },
-                    "severity": { "type": "string" },
-                    "ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
-                  }
-                },
+                "NixStoreCsiNarFetchErrors": { "$ref": "#/definitions/ratioAlert" },
                 "NixStoreCsiSyncStuck": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiSyncErrors": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiGcErrors": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiLowSpace": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiStoreNearLimit": { "$ref": "#/definitions/ratioAlert" },
                 "NixStoreCsiPrefetchBehind": { "$ref": "#/definitions/alert" }
               }
             }

@@ -328,6 +328,18 @@ impl Collector for StoreGauges {
             gauges.store_size,
         )?;
         gauge(
+            "uncollectable",
+            "NAR size of the store objects that garbage collection can't delete",
+            Some(&Unit::Bytes),
+            gauges.uncollectable_size,
+        )?;
+        gauge(
+            "max_store_size",
+            "Limit on the NAR size that garbage collection can't delete, from --max-store-size",
+            Some(&Unit::Bytes),
+            gauges.max_store_size,
+        )?;
+        gauge(
             "unsynced_paths",
             "Fetched store objects that wait for a sync",
             None,

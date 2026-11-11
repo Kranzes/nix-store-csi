@@ -846,7 +846,7 @@
     {
       "type": "timeseries",
       "title": "Store size",
-      "description": "NAR size of the node store, by node.",
+      "description": "NAR size of the node store, and of the part that garbage collection can't delete, by node. --max-store-size limits the second.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -860,6 +860,15 @@
           },
           "expr": "sum by (instance) (nix_store_csi_store_size_bytes{instance=~\"$instance\"})",
           "legendFormat": "{{instance}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance) (nix_store_csi_uncollectable_bytes{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} uncollectable"
         }
       ],
       "fieldConfig": {

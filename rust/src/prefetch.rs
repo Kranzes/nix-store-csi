@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
+use bytesize::ByteSize;
 use futures::StreamExt;
 use harmonia_store_path::StorePath;
 use inotify::{EventStream, Inotify, WatchMask};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, instrument, warn};
 
-use crate::store::{Ensuring, Store};
+use crate::store::{Ensuring, Progress, Store};
 use crate::store_path::{self, Names};
 
 /// The link that kubelet points at the current files of a `ConfigMap`'s volume.
@@ -121,6 +122,17 @@ impl Prefetch {
                 {
                     let elapsed_ms = self.since.elapsed().as_millis();
                     info!(store_paths = %Names(&self.roots), elapsed_ms, "prefetched");
+                    if let (Some(limit), Progress::Fetching { total_bytes, .. }) =
+                        (self.store.max_store_size(), done.progress())
+                        && total_bytes > limit
+                    {
+                        warn!(
+                            store_paths = %Names(&self.roots),
+                            "the closure takes {}, over the --max-store-size of {}, so every publish that needs a fetch fails",
+                            ByteSize(total_bytes),
+                            ByteSize(limit)
+                        );
+                    }
                 }
                 self.held = Some((self.roots.clone(), done));
                 self.report();

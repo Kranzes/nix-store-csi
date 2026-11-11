@@ -147,6 +147,20 @@ impl Store {
         self.trash_view(&key).map(Some)
     }
 
+    /// The NAR size of each store path in the view `key`. Views never change,
+    /// so this reads their narinfos once.
+    pub(super) fn view_nar_sizes(&self, key: &str) -> anyhow::Result<NarSizes> {
+        if let Some(sizes) = self.view_sizes.lock().unwrap().get(key) {
+            return Ok(sizes.clone());
+        }
+        let paths = list_store_paths(&self.views.join(key))?;
+        let sizes: NarSizes = (paths.iter())
+            .map(|path| (path.clone(), self.nar_size(path)))
+            .collect();
+        (self.view_sizes.lock().unwrap()).insert(key.to_owned(), sizes.clone());
+        Ok(sizes)
+    }
+
     /// Moves the view into the trash it returns, so views/ only ever holds
     /// whole views. Records a use of its paths.
     fn trash_view(&self, key: &str) -> anyhow::Result<Scratch> {
@@ -168,7 +182,11 @@ impl Store {
         }
         let view = self.views.join(&key);
         let usage = Usage {
-            bytes: self.measure(&view)?,
+            bytes: self
+                .view_nar_sizes(&key)?
+                .iter()
+                .map(|(_, size)| size)
+                .sum(),
             inodes: count_inodes(&view).with_context(|| format!("reading {}", view.display()))?,
         };
         self.measured.lock().unwrap().insert(key, usage);
@@ -188,6 +206,7 @@ impl Store {
             remove_file(&self.volumes.join(volume))?;
         }
         (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));
+        (self.view_sizes.lock().unwrap()).retain(|key, _| mounted.contains(key));
         for entry in std::fs::read_dir(&self.views)
             .with_context(|| format!("reading {}", self.views.display()))?
         {
@@ -289,6 +308,8 @@ fn link_roots(dir: &Path, links: &BTreeMap<&str, &StorePath>) -> anyhow::Result<
     std::fs::set_permissions(dir, Permissions::from_mode(0o555))?;
     Ok(utimensat(CWD, dir, &CANONICAL_TIME, AtFlags::empty())?)
 }
+
+pub(super) type NarSizes = Arc<[(StorePath, u64)]>;
 
 /// What a view holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -479,6 +500,7 @@ mod tests {
 
         store.prune_views(UNBOUND).await.unwrap();
         assert!(store.measured.lock().unwrap().is_empty());
+        assert!(store.view_sizes.lock().unwrap().is_empty());
     }
 
     /// A kill between creating a record and renaming it into place leaves an

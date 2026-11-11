@@ -43,6 +43,11 @@
   "expr" "nix_store_csi_free_bytes < nix_store_csi_ensure_free_bytes or nix_store_csi_free_inodes < nix_store_csi_ensure_free_inodes"
   "summary" "The node store's filesystem on {{ $labels.instance }} has less free space or inodes than --ensure-free keeps."
   "description" "Collection has no unused store paths older than --keep-recent left to delete, so it deletes those that pods used recently, and they have to be fetched again. Give the state dir more space or lower --ensure-free.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiStoreNearLimit"
+  "expr" (printf "nix_store_csi_uncollectable_bytes / nix_store_csi_max_store_size_bytes > %v" $alerts.NixStoreCsiStoreNearLimit.ratio)
+  "summary" "What garbage collection can't delete on {{ $labels.instance }} is at {{ $value | humanizePercentage }} of --max-store-size."
+  "description" "The plugin refuses a volume that needs a fetch if its closure would go over the limit, so its pod stays in ContainerCreating. Pods whose closures are on the node still start. Raise --max-store-size if the disk has room.") }}
 {{- $lists := dict "" .Values.prefetch }}
 {{- range $pool, $values := .Values.nodePools }}
 {{- $_ := set $lists $pool ($values.prefetch | default dict) }}

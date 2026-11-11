@@ -46,6 +46,11 @@ serviceAccountToken:
 # where G is 1024^3 bytes. Prefetched closures don't count. Empty means no
 # limit.
 maxClosureSize: ""
+# Refuses volumes that need a fetch if the NARs of their closure and those that
+# garbage collection can't delete add up to more than this, like 200G. Those
+# are the closures of mounted volumes, of fetches under way and of prefetched
+# store paths. Empty means no limit.
+maxStoreSize: ""
 # Store paths whose closures every node fetches and keeps, so pods that need
 # them start without a fetch. The keys are those of a volume's attributes:
 #   storePaths.x86_64-linux: /nix/store/<hash>-hello-2.12.3
@@ -133,6 +138,13 @@ metrics:
         enabled: true
         for: 15m
         severity: warning
+      # What garbage collection can't delete is over this share of
+      # --max-store-size, so publishes that need a fetch may fail.
+      NixStoreCsiStoreNearLimit:
+        enabled: true
+        for: 15m
+        severity: warning
+        ratio: 0.9
       # A node doesn't hold the closures of the current prefetch list. Make it
       # longer than a node takes to fetch the list.
       NixStoreCsiPrefetchBehind:

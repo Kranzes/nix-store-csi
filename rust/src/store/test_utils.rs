@@ -37,6 +37,7 @@ pub(crate) fn unsigned_config(cache: &Path, state: &Path) -> Config {
         jobs: 2,
         netrc_file: None,
         max_closure_size: None,
+        max_store_size: None,
         ensure_free: EnsureFree::Bytes(1 << 30),
         measure: true,
     }

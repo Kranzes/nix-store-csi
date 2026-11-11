@@ -30,11 +30,12 @@ use self::fs::{Scratch, remove_file, remove_tree};
 use self::gc::Space;
 use self::holds::Holds;
 use self::sandbox::Sandbox;
+use self::views::NarSizes;
 use crate::closure::Caches;
 use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 
-pub use self::fetch::{Ensuring, TooBig};
+pub use self::fetch::{Ensuring, Progress, StoreTooBig, TooBig};
 pub use self::gc::{EnsureFree, Excess, HeldPath, Reason};
 pub use self::narinfos::Narinfos;
 pub use self::views::{Usage, check_volume, root_links};
@@ -54,8 +55,9 @@ pub struct Config {
     pub jobs: usize,
     /// Credentials for caches whose URLs have none.
     pub netrc_file: Option<PathBuf>,
-    /// The limit of [`Store::ensure`].
+    /// The limits of [`Store::ensure`].
     pub max_closure_size: Option<u64>,
+    pub max_store_size: Option<u64>,
     /// The free space that collection keeps.
     pub ensure_free: EnsureFree,
     /// Whether start-up adds up the NAR sizes in store/ for the `store_size`
@@ -81,6 +83,9 @@ pub struct Store {
     /// What [`Store::usage`] measured, by view key, until no mounted volume
     /// uses the view.
     measured: Mutex<HashMap<String, Usage>>,
+    /// What [`Store::view_nar_sizes`] read, by view key, until no mounted
+    /// volume uses the view.
+    view_sizes: Mutex<HashMap<String, NarSizes>>,
     tmp: PathBuf,
     /// Unpacks NARs into tmp/.
     sandbox: Sandbox,
@@ -88,6 +93,10 @@ pub struct Store {
     jobs: Arc<Semaphore>,
     max_jobs: usize,
     max_closure_size: Option<u64>,
+    max_store_size: Option<u64>,
+    /// Ensures checked against `max_store_size` hold it until they hold their
+    /// closures, so each check sees the closures that earlier checks passed.
+    checking_size: Mutex<()>,
     ensure_free: EnsureFree,
     /// Paths whose narinfos wait for a sync to get their final names, each
     /// with the number of failed syncs when its fetch began writing it. A
@@ -150,6 +159,8 @@ pub struct GcGuard {
 pub struct Gauges {
     pub store_paths: Option<usize>,
     pub store_size: Option<u64>,
+    pub uncollectable_size: Option<u64>,
+    pub max_store_size: Option<u64>,
     pub unsynced_paths: usize,
     pub views: Option<usize>,
     /// The free bytes and inodes on the node store's filesystem, and what
@@ -204,11 +215,14 @@ impl Store {
             generation: AtomicU64::default(),
             building: Mutex::default(),
             measured: Mutex::default(),
+            view_sizes: Mutex::default(),
             sandbox: Sandbox::new(&tmp, config.jobs)?,
             tmp,
             jobs: Arc::new(Semaphore::new(config.jobs)),
             max_jobs: config.jobs,
             max_closure_size: config.max_closure_size,
+            max_store_size: config.max_store_size,
+            checking_size: Mutex::default(),
             ensure_free: config.ensure_free,
             unsynced: Mutex::default(),
             failed_syncs: AtomicU64::default(),
@@ -243,6 +257,10 @@ impl Store {
         &self.metrics
     }
 
+    pub fn max_store_size(&self) -> Option<u64> {
+        self.max_store_size
+    }
+
     pub fn gauges(&self) -> Gauges {
         let entries = |dir: &Path| {
             (std::fs::read_dir(dir).map(Iterator::count))
@@ -252,6 +270,10 @@ impl Store {
         // Inside the struct literal, the guard would hold the lock while a
         // later field reads a directory.
         let unsynced_paths = self.unsynced.lock().unwrap().len();
+        let uncollectable_size = (self.uncollectable())
+            .map(|sizes| sizes.values().sum())
+            .inspect_err(|e| warn!("{e:#}; leaving the uncollectable gauge out"))
+            .ok();
         let space = (Space::of(&self.dir))
             .inspect_err(|e| {
                 warn!("measuring the node store's filesystem: {e}; leaving its gauges out");
@@ -262,6 +284,8 @@ impl Store {
         Gauges {
             store_paths: entries(&self.dir),
             store_size: self.size.as_ref().map(|size| size.load(Ordering::Relaxed)),
+            uncollectable_size,
+            max_store_size: self.max_store_size,
             unsynced_paths,
             views: entries(&self.views),
             free_bytes: space.map(|space| space.free),

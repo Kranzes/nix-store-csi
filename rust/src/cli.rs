@@ -153,6 +153,18 @@ pub enum Command {
             value_parser = parse_size
         )]
         max_closure_size: Option<u64>,
+        /// Refuse a volume that needs a fetch if the NARs of its closure and
+        /// those that garbage collection can't delete add up to more than
+        /// SIZE, like `200G`. Those are the closures of mounted volumes, of
+        /// fetches under way and of prefetched store paths. A closure that the
+        /// node store already has always passes. Off unless set.
+        #[arg(
+            long,
+            value_name = "SIZE",
+            env = "NIX_STORE_CSI_MAX_STORE_SIZE",
+            value_parser = parse_size
+        )]
+        max_store_size: Option<u64>,
         /// Keep the closures of the store paths listed in DIR fetched, even
         /// when `--ensure-free` needs the space. DIR, such as a mounted
         /// `ConfigMap`, holds a file for each volume attribute, `storePaths`

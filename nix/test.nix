@@ -158,6 +158,13 @@ let
       args = [ "${fixtures.warm}" ];
     })
   );
+  # A pod with warm's closure, which --max-store-size refuses.
+  big = writeText "big.json" (
+    builtins.toJSON (pod {
+      name = "big";
+      args = [ "${fixtures.warm}" ];
+    })
+  );
   prefetchWarm = writeText "prefetch.json" (
     builtins.toJSON {
       data = {
@@ -307,6 +314,10 @@ testers.runNixOSTest {
             if line.startswith("nix_store_csi_nar_fetch_duration_seconds_count") and 'result="ok"' in line
         )
 
+    def nar_size(name):
+        """The NAR size of the store path named `name`, from the fixture cache."""
+        return int(machine.succeed(f"sed -n 's/^NarSize: //p' ${fixtures}/cache-zstd/{name[:32]}.narinfo"))
+
     def phase(pod, want):
         try:
             machine.wait_until_succeeds(
@@ -400,12 +411,9 @@ testers.runNixOSTest {
         nix = '.pods[] | select(.podRef.name == "sleep") | .volume[]? | select(.name == "nix")'
         machine.wait_until_succeeds(f"{summary} | ${jq}/bin/jq -e '{nix}'", timeout=180)
         stats = json.loads(machine.succeed(f"{summary} | ${jq}/bin/jq '{nix}'"))
-        nar_size = sum(
-            int(machine.succeed(f"sed -n 's/^NarSize: //p' ${fixtures}/cache-zstd/{name[:32]}.narinfo"))
-            for name in closure
-        )
+        size = sum(map(nar_size, closure))
         inodes = int(machine.succeed(f"find {target} | wc -l"))
-        t.assertEqual([stats[k] for k in ["usedBytes", "capacityBytes", "availableBytes"]], [nar_size, nar_size, 0])
+        t.assertEqual([stats[k] for k in ["usedBytes", "capacityBytes", "availableBytes"]], [size, size, 0])
         t.assertEqual([stats[k] for k in ["inodesUsed", "inodes", "inodesFree"]], [inodes, inodes, 0])
 
     with subtest("a restarted kubelet republishes over another mount at the target"):
@@ -414,6 +422,28 @@ testers.runNixOSTest {
         machine.wait_until_succeeds(f"{volumes} | grep -q ' ro,'", timeout=300)
         machine.succeed(f"[ $({volumes} | wc -l) = 1 ]")
         t.assertEqual(sorted(machine.succeed(f"ls {target}").split()), closure)
+
+    with subtest("the plugin refuses a volume that would take the node store over --max-store-size"):
+        # sleep mounts busybox's closure, which warm references, so warm's
+        # closure adds only warm. The limit is one byte short, and stays set.
+        held = sum(map(nar_size, closure))
+        limit = held + nar_size("${baseNameOf fixtures.warm}") - 1
+        node = "-n kube-system daemonset/nix-store-csi-node"
+        machine.succeed(f"kubectl set env {node} -c nix-store-csi NIX_STORE_CSI_MAX_STORE_SIZE={limit}")
+        machine.succeed(f"kubectl rollout status {node} --timeout=300s")
+        for line in [f"nix_store_csi_max_store_size_bytes {limit}", f"nix_store_csi_uncollectable_bytes {held}"]:
+            machine.wait_until_succeeds(f"${curl}/bin/curl -sf http://127.0.0.1:9809/metrics | grep -qxF '{line}'", timeout=60)
+        machine.succeed("kubectl apply -f ${big}")
+        machine.wait_until_succeeds(
+            "kubectl get events --field-selector involvedObject.name=big -o jsonpath='{.items[*].message}'"
+            " | grep -q 'over the limit of'",
+            timeout=60,
+        )
+        waiting = "kubectl get pod big -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}'"
+        machine.wait_until_succeeds(f"{waiting} | grep -qx ContainerCreating", timeout=30)
+        t.assertEqual(fetches(), 0)
+        machine.succeed("test ! -e /var/lib/nix-store-csi/store/${baseNameOf fixtures.warm}")
+        machine.succeed("kubectl delete pod big --wait")
 
     with subtest("the plugin prefetches the store paths in its ConfigMap as kubelet updates it"):
         def prefetched(revision):
@@ -429,6 +459,8 @@ testers.runNixOSTest {
         machine.wait_until_succeeds(prefetched("warm"), timeout=60)
         # busybox, which warm references, is on the node already.
         t.assertEqual(fetches(), before + 1)
+        # warm's closure is one byte over the limit set above.
+        machine.succeed(f"{plugin} | grep 'over the --max-store-size of' > /dev/null")
 
     with subtest("the plugin fetches a closure from an S3 bucket"):
         machine.wait_for_open_port(9000)

@@ -100,6 +100,9 @@ spec:
             {{- with $.Values.maxClosureSize }}
             - --max-closure-size={{ . }}
             {{- end }}
+            {{- with $.Values.maxStoreSize }}
+            - --max-store-size={{ . }}
+            {{- end }}
             {{- if $.Values.metrics.enabled }}
             # Dual-stack, so Prometheus reaches it on IPv4 and IPv6 pod IPs.
             # The plugin binds 0.0.0.0 instead on nodes without IPv6.

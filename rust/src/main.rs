@@ -107,6 +107,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         jobs: cli.max_substitution_jobs.get(),
         netrc_file: cli.netrc_file,
         max_closure_size: None,
+        max_store_size: None,
         ensure_free: EnsureFree::Bytes(0),
         measure: false,
     };
@@ -121,10 +122,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             metrics_address,
             serve_paths,
             max_closure_size,
+            max_store_size,
             prefetch_dir,
         } => {
             let config = Config {
                 max_closure_size,
+                max_store_size,
                 ensure_free,
                 measure: metrics_address.is_some(),
                 ..config

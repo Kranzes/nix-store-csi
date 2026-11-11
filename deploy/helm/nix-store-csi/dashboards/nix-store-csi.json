@@ -8,7 +8,7 @@
   ],
   "schemaVersion": 39,
   "version": 1,
-  "editable": true,
+  "editable": false,
   "graphTooltip": 1,
   "refresh": "30s",
   "time": {

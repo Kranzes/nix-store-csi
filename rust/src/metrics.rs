@@ -1,12 +1,14 @@
-//! Prometheus metrics, which `csi --metrics-address` serves at `/metrics`.
+//! Prometheus metrics, which `csi --metrics-address` serves at `/metrics`,
+//! and the node store's paths, which it serves at `/paths`.
 
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use harmonia_store_path::StoreDir;
 use http_body_util::Full;
-use hyper::body::{Bytes, Incoming};
+use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, header};
@@ -23,9 +25,11 @@ use prometheus_client::registry::{Registry, Unit};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
-use crate::store::Store;
+use crate::store::{HeldPath, Reason, Store};
 
 const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
+
+const PATHS_CONTENT_TYPE: &str = "application/x-ndjson";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct GrpcLabels {
@@ -403,9 +407,27 @@ pub fn registry(store: &Arc<Store>) -> Registry {
     registry
 }
 
-/// Serves `registry` at `/metrics` to every connection on `listener`.
-pub async fn serve(listener: TcpListener, registry: Registry) {
-    let registry = Arc::new(registry);
+/// What [`serve`] answers with.
+struct Served {
+    registry: Registry,
+    store: Arc<Store>,
+    /// `--keep-recent`, for the `recent` reason, if `--serve-paths` turns
+    /// `/paths` on.
+    keep_recent: Option<Duration>,
+    /// Lets one `/paths` listing run at a time, since each reads every
+    /// narinfo.
+    listing: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Serves the store's metrics at `/metrics` to every connection on
+/// `listener`, and with `keep_recent` its paths at `/paths`.
+pub async fn serve(listener: TcpListener, store: Arc<Store>, keep_recent: Option<Duration>) {
+    let served = Arc::new(Served {
+        registry: registry(&store),
+        store,
+        keep_recent,
+        listing: Arc::default(),
+    });
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -417,9 +439,9 @@ pub async fn serve(listener: TcpListener, registry: Registry) {
                 continue;
             }
         };
-        let registry = registry.clone();
+        let served = served.clone();
         tokio::spawn(async move {
-            let service = service_fn(move |request| respond(request, registry.clone()));
+            let service = service_fn(move |request| respond(request, served.clone()));
             // The timer enforces hyper's default 30 second limit on reading
             // the request head, so idle connections don't pile up.
             if let Err(e) = http1::Builder::new()
@@ -433,31 +455,75 @@ pub async fn serve(listener: TcpListener, registry: Registry) {
     }
 }
 
-async fn respond(
-    request: Request<Incoming>,
-    registry: Arc<Registry>,
+async fn respond<B>(
+    request: Request<B>,
+    served: Arc<Served>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let response = |status, content_type, body: String| {
-        let mut response = Response::new(Full::new(Bytes::from(body)));
+    let response = |status, content_type, body: Bytes| {
+        let mut response = Response::new(Full::new(body));
         *response.status_mut() = status;
         let value = header::HeaderValue::from_static(content_type);
         response.headers_mut().insert(header::CONTENT_TYPE, value);
         Ok(response)
     };
-    if request.uri().path() != "/metrics" {
-        return response(StatusCode::NOT_FOUND, "text/plain", "not found\n".into());
+    // Both read directories, so they run on a blocking thread.
+    let (content_type, encoded) = match (request.uri().path(), served.keep_recent) {
+        ("/metrics", _) => {
+            let encoded = move || Ok(encode(&served.registry)?.into());
+            (CONTENT_TYPE, tokio::task::spawn_blocking(encoded))
+        }
+        ("/paths", Some(keep_recent)) => {
+            // Waiting for the turn would let callers queue without limit.
+            let Ok(turn) = served.listing.clone().try_lock_owned() else {
+                let body = "a listing is already running\n".into();
+                return response(StatusCode::SERVICE_UNAVAILABLE, "text/plain", body);
+            };
+            // The turn lasts until the listing ends, even if the client
+            // leaves.
+            let encoded = move || {
+                let _turn = turn;
+                let paths = served
+                    .store
+                    .held_paths(crate::mounts::is_bound, keep_recent)?;
+                Ok(json_lines(&paths)?.into())
+            };
+            (PATHS_CONTENT_TYPE, tokio::task::spawn_blocking(encoded))
+        }
+        _ => return response(StatusCode::NOT_FOUND, "text/plain", "not found\n".into()),
+    };
+    match encoded.await.map_err(anyhow::Error::from).flatten() {
+        Ok(body) => response(StatusCode::OK, content_type, body),
+        Err(e) => {
+            let path = request.uri().path();
+            warn!("serving {path}: {e:#}");
+            let body = format!("serving {path} failed\n").into();
+            response(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", body)
+        }
     }
-    // Encoding reads directories for the gauges, so it runs on a blocking
-    // thread.
-    let encoded = tokio::task::spawn_blocking(move || encode(&registry)).await;
-    match encoded {
-        Ok(Ok(body)) => response(StatusCode::OK, CONTENT_TYPE, body),
-        _ => response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "text/plain",
-            "encoding the metrics failed\n".into(),
-        ),
+}
+
+/// Encodes `paths` as JSON lines.
+fn json_lines(paths: &[HeldPath]) -> serde_json::Result<Vec<u8>> {
+    #[derive(serde::Serialize)]
+    struct Line {
+        path: String,
+        nar_size: u64,
+        last_use: String,
+        held: Reason,
     }
+    let store_dir = StoreDir::default();
+    let mut body = Vec::new();
+    for path in paths {
+        let line = Line {
+            path: store_dir.display(&path.path).to_string(),
+            nar_size: path.nar_size,
+            last_use: humantime::format_rfc3339_seconds(path.last_use).to_string(),
+            held: path.held,
+        };
+        serde_json::to_writer(&mut body, &line)?;
+        body.push(b'\n');
+    }
+    Ok(body)
 }
 
 fn encode(registry: &Registry) -> Result<String, fmt::Error> {
@@ -468,7 +534,12 @@ fn encode(registry: &Registry) -> Result<String, fmt::Error> {
 
 #[cfg(test)]
 pub mod tests {
+    use std::time::SystemTime;
+
+    use harmonia_store_path::StorePath;
+
     use super::*;
+    use crate::store::test_utils::unsigned_config;
 
     /// The value of `sample`, a metric name with its labels, in `registry`.
     pub fn sample(registry: &Registry, sample: &str) -> Option<f64> {
@@ -476,6 +547,45 @@ pub mod tests {
         text.lines()
             .find_map(|line| line.strip_prefix(sample)?.strip_prefix(' '))
             .map(|value| value.parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn refuses_a_second_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = unsigned_config(tmp.path(), &tmp.path().join("state"));
+        let store = Arc::new(Store::new(config).unwrap());
+        let served = Arc::new(Served {
+            registry: registry(&store),
+            store,
+            keep_recent: Some(Duration::ZERO),
+            listing: Arc::default(),
+        });
+        let paths = || respond(Request::get("/paths").body(()).unwrap(), served.clone());
+        let turn = served.listing.clone().try_lock_owned().unwrap();
+        let busy = paths().await.unwrap();
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(turn);
+        assert_eq!(paths().await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn lists_paths_as_json_lines() {
+        let hash = "0".repeat(32);
+        let path = |name| StorePath::from_base_path(&format!("{hash}-{name}")).unwrap();
+        let held = |name, held| HeldPath {
+            path: path(name),
+            nar_size: 42,
+            last_use: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            held,
+        };
+        let body = json_lines(&[held("a", Reason::Prefetch), held("b", Reason::None)]).unwrap();
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            format!(
+                "{{\"path\":\"/nix/store/{hash}-a\",\"nar_size\":42,\"last_use\":\"2023-11-14T22:13:20Z\",\"held\":\"prefetch\"}}\n\
+                 {{\"path\":\"/nix/store/{hash}-b\",\"nar_size\":42,\"last_use\":\"2023-11-14T22:13:20Z\",\"held\":\"none\"}}\n"
+            )
+        );
     }
 
     #[test]

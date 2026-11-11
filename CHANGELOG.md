@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- With `--serve-paths`, the plugin serves `/paths` on `--metrics-address`, a
+  JSON line for each store path in the node store with its NAR size, last use
+  and why garbage collection keeps it.
+
 ## 0.1.9 - 2026-11-05
 
 ### Changed

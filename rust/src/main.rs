@@ -119,6 +119,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             gc_interval,
             ensure_free,
             metrics_address,
+            serve_paths,
             max_closure_size,
             prefetch_dir,
         } => {
@@ -137,7 +138,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let address = listener.local_addr()?;
                 let url = format!("http://{address}/metrics");
                 info!(%url, "serving metrics");
-                tokio::spawn(metrics::serve(listener, metrics::registry(&store)));
+                let paths = serve_paths.then_some(keep_recent);
+                tokio::spawn(metrics::serve(listener, store.clone(), paths));
             }
             tokio::spawn(collect_garbage(store.clone(), gc_interval, keep_recent));
             if let Some(dir) = prefetch_dir {

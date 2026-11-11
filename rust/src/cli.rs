@@ -138,6 +138,11 @@ pub enum Command {
         /// `[::]:9809`. Off unless set.
         #[arg(long, value_name = "ADDRESS", env = "NIX_STORE_CSI_METRICS_ADDRESS")]
         metrics_address: Option<SocketAddr>,
+        /// Also serve the node store's paths at `/paths` on `--metrics-address`.
+        /// Anyone who can reach the address can read them, and so mount their
+        /// closures.
+        #[arg(long, env = "NIX_STORE_CSI_SERVE_PATHS", requires = "metrics_address")]
+        serve_paths: bool,
         /// Refuse a volume whose closure's NARs add up to more than SIZE, like
         /// `20G`, before fetching any of it. Prefetched closures don't count. Off
         /// unless set.

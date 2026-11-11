@@ -61,6 +61,52 @@ impl Store {
         collected
     }
 
+    /// Lists the store paths in the node store, sorted, with why garbage
+    /// collection keeps each. It reads what garbage collection reads, but
+    /// without holding off publishes, so it may miss a publish that starts
+    /// while it runs.
+    pub fn held_paths(
+        &self,
+        is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
+        keep_recent: Duration,
+    ) -> anyhow::Result<Vec<HeldPath>> {
+        // A publish holds its closure until after it mounts the view. So with
+        // the holds read before the mounts, a publish under way shows up in
+        // one or the other.
+        let prefetched: HashSet<_> = self.prefetched.paths().into_iter().collect();
+        let mut fetching: HashSet<_> = self.ensuring.paths().into_iter().collect();
+        fetching.extend(self.unsynced.lock().unwrap().keys().cloned());
+        let mounted = self.view_paths(&self.mounted_views(is_bound)?.0)?;
+        let mut paths = list_store_paths(&self.dir)?;
+        paths.sort_unstable();
+        let held = |path: StorePath| {
+            let last_use = self.last_use(&path);
+            let held = if mounted.contains(&path) {
+                Reason::Mounted
+            } else if prefetched.contains(&path) {
+                Reason::Prefetch
+            } else if fetching.contains(&path) {
+                Reason::Fetching
+            } else if !old(last_use, keep_recent) {
+                Reason::Recent
+            } else {
+                Reason::None
+            };
+            let nar_size = self.nar_size(&path);
+            // Garbage collection deleted it after the listing of store/. It
+            // moves a path out before its narinfo, so a path still here had a
+            // narinfo for the reads above.
+            self.present(&path).then_some(HeldPath {
+                path,
+                nar_size,
+                last_use,
+                held,
+            })
+        };
+        // Off the global pool, which publishes use to build views.
+        Ok(background().install(|| paths.into_par_iter().filter_map(held).collect()))
+    }
+
     /// Returns how many bytes and inodes to free for the store's filesystem
     /// to have `--ensure-free` available.
     pub fn excess(&self) -> io::Result<Excess> {
@@ -115,7 +161,7 @@ impl Store {
         excess: Excess,
         inodes: &HashMap<StorePath, u64>,
     ) -> anyhow::Result<usize> {
-        let old = |used: SystemTime| used.elapsed().unwrap_or_default() >= keep_recent;
+        let old = |used| old(used, keep_recent);
         // Deleting a path frees every inode in its store object, and one more
         // for its narinfo. Store objects share no inodes, and a view that
         // links one either keeps it in use or is deleted in the same
@@ -211,6 +257,38 @@ impl Store {
         let paths = list_store_paths(&self.dir)?;
         Ok(background().install(|| paths.into_par_iter().map(count).collect()))
     }
+}
+
+/// Whether a path last used at `used` is past `keep_recent`.
+fn old(used: SystemTime, keep_recent: Duration) -> bool {
+    used.elapsed().unwrap_or_default() >= keep_recent
+}
+
+/// A store path in the node store, from [`Store::held_paths`].
+#[derive(Debug)]
+pub struct HeldPath {
+    pub path: StorePath,
+    pub nar_size: u64,
+    pub last_use: SystemTime,
+    pub held: Reason,
+}
+
+/// Why garbage collection keeps a store path. A path with more than one
+/// reason gets the first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reason {
+    /// A mounted volume's view links it.
+    Mounted,
+    /// It is in the prefetch list's closures.
+    Prefetch,
+    /// A publish holds it in its closure, or it waits for a sync.
+    Fetching,
+    /// A pod used it within `--keep-recent`, so only `--ensure-free` deletes
+    /// it.
+    Recent,
+    /// The next garbage collection deletes it.
+    None,
 }
 
 /// How much to free on the state dir's filesystem to meet `--ensure-free`.
@@ -551,6 +629,70 @@ mod tests {
         drop(ensuring);
         settled(&store).await;
         assert_eq!(collect().await.unwrap(), paths.len());
+    }
+
+    /// Each path gets the first reason that garbage collection spares it for,
+    /// and garbage collection deletes the paths listed as `none`.
+    #[tokio::test]
+    async fn lists_held_paths() {
+        const DAY: Duration = Duration::from_hours(24);
+        fn held(
+            store: &Store,
+            is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
+        ) -> Vec<(StorePath, Reason)> {
+            let listed = store.held_paths(is_bound, DAY);
+            let listed: Vec<_> = (listed.unwrap().into_iter())
+                .map(|p| (p.path, p.held))
+                .collect();
+            assert!(listed.iter().map(|(path, _)| path).is_sorted());
+            listed
+        }
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let others: Vec<_> = paths.iter().filter(|&p| *p != hello).cloned().collect();
+        age(&store, &paths, 2);
+        let t1 = tmp.path().join("t1");
+        let view = store
+            .guarded_view(
+                "v1",
+                std::slice::from_ref(&hello),
+                std::slice::from_ref(&hello),
+                &t1,
+                UNBOUND,
+            )
+            .unwrap();
+        let bound = move |v: &Path, t: &Path| Ok(v == view && t == t1);
+        let _fetching = store.ensuring.hold(&[others[0].clone()].into());
+        // A prefetch holds its closure in both.
+        let prefetch: Arc<[_]> = [hello.clone(), others[1].clone()].into();
+        let _prefetch = (
+            store.ensuring.hold(&prefetch),
+            store.prefetched.hold(&prefetch),
+        );
+        store.touch([&others[2]]).unwrap();
+        let reasons = held(&store, bound.clone());
+        let reason = |path| reasons.iter().find(|(p, _)| p == path).unwrap().1;
+        assert_eq!(reasons.len(), paths.len());
+        assert_eq!(reason(&hello), Reason::Mounted);
+        assert_eq!(reason(&others[0]), Reason::Fetching);
+        assert_eq!(reason(&others[1]), Reason::Prefetch);
+        assert_eq!(reason(&others[2]), Reason::Recent);
+        assert_eq!(reason(&others[3]), Reason::None);
+        // Unmounted, hello is still prefetched.
+        assert!(held(&store, UNBOUND).contains(&(hello.clone(), Reason::Prefetch)));
+
+        assert_eq!(store.collect(bound.clone(), DAY, NONE).await.unwrap(), 1);
+        assert!(!store.present(&others[3]));
+        // A path waiting for its sync counts as fetching.
+        unsync(&store, &others[2]);
+        assert!(held(&store, bound).contains(&(others[2].clone(), Reason::Fetching)));
+        // The listing skips a view that an unpublish moves away meanwhile.
+        let views = tmp.path().join("views");
+        std::fs::rename(&views, tmp.path().join("tmp/views")).unwrap();
+        std::fs::create_dir(&views).unwrap();
+        assert!(held(&store, |_, _| Ok(true)).contains(&(hello, Reason::Prefetch)));
     }
 
     /// A path whose sync hasn't run yet is in the store like any other.

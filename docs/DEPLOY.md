@@ -235,6 +235,10 @@ of any store path that the configured caches serve. That includes private
 caches that the plugin reaches with the netrc Secret or a service account
 token.
 
+Knowing a store path is enough to mount its closure. `/paths` lists every
+store path on a node to anyone who can reach the metrics port, so
+`--serve-paths` is off by default.
+
 Pods can ask for store paths whose closures are any size. A node fetches the
 closure of every pod it runs, and the fetch goes on after the pod is gone.
 Collection can't delete store paths that a fetch or a mounted view holds, so
@@ -376,6 +380,21 @@ failed sync deletes the store paths it covered and counts in
 `failed_syncs_total`.
 `prefetched` is 1 once the node store holds the closures of that revision of
 the `prefetch` list for the node's system.
+
+With `--serve-paths` in `extraArgs`, the same port also serves `/paths`, a
+JSON line for each store path in the node store, so a cache operator can see
+what nodes still need:
+
+```json
+{"path":"/nix/store/<hash>-hello-2.12.3","nar_size":274712,"last_use":"2026-11-11T09:30:00Z","held":"mounted"}
+```
+
+`last_use` is when a publish, prefetch or unpublish last used the path.
+`held` is the first reason garbage collection keeps the path: `mounted` in a
+volume, `prefetch` in the `prefetch` list's closures, `fetching` for a publish
+or a pending sync, `recent` for a use within `--keep-recent`, or `none`. The
+next garbage collection deletes the `none` paths, and `recent` ones too if
+`--ensure-free` needs the space.
 
 Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 `severity`:

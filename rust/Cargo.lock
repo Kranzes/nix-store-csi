@@ -1719,6 +1719,7 @@ dependencies = [
  "rust-netrc",
  "rustix",
  "serde",
+ "serde_json",
  "socket2",
  "tempfile",
  "tokio",

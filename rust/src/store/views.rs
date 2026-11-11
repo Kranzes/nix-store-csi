@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::Permissions;
 use std::io;
@@ -181,37 +181,60 @@ impl Store {
         trash: &mut Vec<Scratch>,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
     ) -> anyhow::Result<HashSet<StorePath>> {
-        let mut mounted = HashSet::new();
+        let (mounted, unmounted) = self.mounted_views(is_bound)?;
+        for volume in unmounted {
+            // A reboot drops the mounts without kubelet unpublishing them.
+            info!(volume = %volume.display(), "forgetting a volume that is not mounted");
+            remove_file(&self.volumes.join(volume))?;
+        }
+        (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));
+        for entry in std::fs::read_dir(&self.views)
+            .with_context(|| format!("reading {}", self.views.display()))?
+        {
+            let key = entry?.file_name().to_string_lossy().into_owned();
+            if !mounted.contains(&key) {
+                trash.push(self.trash_view(&key)?);
+            }
+        }
+        self.view_paths(&mounted)
+    }
+
+    /// Returns the store paths that the views named by `keys` hold. It skips
+    /// a view that is gone, like one an unpublish moved to the trash.
+    pub(super) fn view_paths(&self, keys: &HashSet<String>) -> anyhow::Result<HashSet<StorePath>> {
+        let mut paths = HashSet::new();
+        for key in keys {
+            match list_store_paths(&self.views.join(key)) {
+                Ok(linked) => paths.extend(linked),
+                Err(e)
+                    if e.downcast_ref()
+                        .is_some_and(|e: &io::Error| e.kind() == io::ErrorKind::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Reads the volumes' records. Returns the keys of the views that mounted
+    /// volumes use, and the other volumes. It changes nothing, so it can run
+    /// alongside publishes.
+    pub(super) fn mounted_views(
+        &self,
+        is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<(HashSet<String>, Vec<OsString>)> {
+        let (mut mounted, mut unmounted) = (HashSet::new(), Vec::new());
         for entry in std::fs::read_dir(&self.volumes)
             .with_context(|| format!("reading {}", self.volumes.display()))?
         {
             let entry = entry?;
-            let record = entry.path();
-            if let Some(volume) = Volume::read(&record)?
-                && is_bound(&self.views.join(&volume.key), &volume.target)?
-            {
-                mounted.insert(volume.key);
-                continue;
-            }
-            // A reboot drops the mounts without kubelet unpublishing them.
-            let volume = entry.file_name();
-            info!(volume = %volume.display(), "forgetting a volume that is not mounted");
-            remove_file(&record)?;
-        }
-        (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));
-        let mut in_use = HashSet::new();
-        for entry in std::fs::read_dir(&self.views)
-            .with_context(|| format!("reading {}", self.views.display()))?
-        {
-            let entry = entry?;
-            let key = entry.file_name().to_string_lossy().into_owned();
-            if mounted.contains(&key) {
-                in_use.extend(list_store_paths(&entry.path())?);
-            } else {
-                trash.push(self.trash_view(&key)?);
+            match Volume::read(&entry.path())? {
+                Some(volume) if is_bound(&self.views.join(&volume.key), &volume.target)? => {
+                    mounted.insert(volume.key);
+                }
+                _ => unmounted.push(entry.file_name()),
             }
         }
-        Ok(in_use)
+        Ok((mounted, unmounted))
     }
 
     /// The newest generation of the views in views/.
@@ -298,7 +321,7 @@ impl Volume {
         };
         Ok(Some(Self {
             key: String::from_utf8_lossy(&bytes[..newline]).into_owned(),
-            target: std::ffi::OsString::from_vec(bytes[newline + 1..].to_vec()).into(),
+            target: OsString::from_vec(bytes[newline + 1..].to_vec()).into(),
         }))
     }
 

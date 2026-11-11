@@ -35,7 +35,7 @@ use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 
 pub use self::fetch::{Ensuring, TooBig};
-pub use self::gc::{EnsureFree, Excess};
+pub use self::gc::{EnsureFree, Excess, HeldPath, Reason};
 pub use self::narinfos::Narinfos;
 pub use self::views::{Usage, check_volume, root_links};
 

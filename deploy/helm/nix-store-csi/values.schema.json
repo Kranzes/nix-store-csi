@@ -77,6 +77,13 @@
     },
     "netrcSecret": { "type": "string" },
     "s3CredentialsSecret": { "type": "string" },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
     "serviceAccountToken": {
       "type": "object",
       "additionalProperties": false,

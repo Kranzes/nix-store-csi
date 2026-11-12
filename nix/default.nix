@@ -188,7 +188,8 @@ rec {
         ''
           export HOME=$TMPDIR
           helm lint --strict ${chartSrc}
-          helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc,s3CredentialsSecret=s3
+          helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc,s3CredentialsSecret=s3 \
+            --set-json 'serviceAccount.annotations={"eks.amazonaws.com/role-arn":"arn:aws:iam::111122223333:role/nix-store-csi"}'
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true,metrics.prometheusRule.enabled=true
           # The alerts' rules, with each kind of alert.
           rendered() {

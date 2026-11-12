@@ -77,9 +77,10 @@ credentials.
 #### AWS
 
 The plugin takes its credentials from EKS Pod Identity, IRSA, the keys in
-`s3CredentialsSecret`, or the node's instance role. With Pod Identity, give the
-plugin's ServiceAccount, which the chart names after the release, a role that
-can `s3:GetObject` on the bucket. Without `s3:ListBucket`, S3 answers 403
+`s3CredentialsSecret`, or the node's instance role. With Pod Identity or IRSA,
+give the plugin's ServiceAccount, which the chart names after the release, a
+role that can `s3:GetObject` on the bucket. For IRSA, put the role's ARN in
+`serviceAccount.annotations`, as below. Without `s3:ListBucket`, S3 answers 403
 `AccessDenied` for a missing file, which the plugin treats like a 404. Other
 403 codes, like `SignatureDoesNotMatch`, are errors, so the plugin skips the
 file for a minute, and the whole cache once a second file fails.
@@ -92,6 +93,9 @@ substituters:
 trustedPublicKeys:
   - my-cache-1:<key>
   - cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<role>
 ```
 
 #### GCS

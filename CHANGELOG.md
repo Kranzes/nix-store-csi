@@ -16,6 +16,8 @@
   size panel plots the uncollectable size, and the `NixStoreCsiStoreNearLimit`
   alert fires at 90% of the limit. The plugin warns when the NARs of the
   prefetch list's closure add up to more than the limit.
+- The chart's `serviceAccount.annotations` sets annotations on the plugin's
+  ServiceAccount, like `eks.amazonaws.com/role-arn` for IRSA.
 
 ## 0.1.9 - 2026-11-05
 

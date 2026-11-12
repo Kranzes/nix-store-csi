@@ -6,14 +6,16 @@
 
 - With `--serve-paths`, the plugin serves `/paths` on `--metrics-address`, a
   JSON line for each store path in the node store with its NAR size, last use
-  and why garbage collection keeps it.
+  and why garbage collection keeps it. It answers 503 while a listing is
+  already running.
 - `--max-store-size` and the chart's `maxStoreSize` refuse a volume that needs
   a fetch if the NARs of its closure and those that garbage collection can't
   delete add up to more than the limit. The `nix_store_csi_uncollectable_bytes`
   metric shows what garbage collection can't delete, and
   `nix_store_csi_max_store_size_bytes` shows the limit. The dashboard's Store
   size panel plots the uncollectable size, and the `NixStoreCsiStoreNearLimit`
-  alert fires at 90% of the limit.
+  alert fires at 90% of the limit. The plugin warns when the NARs of the
+  prefetch list's closure add up to more than the limit.
 
 ## 0.1.9 - 2026-11-05
 

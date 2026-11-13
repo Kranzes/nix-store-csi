@@ -314,6 +314,11 @@ testers.runNixOSTest {
             if line.startswith("nix_store_csi_nar_fetch_duration_seconds_count") and 'result="ok"' in line
         )
 
+    def metric(sample):
+        """The sum of the plugin's metrics whose lines start with `sample`."""
+        metrics = machine.succeed("${curl}/bin/curl -sf http://127.0.0.1:9809/metrics").splitlines()
+        return sum(float(line.split()[-1]) for line in metrics if line.startswith(sample))
+
     def nar_size(name):
         """The NAR size of the store path named `name`, from the fixture cache."""
         return int(machine.succeed(f"sed -n 's/^NarSize: //p' ${fixtures}/cache-zstd/{name[:32]}.narinfo"))
@@ -365,17 +370,10 @@ testers.runNixOSTest {
         )
 
     with subtest("the plugin counts the publishes and fetches in its metrics"):
-        metrics = machine.succeed("${curl}/bin/curl -sf http://127.0.0.1:9809/metrics").splitlines()
         machine.succeed("${curl}/bin/curl -sf 'http://[::1]:9809/metrics'")
-        def value(sample):
-            return sum(float(line.split()[-1]) for line in metrics if line.startswith(sample))
-        t.assertGreater(value('nix_store_csi_publish_duration_seconds_count{grpc_code="OK"}'), 0)
-        t.assertGreater(value('nix_store_csi_publish_duration_seconds_count{grpc_code="InvalidArgument"}'), 0)
-        fetched = [line for line in metrics if line.startswith("nix_store_csi_nar_fetch_duration_seconds_count")]
-        t.assertEqual(
-            sum(float(line.split()[-1]) for line in fetched if 'result="ok"' in line),
-            float(machine.succeed("wc -l < ${podsClosure}")),
-        )
+        t.assertGreater(metric('nix_store_csi_publish_duration_seconds_count{grpc_code="OK",fetched="true"}'), 0)
+        t.assertGreater(metric('nix_store_csi_publish_duration_seconds_count{grpc_code="InvalidArgument",fetched="false"}'), 0)
+        t.assertEqual(fetches(), int(machine.succeed("wc -l < ${podsClosure}")))
 
     with subtest("kubelet unpublishes hello's volume once hello exits"):
         machine.wait_until_succeeds(f"[ $({volumes} | wc -l) = 1 ]", timeout=60)
@@ -479,6 +477,9 @@ testers.runNixOSTest {
         machine.succeed("kubectl apply -f ${offline}")
         phase("offline", "Running")
         t.assertEqual(fetches(), 0)
+        published = 'nix_store_csi_publish_duration_seconds_count{grpc_code="OK",fetched='
+        t.assertGreater(metric(published + '"false"}'), 0)
+        t.assertEqual(metric(published + '"true"}'), 0)
 
     with subtest("a pod whose closure the plugin prefetched starts while the cache is down"):
         machine.succeed("kubectl apply -f ${warm}")

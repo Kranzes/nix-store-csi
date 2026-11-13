@@ -27,11 +27,14 @@ tests:
 
   - interval: 1m
     input_series:
-      - series: nix_store_csi_publish_duration_seconds_count{instance="node-a", grpc_code="Internal"}
+      # One alert for node-a, whichever fetched label the errors have.
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-a", grpc_code="Internal", fetched="false"}
         values: 0+1x40
-      - series: nix_store_csi_publish_duration_seconds_count{instance="node-b", grpc_code="Internal"}
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-a", grpc_code="Internal", fetched="true"}
+        values: 0+1x40
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-b", grpc_code="Internal", fetched="true"}
         values: 0x40
-      - series: nix_store_csi_publish_duration_seconds_count{instance="node-b", grpc_code="Unavailable"}
+      - series: nix_store_csi_publish_duration_seconds_count{instance="node-b", grpc_code="Unavailable", fetched="true"}
         values: 0+1x40
     alert_rule_test:
       - eval_time: 35m

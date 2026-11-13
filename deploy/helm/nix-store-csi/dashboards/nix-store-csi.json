@@ -441,7 +441,7 @@
     {
       "type": "timeseries",
       "title": "Publish time",
-      "description": "Time from NodePublishVolume to a mounted volume, for publishes that succeeded. Fetching the closure is most of it.",
+      "description": "Time from NodePublishVolume to a mounted volume, for publishes that succeeded. On node means the node store already had the closure, and fetched means the publish waited for a fetch. A fetch that takes longer than 90 seconds shows up as retries of 90 seconds or less.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -453,8 +453,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\"}))",
-          "legendFormat": "p50"
+          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}))",
+          "legendFormat": "p50 on node"
         },
         {
           "refId": "B",
@@ -462,19 +462,40 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\"}))",
-          "legendFormat": "p95"
+          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}))",
+          "legendFormat": "p95 on node"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}))",
+          "legendFormat": "p50 fetched"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}))",
+          "legendFormat": "p95 fetched"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "min": 0,
           "custom": {
             "fillOpacity": 10,
             "showPoints": "never",
             "stacking": {
               "mode": "none"
+            },
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
             }
           }
         },

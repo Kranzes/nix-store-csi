@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- `nix_store_csi_publish_duration_seconds` has a `fetched` label, `true` for a
+  publish that waited for a fetch or retried after `Unavailable`, and `false`
+  for one whose closure the node store already had. It separates the time the
+  plugin takes to mount a closure from the time caches take to serve it. The
+  dashboard's Publish time panel plots the two apart, on a log scale.
+
 ### Fixed
 
 - The chart accepts `s3://` substituters. Its values schema allowed only

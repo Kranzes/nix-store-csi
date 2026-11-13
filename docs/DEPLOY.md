@@ -360,7 +360,7 @@ Every metric starts with `nix_store_csi_`:
 
 | Metric | Type | Labels |
 |---|---|---|
-| `publish_duration_seconds` | histogram | `grpc_code` |
+| `publish_duration_seconds` | histogram | `grpc_code`, `fetched` |
 | `unpublish_duration_seconds` | histogram | `grpc_code` |
 | `closures_in_flight` | gauge | |
 | `nar_fetch_duration_seconds` | histogram | `cache`, `result` |
@@ -385,7 +385,9 @@ Every metric starts with `nix_store_csi_`:
 | `build_info` | gauge | `version` |
 
 A publish that is still fetching after 90 seconds counts as `Unavailable`, and
-kubelet's retry counts again. `nar_fetched_bytes_total`,
+kubelet's retry counts again. `fetched` is `true` for a publish that waited
+for a fetch or retried after `Unavailable`, and `false` for one whose closure
+the node store already had. `nar_fetched_bytes_total`,
 `gc_freed_bytes_total`, `store_size_bytes` and `uncollectable_bytes` count
 uncompressed NAR sizes. `uncollectable_bytes` is what `maxStoreSize` limits,
 and `max_store_size_bytes` is the limit, missing when there is none.

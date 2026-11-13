@@ -14,7 +14,9 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, header};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use prometheus_client::collector::Collector;
-use prometheus_client::encoding::{DescriptorEncoder, EncodeLabelSet, EncodeMetric, text};
+use prometheus_client::encoding::{
+    DescriptorEncoder, EncodeLabel, EncodeLabelSet, EncodeMetric, LabelSetEncoder, text,
+};
 use prometheus_client::metrics::MetricType;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -31,9 +33,21 @@ const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset
 
 const PATHS_CONTENT_TYPE: &str = "application/x-ndjson";
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct GrpcLabels {
+/// The labels of a publish or an unpublish. Only publishes have `fetched`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct CallLabels {
     grpc_code: &'static str,
+    fetched: Option<bool>,
+}
+
+impl EncodeLabelSet for CallLabels {
+    fn encode(&self, encoder: &mut LabelSetEncoder) -> fmt::Result {
+        EncodeLabel::encode(&("grpc_code", self.grpc_code), encoder.encode_label())?;
+        match self.fetched {
+            Some(fetched) => EncodeLabel::encode(&("fetched", fetched), encoder.encode_label()),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -67,8 +81,8 @@ type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
 /// The metrics that the plugin updates as it works. [`StoreGauges`] reads the
 /// others from the store at each scrape.
 pub struct Metrics {
-    publishes: Histograms<GrpcLabels>,
-    unpublishes: Histograms<GrpcLabels>,
+    publishes: Histograms<CallLabels>,
+    unpublishes: Histograms<CallLabels>,
     nar_fetches: Histograms<FetchLabels>,
     nar_bytes: Family<CacheLabels, Counter>,
     collections: Histograms<ResultLabels>,
@@ -106,9 +120,18 @@ impl Metrics {
     /// Creates the label sets that the plugin is sure to use, so they read 0
     /// before their first event instead of missing.
     pub fn init<'a>(&self, caches: impl IntoIterator<Item = &'a url::Url>) {
-        for calls in [&self.publishes, &self.unpublishes] {
-            let _ = calls.get_or_create(&GrpcLabels { grpc_code: "OK" });
+        for fetched in [Some(false), Some(true)] {
+            let ok = CallLabels {
+                grpc_code: "OK",
+                fetched,
+            };
+            let _ = self.publishes.get_or_create(&ok);
         }
+        let ok = CallLabels {
+            grpc_code: "OK",
+            fetched: None,
+        };
+        let _ = self.unpublishes.get_or_create(&ok);
         for cache in caches {
             let cache = cache.to_string();
             for result in ["ok", "error"] {
@@ -124,14 +147,15 @@ impl Metrics {
         }
     }
 
-    /// Times a `NodePublishVolume` call.
+    /// Times a `NodePublishVolume` call, which counts as one that didn't
+    /// wait for a fetch unless [`Call::fetched`] says it did.
     pub fn publish(&self) -> Call<'_> {
-        Call::new(&self.publishes)
+        Call::new(&self.publishes, Some(false))
     }
 
     /// Times a `NodeUnpublishVolume` call.
     pub fn unpublish(&self) -> Call<'_> {
-        Call::new(&self.unpublishes)
+        Call::new(&self.unpublishes, None)
     }
 
     /// Counts one try at fetching a NAR of `size` bytes from `cache`.
@@ -180,7 +204,7 @@ impl Metrics {
     fn register(&self, registry: &mut Registry) {
         registry.register_with_unit(
             "publish_duration",
-            "NodePublishVolume calls, by gRPC status code",
+            "NodePublishVolume calls, by gRPC status code and whether they waited for a fetch",
             Unit::Seconds,
             self.publishes.clone(),
         );
@@ -235,22 +259,30 @@ impl Metrics {
 /// A call being timed. It counts as `Canceled` if dropped before
 /// [`Call::finish`], which tonic does to a call whose deadline passed.
 pub struct Call<'a> {
-    family: &'a Histograms<GrpcLabels>,
+    family: &'a Histograms<CallLabels>,
     started: Instant,
-    grpc_code: &'static str,
+    labels: CallLabels,
 }
 
 impl<'a> Call<'a> {
-    fn new(family: &'a Histograms<GrpcLabels>) -> Self {
+    fn new(family: &'a Histograms<CallLabels>, fetched: Option<bool>) -> Self {
         Self {
             family,
             started: Instant::now(),
-            grpc_code: grpc_code_name(tonic::Code::Cancelled),
+            labels: CallLabels {
+                grpc_code: grpc_code_name(tonic::Code::Cancelled),
+                fetched,
+            },
         }
     }
 
+    /// Records that the publish waited for a fetch.
+    pub fn fetched(&mut self) {
+        self.labels.fetched = Some(true);
+    }
+
     pub fn finish<T>(mut self, result: &Result<T, tonic::Status>) {
-        self.grpc_code = match result {
+        self.labels.grpc_code = match result {
             Ok(_) => "OK",
             Err(status) => grpc_code_name(status.code()),
         };
@@ -259,10 +291,7 @@ impl<'a> Call<'a> {
 
 impl Drop for Call<'_> {
     fn drop(&mut self) {
-        let labels = GrpcLabels {
-            grpc_code: self.grpc_code,
-        };
-        (self.family.get_or_create(&labels)).observe(self.started.elapsed().as_secs_f64());
+        (self.family.get_or_create(&self.labels)).observe(self.started.elapsed().as_secs_f64());
     }
 }
 

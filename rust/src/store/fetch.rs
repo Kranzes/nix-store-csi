@@ -484,6 +484,12 @@ impl Ensuring {
         (&mut self.result).await?
     }
 
+    /// Whether the store had the whole closure, so the ensure started or
+    /// joined no fetch.
+    pub fn had_closure(&self) -> bool {
+        (self.progress.get()).is_some_and(|f| f.fetches.is_empty())
+    }
+
     pub fn progress(&self) -> Progress {
         let Some(f) = self.progress.get() else {
             return Progress::Resolving {
@@ -889,6 +895,7 @@ mod tests {
         let mut ensuring = store.ensure(std::slice::from_ref(&hello));
         let paths = ensuring.done().await.unwrap();
         assert_eq!(paths.len(), 5);
+        assert!(!ensuring.had_closure());
         let Progress::Fetching {
             bytes,
             total_bytes,
@@ -920,7 +927,9 @@ mod tests {
         let _ = info.check_signatures(&[]);
         let stored = std::fs::read(store.narinfos.synced(&hello)).unwrap();
         assert_eq!(stored, info.to_text());
-        assert_eq!(store.ensure(&[hello]).done().await.unwrap().len(), 5);
+        let mut ensuring = store.ensure(&[hello]);
+        assert_eq!(ensuring.done().await.unwrap().len(), 5);
+        assert!(ensuring.had_closure());
     }
 
     /// A closure over the limit fails before any fetch starts. The paths the
@@ -1041,8 +1050,13 @@ mod tests {
         assert_eq!(metric(&count), Some(fetched));
         let failed = count.replace("\"ok\"", "\"error\"");
         assert_eq!(metric(&failed), Some(0.0));
-        let published = "publish_duration_seconds_count{grpc_code=\"OK\"}";
-        assert_eq!(metric(published), Some(0.0));
+        for fetched in ["false", "true"] {
+            let published =
+                format!("publish_duration_seconds_count{{grpc_code=\"OK\",fetched=\"{fetched}\"}}");
+            assert_eq!(metric(&published), Some(0.0));
+        }
+        let unpublished = "unpublish_duration_seconds_count{grpc_code=\"OK\"}";
+        assert_eq!(metric(unpublished), Some(0.0));
         let bytes = format!("nar_fetched_bytes_total{{cache=\"{cache}\"}}");
         assert!(metric(&bytes).unwrap() > 0.0);
         assert_eq!(metric("store_paths"), Some(fetched));
@@ -1111,6 +1125,7 @@ mod tests {
         drop(jobs);
         assert_eq!(a.done().await.unwrap().len(), a_fetches.len());
         assert_eq!(b.done().await.unwrap().len(), b_fetches.len());
+        assert!(!b.had_closure());
         // Each fetch leaves the map when it ends, so a later failure starts
         // a new one.
         assert!(store.fetching.lock().unwrap().is_empty());

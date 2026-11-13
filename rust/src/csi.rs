@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
 
+use crate::metrics::Call;
 use crate::mounts;
 use crate::store::{self, GcGuard, Store};
 use crate::store_path::{self, Names, STORE_PATHS, system};
@@ -44,10 +45,16 @@ pub struct Plugin {
     /// Calls for a volume take turns. A publish that kubelet gave up on keeps
     /// running and keeps its turn.
     volumes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// When kubelet first asked to publish each volume that still waits for
-    /// its closure.
-    waiting: Mutex<HashMap<String, Instant>>,
+    /// The volumes that still wait for their closures.
+    waiting: Mutex<HashMap<String, Waiting>>,
     shutdown: CancellationToken,
+}
+
+struct Waiting {
+    /// When kubelet first asked to publish the volume.
+    since: Instant,
+    /// Whether a publish gave up waiting for the closure.
+    timed_out: bool,
 }
 
 impl Plugin {
@@ -71,6 +78,7 @@ impl Plugin {
     async fn publish(
         &self,
         request: NodePublishVolumeRequest,
+        call: &mut Call<'_>,
     ) -> Result<NodePublishVolumeResponse, Status> {
         check_request(&request.volume_id, &request.target_path)?;
         // The container runtime binds the target into the container again, and
@@ -86,12 +94,16 @@ impl Plugin {
         }
         store::root_links(&roots).map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
 
-        let started = {
+        let (started, timed_out) = {
             let mut waiting = self.waiting.lock().unwrap();
             // Kubelet stops retrying when the pod goes away, or when a publish
             // fails for good, which would leave its entry here.
-            waiting.retain(|_, started| started.elapsed() < Duration::from_hours(24));
-            *(waiting.entry(request.volume_id.clone())).or_insert_with(Instant::now)
+            waiting.retain(|_, w| w.since.elapsed() < Duration::from_hours(24));
+            let w = (waiting.entry(request.volume_id.clone())).or_insert_with(|| Waiting {
+                since: Instant::now(),
+                timed_out: false,
+            });
+            (w.since, w.timed_out)
         };
         let mut ensuring = self.store.ensure(&roots);
         let done = tokio::select! {
@@ -100,6 +112,11 @@ impl Plugin {
                 return Err(Status::unavailable("the plugin is shutting down"));
             }
         };
+        // Retries after a publish that gave up count too, even if the fetches
+        // ended in between.
+        if timed_out || !ensuring.had_closure() {
+            call.fetched();
+        }
         let names = match done {
             Ok(Ok(names)) => names,
             Ok(Err(e)) => {
@@ -112,6 +129,9 @@ impl Plugin {
                 return Err(Status::new(code, format!("{e:#}")));
             }
             Err(_) => {
+                if let Some(w) = self.waiting.lock().unwrap().get_mut(&request.volume_id) {
+                    w.timed_out = true;
+                }
                 // Kubelet puts this message in the pod's events.
                 let msg = format!("still {}", ensuring.progress());
                 info!("{msg}");
@@ -252,8 +272,8 @@ impl Node for Plugin {
         &self,
         request: Request<NodePublishVolumeRequest>,
     ) -> Result<Response<NodePublishVolumeResponse>, Status> {
-        let call = self.store.metrics().publish();
-        let result = self.publish(request.into_inner()).await;
+        let mut call = self.store.metrics().publish();
+        let result = self.publish(request.into_inner(), &mut call).await;
         call.finish(&result);
         result.map(Response::new)
     }

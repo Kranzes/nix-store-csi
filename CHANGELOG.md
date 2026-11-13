@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The chart accepts `s3://` substituters. Its values schema allowed only
+  `http(s)://` and `file://`, so Helm refused the install.
+
 ## 0.1.10 - 2026-11-12
 
 ### Added

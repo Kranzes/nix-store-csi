@@ -1,7 +1,6 @@
 //! Prometheus metrics, which `csi --metrics-address` serves at `/metrics`,
 //! and the node store's paths, which it serves at `/paths`.
 
-use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,10 +8,7 @@ use std::time::{Duration, Instant};
 use harmonia_store_path::StoreDir;
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode, header};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper::{Request, Response, StatusCode};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{
     DescriptorEncoder, EncodeLabel, EncodeLabelSet, EncodeMetric, LabelSetEncoder, text,
@@ -25,8 +21,9 @@ use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::{Registry, Unit};
 use tokio::net::TcpListener;
-use tracing::{debug, warn};
+use tracing::warn;
 
+use crate::http::{self, response};
 use crate::store::{HeldPath, Reason, Store};
 
 const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
@@ -475,75 +472,53 @@ pub async fn serve(listener: TcpListener, store: Arc<Store>, keep_recent: Option
         keep_recent,
         listing: Arc::default(),
     });
-    loop {
-        let stream = match listener.accept().await {
-            Ok((stream, _)) => stream,
-            Err(e) => {
-                // Errors here, such as running out of file descriptors, would
-                // recur on an immediate retry.
-                warn!("accepting a metrics connection: {e}; retrying in 1s");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
-        let served = served.clone();
-        tokio::spawn(async move {
-            let service = service_fn(move |request| respond(request, served.clone()));
-            // The timer enforces hyper's default 30 second limit on reading
-            // the request head, so idle connections don't pile up.
-            if let Err(e) = http1::Builder::new()
-                .timer(TokioTimer::new())
-                .serve_connection(TokioIo::new(stream), service)
-                .await
-            {
-                debug!("serving metrics: {e}");
-            }
-        });
-    }
+    http::serve(listener, "metrics", move |request| {
+        respond(request, served.clone())
+    })
+    .await;
 }
 
-async fn respond<B>(
-    request: Request<B>,
-    served: Arc<Served>,
-) -> Result<Response<Full<Bytes>>, Infallible> {
-    let response = |status, content_type, body: Bytes| {
-        let mut response = Response::new(Full::new(body));
-        *response.status_mut() = status;
-        let value = header::HeaderValue::from_static(content_type);
-        response.headers_mut().insert(header::CONTENT_TYPE, value);
-        Ok(response)
-    };
-    // Both read directories, so they run on a blocking thread.
-    let (content_type, encoded) = match (request.uri().path(), served.keep_recent) {
+async fn respond<B>(request: Request<B>, served: Arc<Served>) -> Response<Full<Bytes>> {
+    let path = request.uri().path();
+    match (path, served.keep_recent) {
         ("/metrics", _) => {
+            let served = served.clone();
             let encoded = move || Ok(encode(&served.registry)?.into());
-            (CONTENT_TYPE, tokio::task::spawn_blocking(encoded))
+            answer(path, CONTENT_TYPE, encoded).await
         }
         ("/paths", Some(keep_recent)) => {
             // Waiting for the turn would let callers queue without limit.
             let Ok(turn) = served.listing.clone().try_lock_owned() else {
-                let body = "a listing is already running\n".into();
+                let body = "a listing is already running\n";
                 return response(StatusCode::SERVICE_UNAVAILABLE, "text/plain", body);
             };
+            let store = served.store.clone();
             // The turn lasts until the listing ends, even if the client
             // leaves.
             let encoded = move || {
                 let _turn = turn;
-                let paths = served
-                    .store
-                    .held_paths(crate::mounts::is_bound, keep_recent)?;
+                let paths = store.held_paths(crate::mounts::is_bound, keep_recent)?;
                 Ok(json_lines(&paths)?.into())
             };
-            (PATHS_CONTENT_TYPE, tokio::task::spawn_blocking(encoded))
+            answer(path, PATHS_CONTENT_TYPE, encoded).await
         }
-        _ => return response(StatusCode::NOT_FOUND, "text/plain", "not found\n".into()),
-    };
-    match encoded.await.map_err(anyhow::Error::from).flatten() {
+        _ => response(StatusCode::NOT_FOUND, "text/plain", "not found\n"),
+    }
+}
+
+/// Answers `path` with the body that `encode` returns. It reads directories,
+/// so it runs on a blocking thread.
+async fn answer(
+    path: &str,
+    content_type: &'static str,
+    encode: impl FnOnce() -> anyhow::Result<Bytes> + Send + 'static,
+) -> Response<Full<Bytes>> {
+    let encoded = tokio::task::spawn_blocking(encode).await;
+    match encoded.map_err(anyhow::Error::from).flatten() {
         Ok(body) => response(StatusCode::OK, content_type, body),
         Err(e) => {
-            let path = request.uri().path();
             warn!("serving {path}: {e:#}");
-            let body = format!("serving {path} failed\n").into();
+            let body = format!("serving {path} failed\n");
             response(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", body)
         }
     }
@@ -609,10 +584,9 @@ pub mod tests {
         });
         let paths = || respond(Request::get("/paths").body(()).unwrap(), served.clone());
         let turn = served.listing.clone().try_lock_owned().unwrap();
-        let busy = paths().await.unwrap();
-        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(paths().await.status(), StatusCode::SERVICE_UNAVAILABLE);
         drop(turn);
-        assert_eq!(paths().await.unwrap().status(), StatusCode::OK);
+        assert_eq!(paths().await.status(), StatusCode::OK);
     }
 
     #[test]

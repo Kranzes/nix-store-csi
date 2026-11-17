@@ -1,16 +1,13 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use bytesize::ByteSize;
 use clap::Parser;
 use rustix::fs::Mode;
-use rustix::io::Errno;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit, umask};
-use tokio::net::{TcpListener, TcpSocket, UnixListener};
+use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_stream::wrappers::UnixListenerStream;
@@ -27,6 +24,7 @@ use crate::store::{Config, EnsureFree, Excess, Store};
 mod cli;
 mod closure;
 mod csi;
+mod http;
 mod metrics;
 mod mounts;
 mod narinfo;
@@ -135,7 +133,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let store = Arc::new(Store::new(config)?);
             store.prune_views(mounts::is_bound).await?;
             if let Some(address) = metrics_address {
-                let listener = listen(address)
+                let listener = http::listen(address)
                     .await
                     .with_context(|| format!("listening on {address} for metrics"))?;
                 let address = listener.local_addr()?;
@@ -160,13 +158,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 async fn unpack(config: Config, roots: &[String], dry_run: bool) -> anyhow::Result<()> {
     let roots = store_path::roots(roots.iter().map(String::as_str))?;
     if dry_run {
-        let caches = Caches::new(
-            &config.stores,
-            config.trusted_keys,
-            None,
-            config.netrc_file.as_deref(),
-        )?;
-        let closure = caches.resolve(&roots, &AtomicUsize::default()).await?;
+        let closure = caches(config)?.closure(&roots).await?;
         println!("{}", closure_size(closure.values().map(|e| &e.info)));
         return Ok(());
     }
@@ -184,28 +176,24 @@ async fn unpack(config: Config, roots: &[String], dry_run: bool) -> anyhow::Resu
     Ok(())
 }
 
-/// Binds `address`. An IPv6 address takes IPv4 too, whatever
-/// `net.ipv6.bindv6only` says. A kernel booted with `ipv6.disable=1` has no
-/// IPv6 sockets, so there `[::]` falls back to `0.0.0.0`.
-async fn listen(address: SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = match address {
-        SocketAddr::V4(_) => return TcpListener::bind(address).await,
-        SocketAddr::V6(_) => TcpSocket::new_v6(),
-    };
-    let socket = match socket {
-        Err(e)
-            if address.ip() == Ipv6Addr::UNSPECIFIED
-                && e.raw_os_error() == Some(Errno::AFNOSUPPORT.raw_os_error()) =>
-        {
-            return TcpListener::bind((Ipv4Addr::UNSPECIFIED, address.port())).await;
+/// The caches of `config`, without a node store.
+fn caches(config: Config) -> anyhow::Result<Caches> {
+    let netrc = config.netrc_file.as_deref();
+    Caches::new(&config.stores, config.trusted_keys, None, netrc)
+}
+
+/// Resolves on the first SIGTERM or SIGINT. As PID 1 in a container, the
+/// process would ignore SIGTERM without a handler.
+fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
+    let mut term = signal(SignalKind::terminate()).context("handling SIGTERM")?;
+    let mut int = signal(SignalKind::interrupt()).context("handling SIGINT")?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
         }
-        socket => socket?,
-    };
-    socket2::SockRef::from(&socket).set_only_v6(false)?;
-    // Like `TcpListener::bind`, so a restart can bind during TIME_WAIT.
-    socket.set_reuseaddr(true)?;
-    socket.bind(address)?;
-    socket.listen(1024)
+        info!("shutting down");
+    })
 }
 
 /// Raises the soft limit on open files to the hard one. Containers often get
@@ -275,16 +263,11 @@ async fn serve(endpoint: &str, plugin: Arc<Plugin>) -> anyhow::Result<()> {
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("listening on {}", socket.display()))?;
     info!(socket = %socket.display(), "serving the CSI plugin");
-    let mut term = signal(SignalKind::terminate()).context("handling SIGTERM")?;
-    let mut int = signal(SignalKind::interrupt()).context("handling SIGINT")?;
+    let shutdown = shutdown_signal()?;
     let shutdown = {
         let plugin = plugin.clone();
         async move {
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = int.recv() => {}
-            }
-            info!("shutting down");
+            shutdown.await;
             plugin.shut_down();
         }
     };
@@ -322,19 +305,5 @@ mod tests {
             size.starts_with("1 store path (") && !size.contains("download"),
             "{size}"
         );
-    }
-
-    /// The chart serves metrics on `[::]`, which has to take IPv4 too. The
-    /// default `net.ipv6.bindv6only=0` allows that even without the socket
-    /// option, so this catches a regression only on a host or in a network
-    /// namespace with `net.ipv6.bindv6only=1`.
-    #[tokio::test]
-    async fn listens_on_ipv4_too() {
-        let listener = listen("[::]:0".parse().unwrap()).await.unwrap();
-        assert!(!socket2::SockRef::from(&listener).only_v6().unwrap());
-        let port = listener.local_addr().unwrap().port();
-        tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-            .await
-            .unwrap();
     }
 }

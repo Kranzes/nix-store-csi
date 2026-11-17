@@ -264,6 +264,14 @@ impl Caches {
         Ok(found)
     }
 
+    /// [`Caches::resolve`] without the count.
+    pub async fn closure(
+        &self,
+        roots: &[StorePath],
+    ) -> anyhow::Result<BTreeMap<StorePath, Arc<Entry>>> {
+        self.resolve(roots, &AtomicUsize::default()).await
+    }
+
     /// Finds another cache for `entry` after its NAR fails. It looks only in
     /// the caches not `tried` yet. The closure came from `entry`'s references,
     /// so it accepts only a narinfo with the same references.
@@ -581,16 +589,6 @@ mod tests {
     fn with_local(stores: &[String], trusted_key: Option<&str>, local: &Path) -> Caches {
         let keys = trusted_key.map(|k| vec![k.parse().unwrap()]);
         Caches::new(stores, keys, Some(Narinfos::new(local.to_owned())), None).unwrap()
-    }
-
-    impl Caches {
-        /// [`Caches::resolve`] without the count.
-        pub(crate) async fn closure(
-            &self,
-            roots: &[StorePath],
-        ) -> anyhow::Result<BTreeMap<StorePath, Arc<Entry>>> {
-            self.resolve(roots, &AtomicUsize::default()).await
-        }
     }
 
     async fn resolve_err(caches: &Caches, roots: &[StorePath]) -> String {

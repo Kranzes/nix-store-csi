@@ -10,11 +10,6 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{- /* Changes with a prefetch list, so a rollout can wait for every node plugin to hold it. */}}
-{{- define "nix-store-csi.prefetchRevision" -}}
-{{ toJson . | sha256sum | trunc 12 }}
-{{- end }}
-
 {{- /*
 Node selector terms for the nodes that match none of a list of node selectors.
 A node is outside a selector if one of its labels differs, and NotIn also

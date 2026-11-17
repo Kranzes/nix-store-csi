@@ -153,8 +153,8 @@ metrics:
         for: 15m
         severity: warning
         ratio: 0.9
-      # A node doesn't hold the closures of the current prefetch list. Make it
-      # longer than a node takes to fetch the list.
+      # A node doesn't hold the closure of a prefetch list as it is now. Make it
+      # longer than a node takes to fetch a list.
       NixStoreCsiPrefetchBehind:
         enabled: true
         for: 30m

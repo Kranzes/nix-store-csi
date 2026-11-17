@@ -67,13 +67,15 @@ struct CacheLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct RevisionLabels {
-    revision: String,
+struct ListLabels {
+    list: String,
+    hash: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct BuildLabels {
     version: &'static str,
+    system: String,
 }
 
 type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
@@ -89,7 +91,7 @@ pub struct Metrics {
     deleted_paths: Counter,
     freed_bytes: Counter,
     failed_syncs: Counter,
-    prefetched: Family<RevisionLabels, Gauge>,
+    prefetched: Family<ListLabels, Gauge>,
 }
 
 impl Default for Metrics {
@@ -191,14 +193,17 @@ impl Metrics {
         self.failed_syncs.inc();
     }
 
-    /// Reports whether the node store holds the closures of revision
-    /// `revision` of the prefetch list.
-    pub fn prefetched(&self, revision: &str, held: bool) {
+    /// Reports each prefetch list by name and hash, and whether the node store
+    /// holds its closure.
+    pub fn prefetched(&self, lists: &[(&str, &str, bool)]) {
         self.prefetched.clear();
-        let labels = RevisionLabels {
-            revision: revision.to_owned(),
-        };
-        self.prefetched.get_or_create(&labels).set(i64::from(held));
+        for &(list, hash, held) in lists {
+            let labels = ListLabels {
+                list: list.to_owned(),
+                hash: hash.to_owned(),
+            };
+            self.prefetched.get_or_create(&labels).set(i64::from(held));
+        }
     }
 
     fn register(&self, registry: &mut Registry) {
@@ -250,7 +255,7 @@ impl Metrics {
         );
         registry.register(
             "prefetched",
-            "Whether the node store holds the closures of a revision of the prefetch list",
+            "Whether the node store holds the closure of a prefetch list, by its name and the hash of its file",
             self.prefetched.clone(),
         );
     }
@@ -437,9 +442,10 @@ pub fn registry(store: &Arc<Store>) -> Registry {
     store.metrics().register(&mut registry);
     registry.register(
         "build",
-        "The running version",
+        "The running version, and the Nix system of the node",
         Info::new(BuildLabels {
             version: env!("CARGO_PKG_VERSION"),
+            system: crate::store_path::system(),
         }),
     );
     registry.register_collector(Box::new(StoreGauges {

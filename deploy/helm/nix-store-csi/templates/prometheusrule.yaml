@@ -53,20 +53,44 @@
 {{- $_ := set $lists $pool ($values.prefetch | default dict) }}
 {{- end }}
 {{- range $pool, $prefetch := $lists }}
-{{- if $prefetch }}
-{{- $revision := include "nix-store-csi.prefetchRevision" $prefetch }}
-{{- $selector := "" }}
+{{- $systems := list }}
+{{- range $key, $_ := $prefetch }}
+{{- if hasPrefix "storePaths." $key }}
+{{- $systems = append $systems (index (splitList "." $key) 1) }}
+{{- end }}
+{{- end }}
+{{- range $key, $value := $prefetch }}
+{{- $matchers := list }}
 {{- if $.Values.nodePools }}
-{{- $selector = printf "{pool=%q}" $pool }}
+{{- $matchers = append $matchers (printf "pool=%q" $pool) }}
+{{- end }}
+{{- $name := "" }}
+{{- if hasPrefix "storePaths." $key }}
+{{- $system := index (splitList "." $key) 1 }}
+{{- $matchers = append $matchers (printf "system=%q" $system) }}
+{{- $name = trimPrefix (printf "storePaths.%s" $system) $key | trimPrefix "." }}
+{{- else if $systems }}
+{{- /* Nodes of a system with a key of its own don't read storePaths. */}}
+{{- $matchers = append $matchers (printf "system!~%q" (join "|" (uniq $systems))) }}
+{{- end }}
+{{- $selector := "" }}
+{{- with $matchers }}
+{{- $selector = printf "{%s}" (join ", " .) }}
+{{- end }}
+{{- $hash := sha256sum $value | trunc 12 }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiPrefetchBehind"
+  "expr" (printf "nix_store_csi_build_info%s unless on (instance) nix_store_csi_prefetched{list=%q, hash=%q}" $selector $name $hash)
+  "labels" (dict "list" $name "hash" $hash)
+  "summary" (printf "{{ $labels.instance }} hasn't read the prefetch list %s at hash %s." $key $hash)
+  "description" "Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.") }}
+{{- end }}
 {{- end }}
 {{- $rules = append $rules (dict
   "alert" "NixStoreCsiPrefetchBehind"
-  "expr" (printf "nix_store_csi_build_info%s unless on (instance) nix_store_csi_prefetched{revision=%q} == 1" $selector $revision)
-  "labels" (dict "revision" $revision)
-  "summary" (printf "{{ $labels.instance }} doesn't hold revision %s of its prefetch list." $revision)
-  "description" "The node may not have read the new list yet, or its fetch may fail. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows each node's revision.") }}
-{{- end }}
-{{- end }}
+  "expr" "nix_store_csi_prefetched == 0"
+  "summary" "{{ $labels.instance }} doesn't hold its prefetch list{{ with $labels.list }} {{ . }}{{ end }} at hash {{ $labels.hash }}."
+  "description" "The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.") }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

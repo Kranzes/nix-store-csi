@@ -168,13 +168,14 @@ prefetch:
 ```
 
 A node prefetches the store paths of every key for its system, or if there is
-none, of `storePaths`.
+none, of `storePaths`. It fetches each key's list on its own, so a list with a
+typo or a store path that no cache has doesn't stop the others.
 
 - Garbage collection keeps prefetched closures even when `--ensure-free` needs
-  the space, so keep the list small enough to fit next to what pods use.
-- If a list can't be read or fetched, the plugin logs a warning and tries
-  again a minute later. Until then it keeps the closures it last fetched for
-  every list.
+  the space, so keep the lists small enough to fit next to what pods use.
+- If the plugin can't read or fetch a list, it logs a warning that names the
+  list's file and tries again a minute later. Until then it keeps the closures
+  it last fetched for that list.
 
 For a rollout:
 
@@ -182,13 +183,12 @@ For a rollout:
    With [manifests.nix](../deploy/manifests.nix), pass its `prefetch` output
    as a values file. It replaces the lists for the systems its store paths are
    built for.
-2. Wait until every node plugin holds the new list. The chart puts a
-   `revision` of the list in its ConfigMap. With `metrics.enabled`, the
-   chart's notes print it and a Prometheus query that returns nothing once
-   every node plugin holds that revision:
+2. Wait until every node plugin holds the new list. With `metrics.enabled`,
+   the chart's notes print this Prometheus query, which returns nothing once
+   every node plugin that reads a list holds it:
 
    ```promql
-   nix_store_csi_build_info unless on (instance) nix_store_csi_prefetched{revision="<revision>"} == 1
+   nix_store_csi_build_info{system="x86_64-linux"} unless on (instance) nix_store_csi_prefetched{list="web", hash="<hash>"} == 1
    ```
 
    The query can't see a node plugin that Prometheus doesn't scrape, so check
@@ -204,6 +204,21 @@ prefetch is already fetching downloads only once. Waiting has two benefits. If
 a store path is missing from the caches or has no trusted signature, the
 prefetch fails while the old pods still run, and no new pods wait in
 `ContainerCreating`. Also, no step of the rolling update waits for a fetch.
+
+Each node plugin reports a series for each list it reads. Its `list` label is
+the key's name after the system, empty for `storePaths.<system>` and
+`storePaths`. Its `hash` label is the first 12 hex digits of the SHA-256 of
+the key's value, so an owner who sets its key outside the chart can wait for
+it too:
+
+```sh
+kubectl -n <namespace> get configmap <release>-prefetch \
+  -o jsonpath='{.data.storePaths\.x86_64-linux\.web}' | sha256sum | head -c 12
+```
+
+`build_info`'s `system` label keeps the query to the nodes that read the
+list. For `storePaths`, select the systems without keys of their own, as in
+`system!~"x86_64-linux|aarch64-linux"`.
 
 ### Node pools
 
@@ -240,12 +255,11 @@ nodePools:
   with the other pool's. The node store stays, and mounted volumes keep
   working.
 
-Each list has its own revision. The chart's PodMonitor puts the pool's name in
-a `pool` label, which is empty outside the pools. The chart's notes print a
-query for each list:
+The chart's PodMonitor puts the pool's name in a `pool` label, which is empty
+outside the pools, and the chart's notes add it to the query:
 
 ```promql
-nix_store_csi_build_info{pool="gpu"} unless on (instance) nix_store_csi_prefetched{revision="<revision>"} == 1
+nix_store_csi_build_info{pool="gpu", system="x86_64-linux"} unless on (instance) nix_store_csi_prefetched{list="", hash="<hash>"} == 1
 ```
 
 Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
@@ -401,8 +415,8 @@ Every metric starts with `nix_store_csi_`:
 | `gc_duration_seconds` | histogram | `result` |
 | `gc_deleted_paths_total` | counter | |
 | `gc_freed_bytes_total` | counter | |
-| `prefetched` | gauge | `revision` |
-| `build_info` | gauge | `version` |
+| `prefetched` | gauge | `list`, `hash` |
+| `build_info` | gauge | `version`, `system` |
 
 A publish that is still fetching after 90 seconds counts as `Unavailable`, and
 kubelet's retry counts again. `fetched` is `true` for a publish that waited
@@ -418,8 +432,8 @@ are free on the state dir's filesystem, and `ensure_free_bytes` and
 gauges are missing on a filesystem with no limit on inodes, like btrfs. A
 failed sync deletes the store paths it covered and counts in
 `failed_syncs_total`.
-`prefetched` is 1 once the node store holds the closures of that revision of
-the `prefetch` list for the node's system.
+`prefetched` is 1 once the node store holds the closure of the list with that
+name and hash. `system` is the node's Nix system.
 
 With `--serve-paths` in `extraArgs`, the same port also serves `/paths`, a
 JSON line for each store path in the node store, so a cache operator can see
@@ -450,4 +464,4 @@ Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 | `NixStoreCsiGcErrors` | Collections fail. |
 | `NixStoreCsiLowSpace` | The filesystem has less free space or inodes than `--ensure-free` keeps, so collection deletes store paths used within `--keep-recent`. |
 | `NixStoreCsiStoreNearLimit` | What garbage collection can't delete is over `ratio`, 90% by default, of `maxStoreSize`, so publishes that need a fetch may fail. |
-| `NixStoreCsiPrefetchBehind` | A node doesn't hold the current revision of its prefetch list. Set `for` above the time a node takes to fetch the list. With `nodePools` it needs the `pool` label. |
+| `NixStoreCsiPrefetchBehind` | A node doesn't hold the current version of a prefetch list that it reads. One rule fires for a list that a node has read but doesn't hold. For each list that the chart renders, another fires while a node hasn't read its current version. A list that others add has no such rule, so no rule sees a node still on its old hash. Set `for` above the time a node takes to fetch a list. With `nodePools`, the rules for the chart's lists need the `pool` label. |

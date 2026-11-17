@@ -1084,9 +1084,11 @@ mod tests {
             metric(&format!("cache_paused{{cache=\"{cache}\"}}")),
             Some(0.0)
         );
-        let version = env!("CARGO_PKG_VERSION");
+        let (version, system) = (env!("CARGO_PKG_VERSION"), crate::store_path::system());
         assert_eq!(
-            metric(&format!("build_info{{version=\"{version}\"}}")),
+            metric(&format!(
+                "build_info{{version=\"{version}\",system=\"{system}\"}}"
+            )),
             Some(1.0)
         );
     }

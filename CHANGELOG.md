@@ -7,7 +7,21 @@
 - `--prefetch-dir` and the chart's `prefetch` value also take lists named
   `storePaths.<system>.<name>`, so values files or other owners of the
   ConfigMap can each keep their own. A node prefetches every list for its
-  system, or if there is none, `storePaths`.
+  system, or if there is none, `storePaths`. It fetches each list on its own,
+  so one that fails doesn't stop the others.
+- `nix_store_csi_build_info` has a `system` label, the node's Nix system.
+
+### Changed
+
+- Breaking: `nix_store_csi_prefetched` drops its `revision` label. It has a
+  series for each prefetch list, with `list` and `hash` labels, so an owner
+  can wait for its own list. The plugin ignores a `revision` file in
+  `--prefetch-dir`, and the chart's prefetch ConfigMaps lose their `revision`
+  key. Queries, dashboards and alerts outside the chart that select `revision`
+  need the new labels, and the chart's notes print the new rollout query.
+  `NixStoreCsiPrefetchBehind` fires for a list that a node has read but
+  doesn't hold, and for a list that the chart renders while a node hasn't read
+  its current version.
 
 ## 0.1.11 - 2026-11-13
 

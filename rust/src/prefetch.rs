@@ -11,33 +11,42 @@ use std::time::Instant;
 use anyhow::Context;
 use bytesize::ByteSize;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use harmonia_store_path::StorePath;
+use harmonia_utils_hash::{Algorithm, HashFormat};
 use inotify::{EventStream, Inotify, WatchMask};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, instrument, warn};
 
-use crate::store::{Ensuring, Progress, Store};
+use crate::store::{Ensuring, Store};
 use crate::store_path::{self, Names, STORE_PATHS};
 
 /// The link that kubelet points at the current files of a `ConfigMap`'s volume.
 const DATA: &str = "..data";
 
-/// The file that names the list's revision, like a hash of its contents.
-const REVISION: &str = "revision";
-
 pub struct Prefetch {
     store: Arc<Store>,
     dir: PathBuf,
     system: String,
-    /// The list's `revision` file, which the metrics report.
-    revision: String,
-    /// The store paths that `dir` lists for `system`, sorted.
+    /// The lists that `dir` holds for `system`, by file name.
+    lists: BTreeMap<String, List>,
+}
+
+/// A file of store paths. Each has its own ensure, so one that fails doesn't
+/// stop the others.
+struct List {
+    /// The file's [`hash`], which the metrics report.
+    hash: String,
+    /// The store paths in the file, sorted, or if it doesn't parse, those read
+    /// before.
     roots: Vec<StorePath>,
+    /// Whether `roots` are those of the file as it is now.
+    parsed: bool,
     /// When `roots` last changed.
     since: Instant,
-    /// The last ensure that succeeded, and its list. Until a new list succeeds
-    /// or the list empties, collection spares its closure, and volumes don't
-    /// count it towards the limit.
+    /// The last ensure that succeeded, and its store paths. Until a new list
+    /// succeeds, the list empties or its file goes, collection spares its
+    /// closure, and volumes don't count it towards the limit.
     held: Option<(Vec<StorePath>, Ensuring)>,
     running: Option<Ensuring>,
 }
@@ -48,17 +57,14 @@ impl Prefetch {
             store,
             dir,
             system: store_path::system(),
-            revision: String::new(),
-            roots: Vec::new(),
-            since: Instant::now(),
-            held: None,
-            running: None,
+            lists: BTreeMap::new(),
         }
     }
 
-    /// Reads `dir` when it changes and every minute, and ensures the closure
-    /// again each time. That fetches what a failed sync deleted, and counts as
-    /// a use, so a closure that leaves the list stays for `--keep-recent`.
+    /// Reads `dir` when it changes and every minute, and ensures each list's
+    /// closure again each time. That fetches what a failed sync deleted, and
+    /// counts as a use, so a closure that leaves the lists stays for
+    /// `--keep-recent`.
     #[instrument(name = "prefetch", skip_all)]
     pub async fn run(mut self) {
         let mut ticks = tokio::time::interval(crate::MINUTE);
@@ -81,108 +87,177 @@ impl Prefetch {
         }
     }
 
-    /// Reads the list again, and starts an ensure of it unless one is running.
+    /// Reads the lists again, and starts an ensure of each unless one is
+    /// running.
     fn tick(&mut self) {
-        match self.read_list() {
-            Ok(Some((revision, roots))) => {
-                if roots != self.roots {
-                    info!(store_paths = %Names(&roots), "prefetching");
-                    if roots.is_empty() {
-                        self.held = None;
-                    }
-                    self.roots = roots;
-                    self.since = Instant::now();
-                    // An ensure of the old list carries on in its own task.
-                    self.running = None;
+        match self.read_lists() {
+            Ok(Some(files)) => {
+                self.lists.retain(|file, _| files.contains_key(file));
+                for (file, text) in files {
+                    let path = self.dir.join(&file);
+                    (self.lists.entry(file).or_insert_with(List::new)).read(&path, &text);
                 }
-                self.revision = revision;
                 self.report();
             }
             Ok(None) => {}
-            Err(e) => warn!("{e:#}; prefetching the list read before"),
+            Err(e) => warn!("{e:#}; prefetching the lists read before"),
         }
-        if self.running.is_none() && !self.roots.is_empty() {
-            self.running = Some(self.store.prefetch(&self.roots));
+        for list in self.lists.values_mut() {
+            if list.running.is_none() && !list.roots.is_empty() {
+                list.running = Some(self.store.prefetch(&list.roots));
+            }
         }
     }
 
-    /// Waits for the running ensure, and keeps it if it succeeded.
+    /// Waits for the first running ensure to end, and keeps it if it
+    /// succeeded.
     async fn finish(&mut self) {
-        let Some(running) = &mut self.running else {
+        let mut running: FuturesUnordered<_> = (self.lists.iter_mut())
+            .filter_map(|(file, list)| {
+                let running = list.running.as_mut()?;
+                Some(async move {
+                    let result = running.done().await;
+                    (file.clone(), result)
+                })
+            })
+            .collect();
+        let Some((file, result)) = running.next().await else {
             return std::future::pending().await;
         };
-        let result = running.done().await;
-        let done = self.running.take().expect("running until it finishes");
+        drop(running);
+        let list = self.lists.get_mut(&file).expect("running until it ends");
+        let done = list.running.take().expect("running until it ends");
         match result {
             Ok(_) => {
-                if self
-                    .held
-                    .as_ref()
-                    .is_none_or(|(roots, _)| *roots != self.roots)
-                {
-                    let elapsed_ms = self.since.elapsed().as_millis();
-                    info!(store_paths = %Names(&self.roots), elapsed_ms, "prefetched");
-                    if let (Some(limit), Progress::Fetching { total_bytes, .. }) =
-                        (self.store.max_store_size(), done.progress())
-                        && total_bytes > limit
-                    {
-                        warn!(
-                            store_paths = %Names(&self.roots),
-                            "the closure takes {}, over the --max-store-size of {}, so every publish that needs a fetch fails",
-                            ByteSize(total_bytes),
-                            ByteSize(limit)
-                        );
+                let new = (list.held.as_ref()).is_none_or(|(roots, _)| *roots != list.roots);
+                list.held = Some((list.roots.clone(), done));
+                if new {
+                    let elapsed_ms = list.since.elapsed().as_millis();
+                    info!(store_paths = %Names(&list.roots), elapsed_ms, "prefetched");
+                    if let Some(limit) = self.store.max_store_size() {
+                        let size = self.store.prefetched_size();
+                        if size > limit {
+                            warn!(
+                                "the prefetched closures take {}, over the --max-store-size of {}, so every publish that needs a fetch fails",
+                                ByteSize(size),
+                                ByteSize(limit)
+                            );
+                        }
                     }
+                    self.report();
                 }
-                self.held = Some((self.roots.clone(), done));
-                self.report();
             }
             Err(e) => {
-                warn!(store_paths = %Names(&self.roots), "{e:#}; trying again in a minute");
+                let path = self.dir.join(&file);
+                warn!(
+                    store_paths = %Names(&list.roots),
+                    "prefetching {}: {e:#}; trying again in a minute",
+                    path.display()
+                );
             }
         }
     }
 
-    /// Tells the metrics whether the node store holds the list's closures.
+    /// Tells the metrics whether the node store holds the closures of each
+    /// list.
     fn report(&self) {
-        let held = self.roots.is_empty()
-            || (self.held.as_ref()).is_some_and(|(roots, _)| *roots == self.roots);
-        self.store.metrics().prefetched(&self.revision, held);
+        let lists: Vec<_> = (self.lists.iter())
+            .map(|(file, list)| {
+                let name = list_name(file, &self.system).unwrap_or("");
+                (name, list.hash.as_str(), list.is_held())
+            })
+            .collect();
+        self.store.metrics().prefetched(&lists);
     }
 
-    /// Returns the list's revision and store paths, or `None` while kubelet
-    /// updates the directory. The store paths are those in the files for the
-    /// node's system, or if it has none, in `storePaths`.
-    fn read_list(&self) -> anyhow::Result<Option<(String, Vec<StorePath>)>> {
+    /// Returns the text of each list by file name, or `None` while kubelet
+    /// updates the directory. The lists are the files for the node's system,
+    /// or if it has none, `storePaths`.
+    fn read_lists(&self) -> anyhow::Result<Option<BTreeMap<String, String>>> {
         let files = read(&self.dir).with_context(|| format!("reading {}", self.dir.display()))?;
-        let Some(files) = files else {
+        let Some(mut files) = files else {
             return Ok(None);
         };
-        let revision = files.get(REVISION).map_or("", |r| r.trim()).to_owned();
-        let mut lists: Vec<_> = (files.iter())
-            .filter(|(name, _)| is_list_for(name, &self.system))
-            .collect();
-        if lists.is_empty() {
-            lists.extend(files.get_key_value(STORE_PATHS));
+        let system = &self.system;
+        if files.keys().any(|file| list_name(file, system).is_some()) {
+            files.retain(|file, _| list_name(file, system).is_some());
+        } else {
+            files.retain(|file, _| file == STORE_PATHS);
         }
-        let mut roots = Vec::new();
-        for (name, list) in lists {
-            let paths = (store_path::roots(list.split_whitespace()))
-                .with_context(|| format!("reading {}", self.dir.join(name).display()))?;
-            roots.extend(paths);
-        }
-        roots.sort();
-        roots.dedup();
-        Ok(Some((revision, roots)))
+        Ok(Some(files))
     }
 }
 
-/// Whether `file` is `storePaths.<system>` or `storePaths.<system>.<name>`.
-fn is_list_for(file: &str, system: &str) -> bool {
-    let rest = (file.strip_prefix(STORE_PATHS))
-        .and_then(|rest| rest.strip_prefix('.'))
-        .and_then(|rest| rest.strip_prefix(system));
-    rest.is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+impl List {
+    fn new() -> Self {
+        Self {
+            hash: String::new(),
+            roots: Vec::new(),
+            parsed: false,
+            since: Instant::now(),
+            held: None,
+            running: None,
+        }
+    }
+
+    /// Takes the text of the file at `path`.
+    fn read(&mut self, path: &Path, text: &str) {
+        self.hash = hash(text);
+        let roots = match parse(text) {
+            Ok(roots) => roots,
+            Err(e) => {
+                self.parsed = false;
+                warn!(
+                    "reading {}: {e:#}; prefetching the list read before",
+                    path.display()
+                );
+                return;
+            }
+        };
+        self.parsed = true;
+        if roots != self.roots {
+            info!(store_paths = %Names(&roots), "prefetching");
+            if roots.is_empty() {
+                self.held = None;
+            }
+            self.roots = roots;
+            self.since = Instant::now();
+            // An ensure of the old list carries on in its own task.
+            self.running = None;
+        }
+    }
+
+    /// Whether the node store holds the closure of the file as it is now.
+    fn is_held(&self) -> bool {
+        self.parsed
+            && (self.roots.is_empty()
+                || (self.held.as_ref()).is_some_and(|(roots, _)| *roots == self.roots))
+    }
+}
+
+/// Parses a list into its store paths, sorted.
+fn parse(text: &str) -> anyhow::Result<Vec<StorePath>> {
+    let mut roots = store_path::roots(text.split_whitespace())?;
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+/// The first 12 hex digits of the SHA-256 of a list's text, as
+/// `sha256sum | head -c 12` prints them.
+fn hash(text: &str) -> String {
+    let mut hash = (Algorithm::SHA256.digest(text).as_base16().as_bare()).to_string();
+    hash.truncate(12);
+    hash
+}
+
+/// Returns `<name>` for a file named `storePaths.<system>.<name>`, `""` for
+/// `storePaths.<system>`, or `None` for other files.
+fn list_name<'a>(file: &'a str, system: &str) -> Option<&'a str> {
+    match file.strip_prefix(&format!("{STORE_PATHS}.{system}"))? {
+        "" => Some(""),
+        rest => rest.strip_prefix('.'),
+    }
 }
 
 /// Watches `dir` for kubelet's rename of `..data`, and for files written or
@@ -243,10 +318,12 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use prometheus_client::registry::Registry;
+
     use super::*;
     use crate::metrics::tests::sample;
     use crate::narinfo::tests::{empty_cache, fixture_root, fixtures};
-    use crate::store::test_utils::{ALL, UNBOUND, count, unsigned_config};
+    use crate::store::test_utils::{ALL, UNBOUND, count, ghost, unsigned_config};
     use crate::store::{Config, TooBig};
 
     const A: &str = "/nix/store/xl1h9i29pgq2q5cszjhm5wpfxfbbqwyi-hello-2.12.3";
@@ -274,9 +351,20 @@ mod tests {
         std::fs::rename(&tmp, dir.join(DATA)).unwrap();
     }
 
-    /// The store paths that `prefetch` reads, as text.
+    /// The `prefetched` sample of the list `name` whose file holds `text`.
+    fn prefetched(registry: &Registry, name: &str, text: &str) -> Option<f64> {
+        let labels = format!("list=\"{name}\",hash=\"{}\"", hash(text));
+        sample(registry, &format!("nix_store_csi_prefetched{{{labels}}}"))
+    }
+
+    /// The store paths of the lists that `prefetch` reads, as text.
     fn listed(prefetch: &Prefetch) -> Option<Vec<String>> {
-        let (_, roots) = prefetch.read_list().unwrap()?;
+        let lists = prefetch.read_lists().unwrap()?;
+        let mut roots: Vec<_> = (lists.values())
+            .flat_map(|text| parse(text).unwrap())
+            .collect();
+        roots.sort();
+        roots.dedup();
         Some(roots.iter().map(|r| format!("/nix/store/{r}")).collect())
     }
 
@@ -289,22 +377,16 @@ mod tests {
         prefetch.system = "aarch64-linux".to_owned();
 
         // A missing directory is an error, which leaves the list as it was.
-        let e = prefetch.read_list().unwrap_err();
+        let e = prefetch.read_lists().unwrap_err();
         assert!(format!("{e:#}").contains("No such file"), "{e:#}");
 
         std::fs::create_dir(&dir).unwrap();
         update(
             &dir,
             "1",
-            &[
-                ("storePaths", A),
-                ("storePaths.aarch64-linux", B),
-                ("revision", "r1\n"),
-            ],
+            &[("storePaths", A), ("storePaths.aarch64-linux", B)],
         );
         assert_eq!(listed(&prefetch), Some(vec![B.to_owned()]));
-        let (revision, _) = prefetch.read_list().unwrap().unwrap();
-        assert_eq!(revision, "r1");
         // The links next to `..data` lag behind it during an update.
         let link = dir.join("storePaths.aarch64-linux");
         std::os::unix::fs::symlink("..data/storePaths.aarch64-linux", link).unwrap();
@@ -321,23 +403,18 @@ mod tests {
         assert_eq!(listed(&prefetch), Some(vec![B.to_owned(), A.to_owned()]));
         update(&dir, "5", &[(web, B), ("storePaths", A)]);
         assert_eq!(listed(&prefetch), Some(vec![B.to_owned()]));
-        // A list that doesn't parse fails the read, which leaves every list as
-        // it was.
-        update(&dir, "6", &[(web, B), (batch, "not a store path")]);
-        let e = prefetch.read_list().unwrap_err();
-        assert!(format!("{e:#}").contains(batch), "{e:#}");
 
         // A read that an update overtakes changes nothing. The pipe holds the
         // read until the update is done.
-        update(&dir, "7", &[]);
-        let fifo = dir.join("..7/storePaths");
+        update(&dir, "6", &[]);
+        let fifo = dir.join("..6/storePaths");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status();
         assert!(made.unwrap().success());
         let updating = std::thread::spawn({
             let dir = dir.clone();
             move || {
                 let pipe = std::fs::OpenOptions::new().write(true).open(fifo);
-                update(&dir, "8", &[("storePaths", B)]);
+                update(&dir, "7", &[("storePaths", B)]);
                 pipe.unwrap().write_all(A.as_bytes()).unwrap();
             }
         });
@@ -360,7 +437,7 @@ mod tests {
         let mut changed = async || tokio::time::timeout(wait, changed(Some(&mut watch))).await;
         update(tmp.path(), "1", &[("storePaths", A)]);
         changed().await.unwrap().unwrap();
-        std::fs::write(tmp.path().join("revision"), "r1").unwrap();
+        std::fs::write(tmp.path().join("storePaths"), B).unwrap();
         changed().await.unwrap().unwrap();
     }
 
@@ -375,20 +452,17 @@ mod tests {
         let mut prefetch = prefetch(&fixtures.join("cache-zstd"), &dir);
         let store = prefetch.store.clone();
         let hello = fixture_root(&fixtures, "hello.path");
-        std::fs::write(dir.join("storePaths"), format!("/nix/store/{hello}\n")).unwrap();
-        std::fs::write(dir.join("revision"), "r1").unwrap();
+        let list = format!("/nix/store/{hello}\n");
+        std::fs::write(dir.join("storePaths"), &list).unwrap();
         let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
         let volume = || store.ensure(std::slice::from_ref(&hello));
         let registry = crate::metrics::registry(&store);
-        let gauge = |revision: &str| {
-            let name = format!("nix_store_csi_prefetched{{revision=\"{revision}\"}}");
-            sample(&registry, &name)
-        };
+        let gauge = |text: &str| prefetched(&registry, "", text);
 
         prefetch.tick();
-        assert_eq!(gauge("r1"), Some(0.0));
+        assert_eq!(gauge(&list), Some(0.0));
         prefetch.finish().await;
-        assert_eq!(gauge("r1"), Some(1.0));
+        assert_eq!(gauge(&list), Some(1.0));
         // Collection spares paths until their syncs.
         store.sync_all().await.unwrap();
         assert_eq!(collect().await.unwrap(), 0);
@@ -404,25 +478,26 @@ mod tests {
         prefetch.finish().await;
         assert_eq!(collect().await.unwrap(), 0);
 
-        // A new revision with the same store paths, like a change to another
-        // system's list, is held immediately.
-        std::fs::write(dir.join("revision"), "r1b").unwrap();
+        // The node holds a new hash with the same store paths as soon as it
+        // reads it.
+        let same = list.trim();
+        std::fs::write(dir.join("storePaths"), same).unwrap();
         prefetch.tick();
-        assert_eq!((gauge("r1"), gauge("r1b")), (None, Some(1.0)));
+        assert_eq!((gauge(&list), gauge(same)), (None, Some(1.0)));
         prefetch.finish().await;
 
         // A new list that fails keeps the old closure until it succeeds, and
         // tries again on the next tick.
-        let missing = format!("/nix/store/{}-missing", "0".repeat(32));
-        std::fs::write(dir.join("storePaths"), missing).unwrap();
-        std::fs::write(dir.join("revision"), "r2").unwrap();
+        let missing = format!("/nix/store/{}", ghost());
+        std::fs::write(dir.join("storePaths"), &missing).unwrap();
         prefetch.tick();
         prefetch.finish().await;
-        assert_eq!((gauge("r1b"), gauge("r2")), (None, Some(0.0)));
-        assert!(prefetch.held.is_some() && prefetch.running.is_none());
+        assert_eq!((gauge(same), gauge(&missing)), (None, Some(0.0)));
+        let list = &prefetch.lists[STORE_PATHS];
+        assert!(list.held.is_some() && list.running.is_none());
         assert_eq!(collect().await.unwrap(), 0);
         prefetch.tick();
-        assert!(prefetch.running.is_some());
+        assert!(prefetch.lists[STORE_PATHS].running.is_some());
 
         // A store path that leaves the list counts towards the limit again,
         // and falls back to collection by last use.
@@ -430,7 +505,89 @@ mod tests {
         prefetch.tick();
         assert!(volume().done().await.unwrap_err().is::<TooBig>());
         // A node holds an empty list as soon as it reads it.
-        assert_eq!(gauge("r2"), Some(1.0));
+        assert_eq!(gauge(""), Some(1.0));
         assert_eq!(collect().await.unwrap(), paths);
+    }
+
+    #[tokio::test]
+    async fn isolates_lists() {
+        let Some(fixtures) = fixtures() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("prefetch");
+        std::fs::create_dir(&dir).unwrap();
+        let mut prefetch = prefetch(&fixtures.join("cache-zstd"), &dir);
+        let store = prefetch.store.clone();
+        let registry = crate::metrics::registry(&store);
+        let collect = || store.collect(UNBOUND, Duration::ZERO, ALL);
+        let system = prefetch.system.clone();
+        let (web, batch) = (
+            format!("storePaths.{system}.web"),
+            format!("storePaths.{system}.batch"),
+        );
+        let write = |file: &str, text: &str| std::fs::write(dir.join(file), text).unwrap();
+        let list = |name: &str, text: &str| prefetched(&registry, name, text);
+        let held = |prefetch: &Prefetch, file: &str| prefetch.lists[file].held.is_some();
+        let hello = format!("/nix/store/{}", fixture_root(&fixtures, "hello.path"));
+        let typo = "not a store path";
+        assert_eq!(hash(typo), "04db0c8b3395");
+
+        // A list that doesn't parse doesn't stop the others.
+        write(&web, &hello);
+        write(&batch, typo);
+        prefetch.tick();
+        prefetch.finish().await;
+        assert_eq!(
+            (list("web", &hello), list("batch", typo)),
+            (Some(1.0), Some(0.0))
+        );
+        assert!(held(&prefetch, &web) && !held(&prefetch, &batch));
+        store.sync_all().await.unwrap();
+        assert_eq!((collect().await.unwrap(), count(store.dir())), (0, 5));
+
+        // Nor does a list with a store path that no cache has.
+        let missing = format!("/nix/store/{}", ghost());
+        write(&batch, &missing);
+        prefetch.tick();
+        prefetch.finish().await;
+        prefetch.finish().await;
+        assert_eq!(
+            (list("web", &hello), list("batch", &missing)),
+            (Some(1.0), Some(0.0))
+        );
+        assert!(held(&prefetch, &web) && !held(&prefetch, &batch));
+        assert_eq!(collect().await.unwrap(), 0);
+
+        // A held list whose file stops parsing keeps its closure.
+        write(&web, typo);
+        prefetch.tick();
+        assert_eq!((list("web", &hello), list("web", typo)), (None, Some(0.0)));
+        assert!(held(&prefetch, &web));
+        assert_eq!(collect().await.unwrap(), 0);
+    }
+
+    /// A list's series goes when its hash changes or its file goes, so no
+    /// series of an old hash stays at 0.
+    #[tokio::test]
+    async fn drops_old_series() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = empty_cache();
+        let dir = tmp.path().join("prefetch");
+        std::fs::create_dir(&dir).unwrap();
+        let mut prefetch = prefetch(cache.path(), &dir);
+        let registry = crate::metrics::registry(&prefetch.store);
+        let web = dir.join(format!("storePaths.{}.web", prefetch.system));
+        let series = |text: &str| prefetched(&registry, "web", text);
+
+        std::fs::write(&web, A).unwrap();
+        prefetch.tick();
+        assert_eq!(series(A), Some(0.0));
+        std::fs::write(&web, B).unwrap();
+        prefetch.tick();
+        assert_eq!((series(A), series(B)), (None, Some(0.0)));
+        std::fs::remove_file(&web).unwrap();
+        prefetch.tick();
+        assert_eq!(series(B), None);
     }
 }

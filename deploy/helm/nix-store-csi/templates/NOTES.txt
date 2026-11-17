@@ -19,28 +19,18 @@ cache that the plugin has credentials for. To allow the volumes only in some
 namespaces, set admissionPolicy.allowedNamespaces.
 {{- end }}
 {{- if .Values.metrics.enabled }}
-{{- $lists := dict "" .Values.prefetch }}
-{{- range $pool, $values := .Values.nodePools }}
-{{- $_ := set $lists $pool ($values.prefetch | default dict) }}
-{{- end }}
-{{- range $pool, $prefetch := $lists }}
-{{- if $prefetch }}
-{{- $revision := include "nix-store-csi.prefetchRevision" $prefetch }}
-{{- if not $.Values.nodePools }}
 
-Every node plugin holds revision {{ $revision }} of the prefetch list once
-this Prometheus query returns nothing:
+The node plugins hold a prefetch list once this Prometheus query returns
+nothing:
 
-  nix_store_csi_build_info unless on (instance) nix_store_csi_prefetched{revision="{{ $revision }}"} == 1
-{{- else }}
+  nix_store_csi_build_info{system="<system>"{{ if .Values.nodePools }}, pool="<pool>"{{ end }}} unless on (instance) nix_store_csi_prefetched{list="<name>", hash="<hash>"} == 1
 
-The node plugins {{ if $pool }}in node pool {{ $pool }}{{ else }}outside the node pools{{ end }} hold revision {{ $revision }} of their prefetch
-list once this Prometheus query returns nothing:
+<name> is the key's name after the system, empty for storePaths.<system> and
+storePaths. For storePaths, select the systems without keys of their own.
+<hash> is the first 12 hex digits of the SHA-256 of the key's value:
 
-  nix_store_csi_build_info{pool="{{ $pool }}"} unless on (instance) nix_store_csi_prefetched{revision="{{ $revision }}"} == 1
-{{- end }}
-{{- end }}
-{{- end }}
+  kubectl -n {{ .Release.Namespace }} get configmap {{ .Release.Name }}-prefetch{{ if .Values.nodePools }}[-<pool>]{{ end }} \
+    -o jsonpath='{.data.storePaths\.<system>\.<name>}' | sha256sum | head -c 12
 {{- if and .Values.nodePools (not .Values.metrics.podMonitor.enabled) }}
 
 The pool label needs metrics.podMonitor.enabled, or a scrape config of your

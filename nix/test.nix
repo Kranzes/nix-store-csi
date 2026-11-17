@@ -169,7 +169,6 @@ let
     builtins.toJSON {
       data = {
         "storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}";
-        revision = "warm";
       };
     }
   );
@@ -444,17 +443,18 @@ testers.runNixOSTest {
         machine.succeed("kubectl delete pod big --wait")
 
     with subtest("the plugin prefetches the store paths in its ConfigMap as kubelet updates it"):
-        def prefetched(revision):
-            line = 'nix_store_csi_prefetched{revision="' + revision + '"} 1'
+        # The node holds a list once its series has the hash that
+        # docs/DEPLOY.md computes.
+        def prefetched(configmap):
+            value = f"kubectl -n kube-system get configmap {configmap} -o jsonpath='{{.data.storePaths\\.${stdenv.hostPlatform.system}}}'"
+            digest = machine.succeed(f"{value} | sha256sum | head -c 12")
+            line = f'nix_store_csi_prefetched{{list="",hash="{digest}"}} 1'
             return f"${curl}/bin/curl -sf http://127.0.0.1:9809/metrics | grep -qxF '{line}'"
-        revision = machine.succeed(
-            "kubectl -n kube-system get configmap nix-store-csi-prefetch -o jsonpath='{.data.revision}'"
-        )
-        machine.wait_until_succeeds(prefetched(revision), timeout=60)
+        machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch"), timeout=60)
         machine.succeed(f"{plugin} | grep 'prefetched store_paths=.*-${busybox.name}' > /dev/null")
         before = fetches()
         machine.succeed("kubectl -n kube-system patch configmap nix-store-csi-prefetch --type merge --patch-file ${prefetchWarm}")
-        machine.wait_until_succeeds(prefetched("warm"), timeout=60)
+        machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch"), timeout=60)
         # busybox, which warm references, is on the node already.
         t.assertEqual(fetches(), before + 1)
         # warm's closure is one byte over the limit set above.
@@ -496,10 +496,7 @@ testers.runNixOSTest {
         pool = "kubectl -n kube-system get pod -l nix-store-csi/pool=warm"
         machine.wait_until_succeeds(f"{pool} -o jsonpath='{{.items[*].status.containerStatuses[*].ready}}' | grep -qx 'true true true'", timeout=300)
         machine.wait_until_succeeds("[ $(kubectl -n kube-system get pod -l app.kubernetes.io/name=nix-store-csi -o name | wc -l) = 1 ]", timeout=120)
-        revision = machine.succeed(
-            "kubectl -n kube-system get configmap nix-store-csi-prefetch-warm -o jsonpath='{.data.revision}'"
-        )
         # The cache is still down, and warm is on the node already.
-        machine.wait_until_succeeds(prefetched(revision), timeout=180)
+        machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch-warm"), timeout=180)
   '';
 }

@@ -57,7 +57,7 @@ pub(super) fn zstd_config(fixtures: &Path, state: &Path) -> Config {
 }
 
 /// A store path that no cache has.
-pub(super) fn ghost() -> StorePath {
+pub(crate) fn ghost() -> StorePath {
     StorePath::from_base_path(&format!("{}-ghost-1", "0".repeat(32))).unwrap()
 }
 

@@ -35,7 +35,7 @@ use crate::closure::Caches;
 use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 
-pub use self::fetch::{Ensuring, Progress, StoreTooBig, TooBig};
+pub use self::fetch::{Ensuring, StoreTooBig, TooBig};
 pub use self::gc::{EnsureFree, Excess, HeldPath, Reason};
 pub use self::narinfos::Narinfos;
 pub use self::views::{Usage, check_volume, root_links};
@@ -259,6 +259,11 @@ impl Store {
 
     pub fn max_store_size(&self) -> Option<u64> {
         self.max_store_size
+    }
+
+    /// The NAR size of the store paths that [`Store::prefetch`] holds.
+    pub fn prefetched_size(&self) -> u64 {
+        self.prefetched.nar_sizes().values().sum()
     }
 
     pub fn gauges(&self) -> Gauges {

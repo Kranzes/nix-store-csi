@@ -1229,7 +1229,7 @@
     {
       "type": "timeseries",
       "title": "Prefetch rollout",
-      "description": "Node plugins that fetched the closures of each revision of the prefetch list. A rollout is done once the new revision reaches the dashed line, the node plugins that Prometheus scrapes. With node pools, each pool's revision reaches only the node plugins in that pool.",
+      "description": "Node plugins that fetched the closure of each prefetch list, by its name and hash. A list's rollout is done once its new hash reaches the dashed line of its system, the node plugins of that system that Prometheus scrapes. With node pools, a pool's lists reach only the node plugins in that pool.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1241,8 +1241,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (revision) (nix_store_csi_prefetched{instance=~\"$instance\"})",
-          "legendFormat": "{{revision}}"
+          "expr": "sum by (list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "legendFormat": "{{list}} {{hash}}"
         },
         {
           "refId": "B",
@@ -1250,8 +1250,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(nix_store_csi_build_info{instance=~\"$instance\"})",
-          "legendFormat": "Node plugins"
+          "expr": "count by (system) (nix_store_csi_build_info{instance=~\"$instance\"})",
+          "legendFormat": "{{system}} node plugins"
         }
       ],
       "fieldConfig": {
@@ -1271,8 +1271,8 @@
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "Node plugins"
+              "id": "byFrameRefID",
+              "options": "B"
             },
             "properties": [
               {
@@ -1320,8 +1320,8 @@
     },
     {
       "type": "table",
-      "title": "Prefetch list",
-      "description": "For each revision of the prefetch list, the node plugins that fetched its closures, out of those that have seen it. During a rollout, the old revision's row goes away once kubelet updates the ConfigMap on every node.",
+      "title": "Prefetch lists",
+      "description": "For each prefetch list by name and hash, the node plugins that fetched its closure, out of those that have seen it. During a rollout, the old hash's row goes away once kubelet updates the ConfigMap on every node.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1333,7 +1333,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (revision) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "expr": "sum by (list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"})",
           "format": "table",
           "instant": true
         },
@@ -1343,7 +1343,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (revision) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "expr": "count by (list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"})",
           "format": "table",
           "instant": true
         }
@@ -1360,7 +1360,8 @@
               "Time": true
             },
             "renameByName": {
-              "revision": "Revision",
+              "list": "List",
+              "hash": "Hash",
               "Value #A": "Fetched",
               "Value #B": "Seen"
             }

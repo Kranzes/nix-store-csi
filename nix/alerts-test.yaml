@@ -1,6 +1,6 @@
 # promtool unit tests for the chart's PrometheusRule. The chart check renders
 # the rules for release nix-store-csi in namespace default with the PodMonitor
-# and a prefetch list, and replaces @revision@ with the list's revision.
+# and a prefetch list, and replaces @hash@ with the hash of the list.
 rule_files:
   - rules.yaml
 
@@ -236,13 +236,21 @@ tests:
         values: 1x40
       - series: nix_store_csi_build_info{instance="node-c", version="0.1.3"}
         values: 1x40
-      # Read the list but still fetches it.
-      - series: nix_store_csi_prefetched{instance="node-a", revision="@revision@"}
+      # Read the chart's list but still fetches it.
+      - series: nix_store_csi_prefetched{instance="node-a", hash="@hash@"}
         values: 0x40
-      - series: nix_store_csi_prefetched{instance="node-b", revision="@revision@"}
+      - series: nix_store_csi_prefetched{instance="node-b", hash="@hash@"}
         values: 1x40
-      # Hasn't read the list yet.
-      - series: nix_store_csi_prefetched{instance="node-c", revision="000000000000"}
+      # A list that the chart doesn't render, and one that takes less than
+      # the alert waits.
+      - series: nix_store_csi_prefetched{instance="node-b", list="web", hash="0123456789ab"}
+        values: 0x40
+      - series: nix_store_csi_prefetched{instance="node-b", list="batch", hash="ba9876543210"}
+        values: 0x10 1x30
+      # Hasn't read the chart's list yet. Another list doesn't count.
+      - series: nix_store_csi_prefetched{instance="node-c", hash="000000000000"}
+        values: 1x40
+      - series: nix_store_csi_prefetched{instance="node-c", list="web", hash="@hash@"}
         values: 1x40
     alert_rule_test:
       - eval_time: 35m
@@ -250,17 +258,24 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              revision: "@revision@"
               instance: node-a
-              version: 0.1.3
+              hash: "@hash@"
             exp_annotations:
-              summary: node-a doesn't hold revision @revision@ of its prefetch list.
-              description: The node may not have read the new list yet, or its fetch may fail. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows each node's revision.
+              summary: node-a doesn't hold its prefetch list at hash @hash@.
+              description: The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
           - exp_labels:
               severity: warning
-              revision: "@revision@"
+              instance: node-b
+              list: web
+              hash: "0123456789ab"
+            exp_annotations:
+              summary: node-b doesn't hold its prefetch list web at hash 0123456789ab.
+              description: The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+          - exp_labels:
+              severity: warning
+              hash: "@hash@"
               instance: node-c
               version: 0.1.3
             exp_annotations:
-              summary: node-c doesn't hold revision @revision@ of its prefetch list.
-              description: The node may not have read the new list yet, or its fetch may fail. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows each node's revision.
+              summary: node-c hasn't read the prefetch list storePaths at hash @hash@.
+              description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.

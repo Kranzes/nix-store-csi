@@ -201,8 +201,8 @@ rec {
           }
           rendered prometheusrule | yq .spec > rules.yaml
           promtool check rules rules.yaml
-          revision=$(rendered prefetch | yq .data.revision)
-          sed "s/@revision@/$revision/g" ${./alerts-test.yaml} > alerts-test.yaml
+          hash=$(printf %s "$(rendered prefetch | yq .data.storePaths)" | sha256sum | head -c 12)
+          sed "s/@hash@/$hash/g" ${./alerts-test.yaml} > alerts-test.yaml
           promtool test rules alerts-test.yaml
           helm lint --strict ${chartSrc} --set 'admissionPolicy.allowedNamespaces={default,ci}'
           helm lint --strict ${chartSrc} --set 'prefetch.storePaths\.x86_64-linux=/nix/store/00000000000000000000000000000000-hello'

@@ -19,6 +19,9 @@ helm install nix-store-csi oci://ghcr.io/kranzes/charts/nix-store-csi -n kube-sy
 [values.yaml](../deploy/helm/nix-store-csi/values.yaml) lists the chart's settings, and
 [CLI.md](CLI.md) lists the plugin flags that they set.
 
+To pull the images from a private registry, list the Secrets with its
+credentials in `imagePullSecrets`.
+
 The node plugin runs privileged. In a namespace other than `kube-system` that
 enforces a Pod Security level, the level has to be `privileged`. Its volumes
 are allowed at the restricted level, so pods that use them pass it with the

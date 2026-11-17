@@ -5,6 +5,8 @@ image:
   # Empty means IfNotPresent for a version tag and Always for a branch tag like
   # master, since a branch tag moves.
   pullPolicy: ""
+# Secrets that the node plugin pods pull their images with.
+imagePullSecrets: []
 
 registrar:
   image:

@@ -208,12 +208,15 @@ rec {
           helm lint --strict ${chartSrc} --set 'prefetch.storePaths\.x86_64-linux=/nix/store/00000000000000000000000000000000-hello'
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.prometheusRule.enabled=true --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu","accel":"nvidia"},"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"}},"web":{"nodeSelector":{"pool":"web"}}}'
           # Each DaemonSet mounts the ConfigMap that its prefetchConfigMap
-          # names, which may not exist yet.
-          pools=(--set prefetchConfigMap=lists --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"prefetchConfigMap":"gpu-lists"}}')
+          # names, which may not exist yet, and pulls with imagePullSecrets.
+          pools=(--set prefetchConfigMap=lists --set 'imagePullSecrets={registry}' \
+            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"prefetchConfigMap":"gpu-lists"}}')
           helm lint --strict ${chartSrc} "''${pools[@]}"
           helm template ${chartSrc} "''${pools[@]}" | yq 'select(.kind == "DaemonSet")' > daemonsets.yaml
           mounts=$(yq -N '.spec.template.spec.volumes[] | select(.name == "prefetch") | .configMap.name + " " + (.configMap.optional | tostring)' daemonsets.yaml)
           test "$mounts" = "$(printf 'lists true\ngpu-lists true')"
+          secrets=$(yq -N '.spec.template.spec.imagePullSecrets[].name' daemonsets.yaml)
+          test "$secrets" = "$(printf 'registry\nregistry')"
           # helm lint ignores fail, so these use helm template.
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null

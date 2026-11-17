@@ -15,6 +15,7 @@
   chart renders from `prefetch`, so owners can write their keys outside Helm.
   The plugin starts before the ConfigMap exists and reads its lists once it
   does.
+- The chart's `imagePullSecrets` sets the node plugins' pull Secrets.
 
 ### Changed
 

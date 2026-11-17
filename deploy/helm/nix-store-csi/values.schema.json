@@ -35,6 +35,7 @@
         "pullPolicy": { "enum": ["", "Always", "IfNotPresent", "Never"] }
       }
     },
+    "imagePullSecrets": { "type": "array", "items": { "type": "string" } },
     "registrar": {
       "type": "object",
       "additionalProperties": false,

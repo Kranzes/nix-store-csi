@@ -70,6 +70,12 @@ spec:
     spec:
       serviceAccountName: {{ $.Release.Name }}
       automountServiceAccountToken: false
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       hostNetwork: {{ $.Values.hostNetwork }}
       {{- if $.Values.hostNetwork }}
       # Lets the plugin on the host network resolve cluster names, like a

@@ -567,10 +567,22 @@ adds a PodMonitor for it:
 | `locality_nodes` | gauge | |
 | `locality_closure_resolves_total` | counter | `result` |
 | `locality_prioritize_duration_seconds` | histogram | `scheduler`, `result` |
+| `locality_best_score` | histogram | `scheduler` |
 
 `locality_scrapes_total` counts reads of the plugins' `/store-paths`, those
 answered with 304 too, and failed lookups of `<release>-plugins`. `locality_nodes` counts the nodes whose
 plugin the extender read within the last 3 intervals.
+
+`locality_best_score` is the best score in each answer, as a share of the
+scheduler's top score, so 1 means a node holds the whole closure. It counts
+answers for pods whose closure has resolved, and only the nodes whose plugin
+the extender has read. The extender never learns which node the scheduler
+picks, so read it next to `publish_duration_seconds`:
+
+- Mostly 0 means no candidate node held the pod's closure.
+- High while publishes still count with `fetched="true"` means a candidate
+  held it and the scheduler chose another node, because the scheduler's other
+  scores outweighed the extender's.
 
 Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 `severity`:

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- `nix_store_csi_locality_best_score`, a histogram of the best score in each
+  of the locality extender's answers, by scheduler. Mostly 0 means no
+  candidate node held the pod's closure. High while publishes still fetch
+  means a candidate held it and the scheduler chose another node.
+
 ### Changed
 
 - Once a node holds a prefetch list's new version, or the list empties or its

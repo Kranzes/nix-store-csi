@@ -35,11 +35,24 @@ use closures::Closures;
 pub use nodes::Plugins;
 use nodes::{Node, Nodes};
 
-/// kube-scheduler's `MaxExtenderPriority`.
-const KUBE_SCHEDULER_MAX: u32 = 10;
+/// A scheduler that the extender answers, by its `scheduler` label and its top
+/// node score.
+#[derive(Clone, Copy)]
+struct Scheduler {
+    name: &'static str,
+    max: u32,
+}
 
-/// Volcano's highest node score.
-const VOLCANO_MAX: u32 = 100;
+/// kube-scheduler, whose top score is its `MaxExtenderPriority`.
+const KUBE_SCHEDULER: Scheduler = Scheduler {
+    name: "kube-scheduler",
+    max: 10,
+};
+
+const VOLCANO: Scheduler = Scheduler {
+    name: "volcano",
+    max: 100,
+};
 
 /// Reads the plugins' `/store-paths` every `interval`, and serves the
 /// scheduler extender, `/healthz` and `/metrics` on `address` until SIGTERM or
@@ -96,11 +109,11 @@ where
     let (scheduler, answer) = match (request.method(), request.uri().path()) {
         (&Method::POST, "/prioritize") => {
             let answer = prioritize(request.into_body(), served.clone(), kube_scheduler);
-            ("kube-scheduler", answer.await)
+            (KUBE_SCHEDULER, answer.await)
         }
         (&Method::POST, "/volcano/prioritize") => {
             let answer = prioritize(request.into_body(), served.clone(), volcano);
-            ("volcano", answer.await)
+            (VOLCANO, answer.await)
         }
         (&Method::GET, "/healthz") => return response(StatusCode::OK, "text/plain", "ok\n"),
         (&Method::GET, "/metrics") => {
@@ -111,11 +124,11 @@ where
     };
     served
         .metrics
-        .prioritize(scheduler, answer.is_ok(), started);
+        .prioritize(scheduler.name, answer.is_ok(), started);
     match answer {
         Ok(json) => response(StatusCode::OK, "application/json", json),
         Err(e) => {
-            warn!("reading {scheduler}'s request: {e:#}; answering 400");
+            warn!("reading {}'s request: {e:#}; answering 400", scheduler.name);
             response(StatusCode::BAD_REQUEST, "text/plain", format!("{e:#}\n"))
         }
     }
@@ -150,14 +163,14 @@ fn kube_scheduler(args: ExtenderArgs, served: &Served) -> Vec<u8> {
         let nodes = nodes.into_iter().flat_map(|list| list.items);
         nodes.map(|node| node.metadata.name).collect()
     });
-    let scores = scores(&pod, names, served, KUBE_SCHEDULER_MAX).into_iter();
+    let scores = scores(&pod, names, served, KUBE_SCHEDULER).into_iter();
     let list: Vec<_> = (scores.map(|(host, score)| HostPriority { host, score })).collect();
     json(&list)
 }
 
 fn volcano(args: PrioritizeRequest, served: &Served) -> Vec<u8> {
     let names = args.nodes.into_iter().flatten().map(|node| node.name);
-    let scores = scores(&args.task.pod, names.collect(), served, VOLCANO_MAX).into_iter();
+    let scores = scores(&args.task.pod, names.collect(), served, VOLCANO).into_iter();
     let node_score = scores
         .map(|(name, score)| (name, f64::from(score)))
         .collect();
@@ -169,9 +182,14 @@ fn json(value: &impl Serialize) -> Vec<u8> {
 }
 
 /// The share of the closure of `pod`'s volumes that each of `nodes` holds,
-/// from 0 to `max`. A node scores 0 if no plugin read lists it, or if a
-/// closure it would use hasn't resolved yet.
-fn scores(pod: &Pod, nodes: Vec<String>, served: &Served, max: u32) -> Vec<(String, u32)> {
+/// up to the scheduler's top score. A node scores 0 if no plugin read lists
+/// it, or if a closure it would use hasn't resolved yet.
+fn scores(
+    pod: &Pod,
+    nodes: Vec<String>,
+    served: &Served,
+    scheduler: Scheduler,
+) -> Vec<(String, u32)> {
     let volumes: Vec<_> = (pod.spec.volumes.iter())
         .filter_map(|volume| volume.csi.as_ref())
         .filter(|csi| csi.driver == DRIVER)
@@ -186,14 +204,19 @@ fn scores(pod: &Pod, nodes: Vec<String>, served: &Served, max: u32) -> Vec<(Stri
         let node = served.nodes.get(name)?;
         let closure = (closures.entry(node.system.clone()))
             .or_insert_with(|| PodClosure::new(&volumes, &node.system, &served.closures));
-        Some(closure.as_ref()?.score(&node, max))
+        Some(closure.as_ref()?.score(&node, scheduler.max))
     };
+    let mut best = None;
     let scores: Vec<_> = (nodes.into_iter())
         .map(|name| {
-            let score = score(&name).unwrap_or(0);
-            (name, score)
+            let score = score(&name);
+            best = best.max(score);
+            (name, score.unwrap_or(0))
         })
         .collect();
+    if let Some(best) = best {
+        served.metrics.best_score(scheduler, best);
+    }
     let pod = &pod.metadata;
     debug!(
         pod = format_args!("{}/{}", pod.namespace, pod.name),
@@ -340,20 +363,29 @@ struct PrioritizeLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SchedulerLabels {
+    scheduler: &'static str,
+}
+
 pub struct Metrics {
     scrapes: Family<ResultLabels, Counter>,
     resolves: Family<ResultLabels, Counter>,
     prioritizes: Histograms<PrioritizeLabels>,
+    best_scores: Histograms<SchedulerLabels>,
     nodes: Gauge,
 }
 
 impl Default for Metrics {
     fn default() -> Self {
         let prioritizes = || Histogram::new([0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]);
+        let best_scores =
+            || Histogram::new([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]);
         let metrics = Self {
             scrapes: Family::default(),
             resolves: Family::default(),
             prioritizes: Family::new_with_constructor(prioritizes),
+            best_scores: Family::new_with_constructor(best_scores),
             nodes: Gauge::default(),
         };
         // The alerts divide by these, so they read 0 before the first event.
@@ -388,6 +420,16 @@ impl Metrics {
         (self.prioritizes.get_or_create(&labels)).observe(started.elapsed().as_secs_f64());
     }
 
+    /// Records the best score that an answer to `scheduler` offers, as a
+    /// share of its top score.
+    fn best_score(&self, scheduler: Scheduler, score: u32) {
+        let labels = SchedulerLabels {
+            scheduler: scheduler.name,
+        };
+        let share = f64::from(score) / f64::from(scheduler.max);
+        self.best_scores.get_or_create(&labels).observe(share);
+    }
+
     /// A registry with every metric under `nix_store_csi_locality_`.
     fn registry(&self) -> Registry {
         let mut registry = Registry::with_prefix("nix_store_csi_locality");
@@ -411,6 +453,11 @@ impl Metrics {
             "Prioritize requests, by scheduler and result",
             Unit::Seconds,
             self.prioritizes.clone(),
+        );
+        registry.register(
+            "best_score",
+            "The best score in each answer for a pod whose closure has resolved, as a share of the scheduler's top score, by scheduler",
+            self.best_scores.clone(),
         );
         registry
     }
@@ -454,10 +501,15 @@ mod tests {
     }
 
     /// The scores of `nodes` for `pod`.
-    fn scored(pod: serde_json::Value, nodes: &[&str], served: &Served, max: u32) -> Vec<u32> {
+    fn scored(
+        pod: serde_json::Value,
+        nodes: &[&str],
+        served: &Served,
+        scheduler: Scheduler,
+    ) -> Vec<u32> {
         let pod = serde_json::from_value(pod).unwrap();
         let nodes = nodes.iter().map(|&node| node.to_owned()).collect();
-        scores(&pod, nodes, served, max)
+        scores(&pod, nodes, served, scheduler)
             .into_iter()
             .map(|(_, score)| score)
             .collect()
@@ -489,10 +541,10 @@ mod tests {
         let pod = pod(&json!({"storePaths": app.to_string()}));
         let nodes = ["big", "many", "unknown"];
         assert_eq!(
-            scored(pod.clone(), &nodes, &served, KUBE_SCHEDULER_MAX),
+            scored(pod.clone(), &nodes, &served, KUBE_SCHEDULER),
             [9, 0, 0]
         );
-        assert_eq!(scored(pod, &nodes, &served, VOLCANO_MAX), [99, 0, 0]);
+        assert_eq!(scored(pod, &nodes, &served, VOLCANO), [99, 0, 0]);
     }
 
     #[tokio::test]
@@ -510,7 +562,7 @@ mod tests {
         }));
         // riscv has no attribute, so its plugin would refuse the volume.
         let nodes = ["x86", "arm", "riscv"];
-        assert_eq!(scored(pod, &nodes, &served, VOLCANO_MAX), [50, 25, 0]);
+        assert_eq!(scored(pod, &nodes, &served, VOLCANO), [50, 25, 0]);
     }
 
     #[tokio::test]
@@ -523,7 +575,7 @@ mod tests {
         let mut pod = pod(&json!({"storePaths": format!("{a} {b}")}));
         let volumes = pod["spec"]["volumes"].as_array_mut().unwrap();
         volumes.push(volumes[1].clone());
-        assert_eq!(scored(pod, &["node"], &served, VOLCANO_MAX), [50]);
+        assert_eq!(scored(pod, &["node"], &served, VOLCANO), [50]);
     }
 
     #[tokio::test]
@@ -539,8 +591,35 @@ mod tests {
             pod(&json!({"storePaths": format!("{a} {}", path(3, "a"))})),
             json!({"spec": {"containers": []}}),
         ] {
-            assert_eq!(scored(pod, &["node"], &served, VOLCANO_MAX), [0]);
+            assert_eq!(scored(pod, &["node"], &served, VOLCANO), [0]);
         }
+    }
+
+    #[tokio::test]
+    async fn reports_the_best_score() {
+        let served = served();
+        let app = path(1, "app");
+        closure(&served, &app, &[(&app, 100)]);
+        let system = store_path::system();
+        nodes::tests::node(&served.nodes, "warm", &system, &[&app]);
+        nodes::tests::node(&served.nodes, "cold", &system, &[]);
+        let (resolved, unresolved) = (
+            pod(&json!({"storePaths": app.to_string()})),
+            pod(&json!({"storePaths": path(2, "unresolved").to_string()})),
+        );
+        scored(resolved.clone(), &["cold", "warm"], &served, VOLCANO);
+        scored(resolved.clone(), &["cold", "unknown"], &served, VOLCANO);
+        // Nodes whose plugin the extender hasn't read, and closures that
+        // haven't resolved, leave nothing to compare.
+        scored(resolved, &["unknown"], &served, VOLCANO);
+        scored(unresolved, &["warm"], &served, VOLCANO);
+        let best = |series: &str| {
+            let name = format!("nix_store_csi_locality_best_score_{series}");
+            sample(&served.registry, &name)
+        };
+        assert_eq!(best("count{scheduler=\"volcano\"}"), Some(2.0));
+        assert_eq!(best("sum{scheduler=\"volcano\"}"), Some(1.0));
+        assert_eq!(best("bucket{le=\"0.0\",scheduler=\"volcano\"}"), Some(1.0));
     }
 
     async fn post(

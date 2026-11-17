@@ -57,7 +57,11 @@ let
           pkgs.dockerTools.buildLayeredImage {
             inherit (package) name;
             tag = package.version;
-            contents = [ pkgs.dockerTools.caCertificates ];
+            # The chart's locality Deployment runs /bin/nix-store-csi.
+            contents = [
+              pkgs.dockerTools.caCertificates
+              packages.nix-store-csi-static
+            ];
             config.Entrypoint = [
               (lib.getExe packages.nix-store-csi-static)
               "csi"
@@ -188,14 +192,15 @@ rec {
         ''
           export HOME=$TMPDIR
           helm lint --strict ${chartSrc}
-          helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc,s3CredentialsSecret=s3 \
+          helm lint --strict ${chartSrc} --set serviceAccountToken.audience=niks3,netrcSecret=netrc,s3CredentialsSecret=s3,locality.enabled=true \
+            --set locality.nodeSelector.pool=system --set-json 'locality.tolerations=[{"key":"pool","value":"system","effect":"NoSchedule"}]' \
             --set-json 'serviceAccount.annotations={"eks.amazonaws.com/role-arn":"arn:aws:iam::111122223333:role/nix-store-csi"}' \
             --set-json 'substituters=["https://cache.nixos.org","s3://my-cache?region=eu-west-1","file:///srv/cache"]'
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true,metrics.prometheusRule.enabled=true
           # The alerts' rules, with each kind of alert.
           rendered() {
             helm template nix-store-csi ${chartSrc} --namespace default \
-              --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.prometheusRule.enabled=true \
+              --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.prometheusRule.enabled=true,locality.enabled=true \
               --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello' \
               --show-only "templates/$1.yaml"
           }

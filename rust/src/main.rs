@@ -25,6 +25,7 @@ mod cli;
 mod closure;
 mod csi;
 mod http;
+mod locality;
 mod metrics;
 mod mounts;
 mod narinfo;
@@ -111,6 +112,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     match cli.command {
         Command::Unpack { roots, dry_run } => unpack(config, &roots, dry_run).await,
+        Command::Locality {
+            plugins,
+            address,
+            scrape_interval,
+        } => locality::run(caches(config)?, plugins, address, scrape_interval).await,
         Command::Csi {
             endpoint,
             node_id,
@@ -139,7 +145,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let address = listener.local_addr()?;
                 let url = format!("http://{address}/metrics");
                 info!(%url, "serving metrics");
-                let paths = serve_paths.then_some(keep_recent);
+                let paths = serve_paths.then(|| metrics::Paths::new(keep_recent, &node_id));
+                let paths = paths.transpose()?;
                 tokio::spawn(metrics::serve(listener, store.clone(), paths));
             }
             tokio::spawn(collect_garbage(store.clone(), gc_interval, keep_recent));

@@ -5,7 +5,8 @@ image:
   # Empty means IfNotPresent for a version tag and Always for a branch tag like
   # master, since a branch tag moves.
   pullPolicy: ""
-# Secrets that the node plugin pods pull their images with.
+# Secrets that the node plugins and the locality extender pull their images
+# with.
 imagePullSecrets: []
 
 registrar:
@@ -102,8 +103,8 @@ metrics:
     # kube-prometheus-stack's `release: <its release name>`.
     labels: {}
   # A PrometheusRule with alerts for the Prometheus Operator, whose CRDs it
-  # needs. NixStoreCsiDown needs the PodMonitor, and with nodePools,
-  # NixStoreCsiPrefetchBehind needs its pool label.
+  # needs. NixStoreCsiDown and NixStoreCsiLocalityDown need the PodMonitor, and
+  # with nodePools, NixStoreCsiPrefetchBehind needs its pool label.
   prometheusRule:
     enabled: false
     # Labels that the operator's Prometheus selects rules by.
@@ -167,6 +168,23 @@ metrics:
         enabled: true
         for: 30m
         severity: warning
+      # Prometheus can't scrape the locality extender.
+      NixStoreCsiLocalityDown:
+        enabled: true
+        for: 10m
+        severity: warning
+      # More than this share of the locality extender's reads of the node
+      # plugins fail.
+      NixStoreCsiLocalityScrapeErrors:
+        enabled: true
+        for: 15m
+        severity: warning
+        ratio: 0.1
+      # The locality extender can't resolve closures from the caches.
+      NixStoreCsiLocalityResolveErrors:
+        enabled: true
+        for: 15m
+        severity: warning
   # A ConfigMap with the Grafana dashboard, for Grafana's dashboard sidecar.
   grafanaDashboard:
     enabled: false
@@ -174,6 +192,23 @@ metrics:
       grafana_dashboard: "1"
     # The namespace that the sidecar watches. Empty means the release's.
     namespace: ""
+
+# A Deployment with a scheduler extender for kube-scheduler and Volcano. It
+# scores nodes by the NAR size of a pod's closure that their node stores hold.
+# It reads /store-paths on the node plugins' metrics port, so it turns that
+# port and --serve-paths on.
+locality:
+  enabled: false
+  # With hostNetwork the port is on the node, so it has to be free there.
+  port: 8080
+  # The node plugins' tolerations don't apply to the extender's pod.
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
 
 kubeletDir: /var/lib/kubelet
 stateDir: /var/lib/nix-store-csi
@@ -185,6 +220,7 @@ updateStrategy:
   rollingUpdate:
     maxUnavailable: 1
 
+# Puts the node plugins and the locality extender on the node's network.
 hostNetwork: false
 # system-node-critical keeps the plugin from being evicted. GKE allows that
 # class only in kube-system or in a namespace with a ResourceQuota for it.

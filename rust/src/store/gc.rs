@@ -77,8 +77,7 @@ impl Store {
         let mut fetching: HashSet<_> = self.ensuring.paths().into_iter().collect();
         fetching.extend(self.unsynced.lock().unwrap().keys().cloned());
         let mounted = self.view_paths(&self.mounted_views(is_bound)?.0)?;
-        let mut paths = list_store_paths(&self.dir)?;
-        paths.sort_unstable();
+        let paths = self.store_paths()?;
         let held = |path: StorePath| {
             let last_use = self.last_use(&path);
             let held = if mounted.contains(&path) {

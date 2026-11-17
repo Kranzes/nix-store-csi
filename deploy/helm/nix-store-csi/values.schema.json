@@ -163,7 +163,10 @@
                 "NixStoreCsiGcErrors": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiLowSpace": { "$ref": "#/definitions/alert" },
                 "NixStoreCsiStoreNearLimit": { "$ref": "#/definitions/ratioAlert" },
-                "NixStoreCsiPrefetchBehind": { "$ref": "#/definitions/alert" }
+                "NixStoreCsiPrefetchBehind": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiLocalityDown": { "$ref": "#/definitions/alert" },
+                "NixStoreCsiLocalityScrapeErrors": { "$ref": "#/definitions/ratioAlert" },
+                "NixStoreCsiLocalityResolveErrors": { "$ref": "#/definitions/alert" }
               }
             }
           }
@@ -177,6 +180,17 @@
             "namespace": { "type": "string" }
           }
         }
+      }
+    },
+    "locality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "nodeSelector": { "$ref": "#/properties/nodeSelector" },
+        "tolerations": { "$ref": "#/properties/tolerations" },
+        "resources": { "type": "object" }
       }
     },
     "kubeletDir": { "type": "string", "pattern": "^/" },

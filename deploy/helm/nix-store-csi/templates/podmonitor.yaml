@@ -22,4 +22,22 @@ spec:
         # Empty outside the node pools.
         - sourceLabels: [__meta_kubernetes_pod_label_nix_store_csi_pool]
           targetLabel: pool
+{{- if .Values.locality.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}-locality
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "nix-store-csi.localitySelectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: http
+{{- end }}
 {{- end }}

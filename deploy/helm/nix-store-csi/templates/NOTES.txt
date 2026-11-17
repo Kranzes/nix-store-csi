@@ -38,3 +38,12 @@ The pool label needs metrics.podMonitor.enabled, or a scrape config of your
 own that copies the nix-store-csi/pool label of the node plugins' pods.
 {{- end }}
 {{- end }}
+{{- if .Values.locality.enabled }}
+
+The locality extender serves kube-scheduler at /prioritize and Volcano at
+/volcano/prioritize, on port {{ .Values.locality.port }} of the Service {{ .Release.Name }}-locality.
+kube-scheduler usually runs without cluster DNS, so give it the Service's
+cluster IP:
+
+  kubectl -n {{ .Release.Namespace }} get service {{ .Release.Name }}-locality -o jsonpath='{.spec.clusterIP}'
+{{- end }}

@@ -7,9 +7,10 @@ Serves Nix store closures from binary caches to Kubernetes pods as CSI volumes
 Usage: nix-store-csi [OPTIONS] <COMMAND>
 
 Commands:
-  csi     Serve the CSI node plugin on a unix socket
-  unpack  Fetch the closures of store paths into the node store and print its directory, for use with `podman -v DIR:/nix/store:ro`
-  help    Print this message or the help of the given subcommand(s)
+  csi       Serve the CSI node plugin on a unix socket
+  unpack    Fetch the closures of store paths into the node store and print its directory, for use with `podman -v DIR:/nix/store:ro`
+  locality  Serve a scheduler extender that scores nodes by how much of a pod's closure they hold
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --substituters <URLS>         Binary caches [env: NIX_STORE_CSI_SUBSTITUTERS=] [default: https://cache.nixos.org]
@@ -46,7 +47,7 @@ Options:
       --log-level <LEVEL>           off, error, warn, info, debug or trace [env: NIX_STORE_CSI_LOG_LEVEL=] [default: info]
       --metrics-address <ADDRESS>   Serve Prometheus metrics at `/metrics` on ADDRESS, like `[::]:9809`. Off unless set [env: NIX_STORE_CSI_METRICS_ADDRESS=]
       --log-format <FORMAT>         text or json [env: NIX_STORE_CSI_LOG_FORMAT=] [default: text] [possible values: text, json]
-      --serve-paths                 Also serve the node store's paths at `/paths` on `--metrics-address`. Anyone who can reach the address can read them, and so mount their closures [env: NIX_STORE_CSI_SERVE_PATHS=]
+      --serve-paths                 Also serve the node store's paths on `--metrics-address`, at `/paths` with why garbage collection keeps each, and at `/store-paths` alone. Anyone who can reach the address can read them, and so mount their closures [env: NIX_STORE_CSI_SERVE_PATHS=]
       --max-closure-size <SIZE>     Refuse a volume whose closure's NARs add up to more than SIZE, like `20G`, before fetching any of it. Prefetched closures don't count. Off unless set [env: NIX_STORE_CSI_MAX_CLOSURE_SIZE=]
       --max-substitution-jobs <N>   NARs to fetch at once [env: NIX_STORE_CSI_MAX_SUBSTITUTION_JOBS=] [default: 16]
       --max-store-size <SIZE>       Refuse a volume that needs a fetch if the NARs of its closure and those that garbage collection can't delete add up to more than SIZE, like `200G`. Those are the closures of mounted volumes, of fetches under way and of prefetched store paths. A closure that the node store already has always passes. Off unless set [env: NIX_STORE_CSI_MAX_STORE_SIZE=]
@@ -70,6 +71,29 @@ Options:
       --substituters <URLS>         Binary caches [env: NIX_STORE_CSI_SUBSTITUTERS=] [default: https://cache.nixos.org]
       --trusted-public-keys <KEYS>  Keys that narinfos must be signed by [env: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS=] [default: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=]
       --no-require-sigs             Accept narinfos without a trusted signature [env: NIX_STORE_CSI_NO_REQUIRE_SIGS=]
+      --netrc-file <FILE>           Netrc file with credentials for caches, read on every request [env: NIX_STORE_CSI_NETRC_FILE=]
+      --state-dir <DIR>             Directory that holds the node store in `store/` [env: NIX_STORE_CSI_STATE_DIR=] [default: /var/lib/nix-store-csi]
+      --log-level <LEVEL>           off, error, warn, info, debug or trace [env: NIX_STORE_CSI_LOG_LEVEL=] [default: info]
+      --log-format <FORMAT>         text or json [env: NIX_STORE_CSI_LOG_FORMAT=] [default: text] [possible values: text, json]
+      --max-substitution-jobs <N>   NARs to fetch at once [env: NIX_STORE_CSI_MAX_SUBSTITUTION_JOBS=] [default: 16]
+  -h, --help                        Print help
+```
+
+## `locality`
+
+```console
+$ nix-store-csi locality --help
+Serve a scheduler extender that scores nodes by how much of a pod's closure they hold
+
+Usage: nix-store-csi locality [OPTIONS] --plugins <HOST:PORT>
+
+Options:
+      --plugins <HOST:PORT>         A name with every node plugin's address, like a headless Service's, and the port of their `--metrics-address`. The plugins need `--serve-paths` [env: NIX_STORE_CSI_PLUGINS=]
+      --substituters <URLS>         Binary caches [env: NIX_STORE_CSI_SUBSTITUTERS=] [default: https://cache.nixos.org]
+      --address <ADDRESS>           Serve the extender, `/healthz` and `/metrics` on ADDRESS [env: NIX_STORE_CSI_ADDRESS=] [default: [::]:8080]
+      --trusted-public-keys <KEYS>  Keys that narinfos must be signed by [env: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS=] [default: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=]
+      --no-require-sigs             Accept narinfos without a trusted signature [env: NIX_STORE_CSI_NO_REQUIRE_SIGS=]
+      --scrape-interval <DURATION>  Read every node plugin's `/store-paths` every DURATION. A node whose plugin misses 3 reads in a row scores 0 [env: NIX_STORE_CSI_SCRAPE_INTERVAL=] [default: 15s]
       --netrc-file <FILE>           Netrc file with credentials for caches, read on every request [env: NIX_STORE_CSI_NETRC_FILE=]
       --state-dir <DIR>             Directory that holds the node store in `store/` [env: NIX_STORE_CSI_STATE_DIR=] [default: /var/lib/nix-store-csi]
       --log-level <LEVEL>           off, error, warn, info, debug or trace [env: NIX_STORE_CSI_LOG_LEVEL=] [default: info]

@@ -1,0 +1,113 @@
+{{- if .Values.locality.enabled }}
+# The locality extender finds the node plugins by this name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-plugins
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "nix-store-csi.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-locality
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "nix-store-csi.localitySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.locality.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-locality
+  labels:
+    {{- include "nix-store-csi.labels" . | nindent 4 }}
+spec:
+  # Every replica would read every node plugin.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nix-store-csi.localitySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nix-store-csi.localitySelectorLabels" . | nindent 8 }}
+    spec:
+      # The plugin's ServiceAccount, which the caches may grant access to.
+      {{- include "nix-store-csi.podSpec" . | nindent 6 }}
+      {{- with .Values.locality.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.locality.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: locality
+          {{- include "nix-store-csi.image" . | nindent 10 }}
+          # The image's entrypoint serves the node plugin.
+          command:
+            - /bin/nix-store-csi
+          args:
+            - locality
+            - --plugins={{ .Release.Name }}-plugins.{{ .Release.Namespace }}.svc:{{ .Values.metrics.port }}
+            - "--address=[::]:{{ .Values.locality.port }}"
+            {{- range .Values.extraArgs }}
+            {{- if regexMatch "^--(substituters|trusted-public-keys|no-require-sigs|log-level|log-format)(=|$)" . }}
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+          env:
+            {{- include "nix-store-csi.cacheEnv" . | nindent 12 }}
+          {{- with include "nix-store-csi.cacheEnvFrom" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.locality.port }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.locality.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with include "nix-store-csi.credentialsMount" . }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+      {{- with include "nix-store-csi.credentials" . }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -61,6 +61,17 @@ and also deletes recently used paths, least recently used first, until it
 frees enough. Even then it spares the closures that the plugin prefetches,
 since the plugin would fetch them again within a minute.
 
+## Locality
+
+The plugin doesn't talk to the API server. To let a scheduler prefer nodes
+that hold a pod's closure, `locality` runs in a Deployment of its own as a
+scheduler extender, and reads each node plugin's list of store paths. For each
+node's system, it resolves the closure of the store paths that the pod's
+volumes list from the caches. It scores the node by the share of that
+closure's NAR size that the node store holds. Resolving can take longer than
+the scheduler waits, so a closure that isn't resolved yet scores 0 while it
+resolves in the background.
+
 ## State dir structure
 
 ```

@@ -152,12 +152,11 @@ let
 
   # The test starts it with the cache down, for a closure that only the
   # plugin's prefetch fetched.
-  warm = writeText "warm.json" (
-    builtins.toJSON (pod {
-      name = "warm";
-      args = [ "${fixtures.warm}" ];
-    })
-  );
+  warmPod = pod {
+    name = "warm";
+    args = [ "${fixtures.warm}" ];
+  };
+  warm = writeText "warm.json" (builtins.toJSON warmPod);
   # A pod with warm's closure, which --max-store-size refuses.
   big = writeText "big.json" (
     builtins.toJSON (pod {
@@ -165,6 +164,26 @@ let
       args = [ "${fixtures.warm}" ];
     })
   );
+  # Scores warm's closure on this node and on cold, a node without a plugin.
+  extenderArgs = writeText "extender-args.json" (
+    builtins.toJSON {
+      Pod = warmPod;
+      NodeNames = [
+        "machine"
+        "cold"
+      ];
+    }
+  );
+  volcanoRequest = writeText "volcano-request.json" (
+    builtins.toJSON {
+      task.Pod = warmPod;
+      nodes = [
+        { Name = "machine"; }
+        { Name = "cold"; }
+      ];
+    }
+  );
+
   prefetchWarm = writeText "prefetch.json" (
     builtins.toJSON {
       data = {
@@ -189,8 +208,8 @@ testers.runNixOSTest {
         "--kubelet-arg=sync-frequency=5s"
         "--kubelet-arg=volume-stats-agg-period=5s"
       ];
+      # The locality extender finds the plugins through cluster DNS.
       disable = [
-        "coredns"
         "local-storage"
         "metrics-server"
         "servicelb"
@@ -199,6 +218,7 @@ testers.runNixOSTest {
       images = [
         (airgapImage "mirrored-pause")
         (airgapImage "klipper-helm")
+        (airgapImage "mirrored-coredns-coredns")
         registrar
         livenessprobe
         csi-image
@@ -222,7 +242,8 @@ testers.runNixOSTest {
           trustedPublicKeys = [ (lib.fileContents ./test-1.pub) ];
           netrcSecret = "nix-store-csi-netrc";
           metrics.enabled = true;
-          extraArgs = [ "--serve-paths" ];
+          # Turns on --serve-paths too.
+          locality.enabled = true;
           admissionPolicy.allowedNamespaces = [ "default" ];
           # The other store path doesn't exist, so the prefetch succeeds only
           # if the plugin picks this system's.
@@ -401,6 +422,22 @@ testers.runNixOSTest {
         t.assertEqual(held["${hello}"], "recent")
 
     closure = sorted(machine.succeed("xargs -n1 basename < ${writeClosure [ busybox ]}").split())
+    # sleep mounts busybox's closure, which warm references, so warm's closure
+    # adds only warm.
+    held = sum(map(nar_size, closure))
+    warm_closure = held + nar_size("${baseNameOf fixtures.warm}")
+
+    with subtest("the locality extender scores the node by the share of a closure it holds"):
+        machine.succeed("kubectl -n kube-system rollout status deployment/nix-store-csi-locality --timeout=300s")
+        post = "${curl}/bin/curl -sf -H 'Content-Type: application/json' --data-binary"
+        # The first request starts resolving warm's closure, and the node
+        # counts once the extender reads its plugin.
+        machine.wait_until_succeeds(f"{post} @${extenderArgs} http://127.0.0.1:8080/prioritize | ${jq}/bin/jq -e '.[0].Score > 0'", timeout=120)
+        scores = json.loads(machine.succeed(f"{post} @${extenderArgs} http://127.0.0.1:8080/prioritize"))
+        t.assertEqual(scores, [{"Host": "machine", "Score": 10 * held // warm_closure}, {"Host": "cold", "Score": 0}])
+        scores = json.loads(machine.succeed(f"{post} @${volcanoRequest} http://127.0.0.1:8080/volcano/prioritize"))
+        t.assertEqual(scores, {"nodeScore": {"machine": 100 * held // warm_closure, "cold": 0}})
+
     ls = "kubectl exec sleep -- ${busybox}/bin/ls /nix/store"
 
     with subtest("the pod sees only its closure, on one read-only mount"):
@@ -435,10 +472,8 @@ testers.runNixOSTest {
         t.assertEqual(sorted(machine.succeed(f"ls {target}").split()), closure)
 
     with subtest("the plugin refuses a volume that would take the node store over --max-store-size"):
-        # sleep mounts busybox's closure, which warm references, so warm's
-        # closure adds only warm. The limit is one byte short, and stays set.
-        held = sum(map(nar_size, closure))
-        limit = held + nar_size("${baseNameOf fixtures.warm}") - 1
+        # The limit is one byte short of warm's closure, and stays set.
+        limit = warm_closure - 1
         node = "-n kube-system daemonset/nix-store-csi-node"
         machine.succeed(f"kubectl set env {node} -c nix-store-csi NIX_STORE_CSI_MAX_STORE_SIZE={limit}")
         machine.succeed(f"kubectl rollout status {node} --timeout=300s")

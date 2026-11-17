@@ -24,6 +24,15 @@ tests:
             exp_annotations:
               summary: Prometheus can't scrape the nix-store-csi plugin on node-a.
               description: The plugin may have crashed, or its pod may not be ready. Pods on the node can't mount new volumes without it.
+      # The locality extender never started, so it has no up series.
+      - eval_time: 15m
+        alertname: NixStoreCsiLocalityDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Prometheus can't scrape the locality extender.
+              description: Its pod may not be running or ready. With ignorable, kube-scheduler and Volcano place pods without its scores and report no error.
 
   - interval: 1m
     input_series:
@@ -279,3 +288,55 @@ tests:
             exp_annotations:
               summary: node-c hasn't read the prefetch list storePaths at hash @hash@.
               description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_locality_scrapes_total{instance="locality", result="ok"}
+        values: 0+3x40
+      - series: nix_store_csi_locality_scrapes_total{instance="locality", result="error"}
+        values: 0+1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NixStoreCsiLocalityScrapeErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 25% of the locality extender's reads of the node plugins fail.
+              description: A node whose plugin misses 3 reads in a row scores 0, so the scheduler ignores the closures it holds. The locality extender's log has the errors, and nix_store_csi_locality_nodes counts the nodes it reads.
+
+  - interval: 1m
+    input_series:
+      - series: nix_store_csi_locality_closure_resolves_total{instance="locality-a", result="error"}
+        values: 0+1x40
+      # One pod with a missing store path.
+      - series: nix_store_csi_locality_closure_resolves_total{instance="locality-b", result="error"}
+        values: 0 1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NixStoreCsiLocalityResolveErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: locality-a
+              result: error
+            exp_annotations:
+              summary: The locality extender can't resolve closures from the caches.
+              description: Pods that use those store paths score 0 on every node. The locality extender's log says why, such as a store path that no cache has or a narinfo without a trusted signature.
+
+  - interval: 1m
+    input_series:
+      - series: up{job="default/nix-store-csi-locality", instance="10.0.0.1:8080"}
+        values: 1x10 0x20
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NixStoreCsiLocalityDown
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: NixStoreCsiLocalityDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Prometheus can't scrape the locality extender.
+              description: Its pod may not be running or ready. With ignorable, kube-scheduler and Volcano place pods without its scores and report no error.

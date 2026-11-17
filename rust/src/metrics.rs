@@ -1,14 +1,17 @@
 //! Prometheus metrics, which `csi --metrics-address` serves at `/metrics`,
-//! and the node store's paths, which it serves at `/paths`.
+//! and the node store's paths, which it serves at `/paths` and
+//! `/store-paths`.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use harmonia_store_path::StoreDir;
+use anyhow::Context;
+use harmonia_store_path::{StoreDir, StorePath};
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode, header};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{
     DescriptorEncoder, EncodeLabel, EncodeLabelSet, EncodeMetric, LabelSetEncoder, text,
@@ -25,10 +28,18 @@ use tracing::warn;
 
 use crate::http::{self, response};
 use crate::store::{HeldPath, Reason, Store};
+use crate::store_path::system;
 
-const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
+pub(crate) const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
 
 const PATHS_CONTENT_TYPE: &str = "application/x-ndjson";
+
+const STORE_PATHS_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+
+/// Headers of `/store-paths` that tell `locality` which node it read and which
+/// attribute of a volume that node uses.
+pub(crate) const NODE_HEADER: &str = "nix-store-csi-node";
+pub(crate) const SYSTEM_HEADER: &str = "nix-store-csi-system";
 
 /// The labels of a publish or an unpublish. Only publishes have `fetched`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -48,8 +59,13 @@ impl EncodeLabelSet for CallLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ResultLabels {
-    result: &'static str,
+pub(crate) struct ResultLabels {
+    pub result: &'static str,
+}
+
+/// The `result` label of an event.
+pub(crate) fn result(ok: bool) -> &'static str {
+    if ok { "ok" } else { "error" }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -75,7 +91,7 @@ struct BuildLabels {
     system: String,
 }
 
-type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
+pub(crate) type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
 
 /// The metrics that the plugin updates as it works. [`StoreGauges`] reads the
 /// others from the store at each scrape.
@@ -166,7 +182,7 @@ impl Metrics {
             }))
             .inc_by(size);
         }
-        let result = if ok { "ok" } else { "error" };
+        let result = result(ok);
         (self
             .nar_fetches
             .get_or_create(&FetchLabels { cache, result }))
@@ -174,7 +190,7 @@ impl Metrics {
     }
 
     pub fn collection(&self, ok: bool, started: Instant) {
-        let result = if ok { "ok" } else { "error" };
+        let result = result(ok);
         (self.collections.get_or_create(&ResultLabels { result }))
             .observe(started.elapsed().as_secs_f64());
     }
@@ -455,21 +471,42 @@ pub fn registry(store: &Arc<Store>) -> Registry {
 struct Served {
     registry: Registry,
     store: Arc<Store>,
-    /// `--keep-recent`, for the `recent` reason, if `--serve-paths` turns
-    /// `/paths` on.
-    keep_recent: Option<Duration>,
+    /// Set if `--serve-paths` turns `/paths` and `/store-paths` on.
+    paths: Option<Paths>,
     /// Lets one `/paths` listing run at a time, since each reads every
     /// narinfo.
     listing: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// `/paths` and `/store-paths`, which `--serve-paths` turns on.
+pub struct Paths {
+    /// `--keep-recent`, for the `recent` reason.
+    keep_recent: Duration,
+    /// The node and its Nix system, for `locality`.
+    headers: header::HeaderMap,
+}
+
+impl Paths {
+    pub fn new(keep_recent: Duration, node: &str) -> anyhow::Result<Self> {
+        let mut headers = header::HeaderMap::new();
+        let node =
+            header::HeaderValue::try_from(node).context("--node-id is not a header value")?;
+        headers.insert(NODE_HEADER, node);
+        headers.insert(SYSTEM_HEADER, header::HeaderValue::try_from(system())?);
+        Ok(Self {
+            keep_recent,
+            headers,
+        })
+    }
+}
+
 /// Serves the store's metrics at `/metrics` to every connection on
-/// `listener`, and with `keep_recent` its paths at `/paths`.
-pub async fn serve(listener: TcpListener, store: Arc<Store>, keep_recent: Option<Duration>) {
+/// `listener`, and with `paths` its paths at `/paths` and `/store-paths`.
+pub async fn serve(listener: TcpListener, store: Arc<Store>, paths: Option<Paths>) {
     let served = Arc::new(Served {
         registry: registry(&store),
         store,
-        keep_recent,
+        paths,
         listing: Arc::default(),
     });
     http::serve(listener, "metrics", move |request| {
@@ -480,19 +517,19 @@ pub async fn serve(listener: TcpListener, store: Arc<Store>, keep_recent: Option
 
 async fn respond<B>(request: Request<B>, served: Arc<Served>) -> Response<Full<Bytes>> {
     let path = request.uri().path();
-    match (path, served.keep_recent) {
+    match (path, &served.paths) {
         ("/metrics", _) => {
             let served = served.clone();
             let encoded = move || Ok(encode(&served.registry)?.into());
             answer(path, CONTENT_TYPE, encoded).await
         }
-        ("/paths", Some(keep_recent)) => {
+        ("/paths", Some(paths)) => {
             // Waiting for the turn would let callers queue without limit.
             let Ok(turn) = served.listing.clone().try_lock_owned() else {
                 let body = "a listing is already running\n";
                 return response(StatusCode::SERVICE_UNAVAILABLE, "text/plain", body);
             };
-            let store = served.store.clone();
+            let (keep_recent, store) = (paths.keep_recent, served.store.clone());
             // The turn lasts until the listing ends, even if the client
             // leaves.
             let encoded = move || {
@@ -501,6 +538,26 @@ async fn respond<B>(request: Request<B>, served: Arc<Served>) -> Response<Full<B
                 Ok(json_lines(&paths)?.into())
             };
             answer(path, PATHS_CONTENT_TYPE, encoded).await
+        }
+        ("/store-paths", Some(paths)) => {
+            // Read before the listing, so a change during it changes the next
+            // ETag.
+            let etag = format!("\"{:x}\"", served.store.changes());
+            let etag = header::HeaderValue::from_str(&etag).expect("an ETag is ASCII");
+            let mut response = if request.headers().get(header::IF_NONE_MATCH) == Some(&etag) {
+                let mut response = Response::new(Full::default());
+                *response.status_mut() = StatusCode::NOT_MODIFIED;
+                response
+            } else {
+                let store = served.store.clone();
+                let encoded = move || Ok(store_path_lines(&store.store_paths()?).into());
+                answer(path, STORE_PATHS_CONTENT_TYPE, encoded).await
+            };
+            if !response.status().is_server_error() {
+                response.headers_mut().extend(paths.headers.clone());
+                response.headers_mut().insert(header::ETAG, etag);
+            }
+            response
         }
         _ => response(StatusCode::NOT_FOUND, "text/plain", "not found\n"),
     }
@@ -522,6 +579,15 @@ async fn answer(
             response(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", body)
         }
     }
+}
+
+/// Encodes `paths` as a store path on each line.
+fn store_path_lines(paths: &[StorePath]) -> String {
+    let store_dir = StoreDir::default();
+    paths.iter().fold(String::new(), |mut body, path| {
+        let _ = writeln!(body, "{}", store_dir.display(path));
+        body
+    })
 }
 
 /// Encodes `paths` as JSON lines.
@@ -548,7 +614,7 @@ fn json_lines(paths: &[HeldPath]) -> serde_json::Result<Vec<u8>> {
     Ok(body)
 }
 
-fn encode(registry: &Registry) -> Result<String, fmt::Error> {
+pub(crate) fn encode(registry: &Registry) -> Result<String, fmt::Error> {
     let mut body = String::new();
     text::encode(&mut body, registry)?;
     Ok(body)
@@ -579,7 +645,7 @@ pub mod tests {
         let served = Arc::new(Served {
             registry: registry(&store),
             store,
-            keep_recent: Some(Duration::ZERO),
+            paths: Some(Paths::new(Duration::ZERO, "node").unwrap()),
             listing: Arc::default(),
         });
         let paths = || respond(Request::get("/paths").body(()).unwrap(), served.clone());

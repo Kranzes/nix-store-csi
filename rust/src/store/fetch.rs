@@ -425,6 +425,7 @@ impl Store {
         .map_err(anyhow::Error::from)
         .flatten();
         self.installs.fetch_add(1, Ordering::SeqCst);
+        self.changes.fetch_add(1, Ordering::SeqCst);
         match moved {
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("making the store object read-only: {e}; keeping it"),

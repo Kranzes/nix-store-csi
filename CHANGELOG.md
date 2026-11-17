@@ -15,7 +15,17 @@
   chart renders from `prefetch`, so owners can write their keys outside Helm.
   The plugin starts before the ConfigMap exists and reads its lists once it
   does.
-- The chart's `imagePullSecrets` sets the node plugins' pull Secrets.
+- The chart's `imagePullSecrets` sets the pods' pull Secrets.
+- `locality`, and the chart's `locality.enabled`, run a scheduler extender
+  for kube-scheduler and Volcano. It scores each node by the share of a pod's
+  closure, by NAR size, that the node store holds. `locality.nodeSelector`
+  and `locality.tolerations` place its pod. The `NixStoreCsiLocalityDown`,
+  `NixStoreCsiLocalityScrapeErrors` and `NixStoreCsiLocalityResolveErrors`
+  alerts cover it.
+- With `--serve-paths`, the plugin also serves `/store-paths`, the node
+  store's store paths alone, which `locality` reads. Its `ETag` changes when
+  the node store gains or loses a store path, and a request with the current
+  one gets 304.
 
 ### Changed
 
@@ -30,7 +40,6 @@
   its current version.
 - The plugin resolves cache host names with hickory-dns instead of musl's
   resolver. It reads `/etc/hosts` and `/etc/resolv.conf` as before.
-
 ## 0.1.11 - 2026-11-13
 
 ### Added

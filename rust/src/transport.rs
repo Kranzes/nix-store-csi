@@ -454,7 +454,7 @@ pub fn broke_off(e: &anyhow::Error) -> bool {
     })
 }
 
-fn client() -> anyhow::Result<reqwest::Client> {
+pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
     // reqwest loads the system root certificates, so `SSL_CERT_FILE` and
     // `SSL_CERT_DIR` work.
     reqwest::Client::builder()

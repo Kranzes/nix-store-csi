@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, ensure};
 use clap::{Parser, Subcommand};
 
+use crate::locality::Plugins;
 use crate::store::EnsureFree;
 
 #[derive(Parser)]
@@ -138,10 +139,16 @@ pub enum Command {
         /// `[::]:9809`. Off unless set.
         #[arg(long, value_name = "ADDRESS", env = "NIX_STORE_CSI_METRICS_ADDRESS")]
         metrics_address: Option<SocketAddr>,
-        /// Also serve the node store's paths at `/paths` on `--metrics-address`.
-        /// Anyone who can reach the address can read them, and so mount their
-        /// closures.
-        #[arg(long, env = "NIX_STORE_CSI_SERVE_PATHS", requires = "metrics_address")]
+        /// Also serve the node store's paths on `--metrics-address`, at
+        /// `/paths` with why garbage collection keeps each, and at
+        /// `/store-paths` alone. Anyone who can reach the address can read
+        /// them, and so mount their closures.
+        #[arg(
+            long,
+            env = "NIX_STORE_CSI_SERVE_PATHS",
+            requires = "metrics_address",
+            overrides_with = "serve_paths"
+        )]
         serve_paths: bool,
         /// Refuse a volume whose closure's NARs add up to more than SIZE, like
         /// `20G`, before fetching any of it. Prefetched closures don't count. Off
@@ -187,6 +194,33 @@ pub enum Command {
         /// use the state dir.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Serve a scheduler extender that scores nodes by how much of a pod's
+    /// closure they hold.
+    Locality {
+        /// A name with every node plugin's address, like a headless Service's,
+        /// and the port of their `--metrics-address`. The plugins need
+        /// `--serve-paths`.
+        #[arg(long, value_name = "HOST:PORT", env = "NIX_STORE_CSI_PLUGINS")]
+        plugins: Plugins,
+        /// Serve the extender, `/healthz` and `/metrics` on ADDRESS.
+        #[arg(
+            long,
+            value_name = "ADDRESS",
+            env = "NIX_STORE_CSI_ADDRESS",
+            default_value = "[::]:8080"
+        )]
+        address: SocketAddr,
+        /// Read every node plugin's `/store-paths` every DURATION. A node whose
+        /// plugin misses 3 reads in a row scores 0.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            env = "NIX_STORE_CSI_SCRAPE_INTERVAL",
+            default_value = "15s",
+            value_parser = parse_interval
+        )]
+        scrape_interval: Duration,
     },
 }
 
@@ -267,6 +301,17 @@ mod tests {
         .unwrap();
         let stores: Vec<_> = cli.substituters.split_whitespace().collect();
         assert_eq!(stores, ["https://b", "https://c"]);
+        // The chart adds --serve-paths for locality, and extraArgs may too.
+        let csi = [
+            "nix-store-csi",
+            "csi",
+            "--endpoint=/csi.sock",
+            "--node-id=node",
+            "--metrics-address=[::]:9809",
+            "--serve-paths",
+            "--serve-paths",
+        ];
+        Cli::try_parse_from(csi).unwrap();
     }
 
     #[test]

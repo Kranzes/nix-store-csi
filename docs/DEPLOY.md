@@ -281,6 +281,94 @@ nix_store_csi_build_info{pool="gpu", system="x86_64-linux"} unless on (instance)
 Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
 pods into the metrics in your own scrape config.
 
+### Scheduling by closure
+
+kube-scheduler's ImageLocality plugin prefers nodes that already have a pod's
+images. With `locality.enabled`, the chart runs an extender that does the same
+for closures. It scores each node by the share of the pod's closure, by NAR
+size, that its node store holds.
+
+```yaml
+# values.yaml
+locality:
+  enabled: true
+```
+
+The extender reads `/store-paths` from every node plugin every 15 seconds. The
+chart turns on the plugins' metrics port and `--serve-paths` for it, and adds
+a headless Service, `<release>-plugins`, that lists them. A plugin whose node
+store has the same store paths as at the last read answers 304 without a
+listing. The extender holds each node's store paths in memory, so it needs
+more memory with more nodes and bigger node stores. It resolves closures from
+the plugins' caches, with the same keys and credentials. On a cluster that
+taints all its nodes, `locality.nodeSelector` and `locality.tolerations` place
+the extender's pod.
+
+A node scores 0 until the extender reads its plugin, and again once its plugin
+misses 3 reads in a row. A store path that a node fetches counts from the next
+read, within 15 seconds. A node that just joined is then like one with a
+`PreferNoSchedule` taint for each closure it lacks. Pods go to nodes that hold
+their closures while those have room, and the new node's scores rise as it
+fetches and prefetches.
+
+A pod scores 0 on every node until the extender has resolved the closure of
+its store paths. The first request that lists a store path starts resolving it
+in the background, so the scheduler never waits for the caches. Resolving
+reads a narinfo for each store path. From cache.nixos.org that takes about a
+second for a few hundred store paths, and two for 1,700. Pods scheduled in the
+meantime, like the first replicas of a new version, get no preference.
+`nix-store-csi unpack --dry-run` resolves a closure the same way, so it shows
+how long yours take. If resolving fails, pods with that store path score 0 for
+a minute, until a request tries again.
+
+kube-scheduler reads extenders from its configuration file. It usually runs
+without cluster DNS, so the URL takes the cluster IP of the
+`<release>-locality` Service, which the chart's notes print a command for:
+
+```yaml
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+extenders:
+  - urlPrefix: http://<cluster IP>:8080
+    prioritizeVerb: prioritize
+    weight: 1
+    nodeCacheCapable: true
+    httpTimeout: 1s
+    ignorable: true
+```
+
+The extender scores from 0 to 10. kube-scheduler multiplies the score by 10
+and by `weight`, so `weight: 1` counts as much as ImageLocality.
+`nodeCacheCapable` makes it send node names instead of whole Node objects.
+kube-scheduler schedules one pod at a time, so `httpTimeout` limits how long a
+slow extender holds up every pod after it. The default is 5 seconds. The
+extender answers from memory and never waits for the caches. With `ignorable`,
+a failed or slow extender doesn't fail scheduling, and the pod is scheduled
+without its scores.
+
+Hosted control planes like EKS, GKE and AKS don't let you configure the
+default scheduler. There, pods need a second scheduler that they name in
+`schedulerName`, or Volcano. Volcano's `extender` plugin scores from 0 to 100:
+
+```yaml
+- plugins:
+    - name: extender
+      arguments:
+        extender.urlPrefix: http://<release>-locality.<namespace>.svc:8080/volcano
+        extender.prioritizeVerb: prioritize
+        extender.httpTimeout: 5s
+        extender.ignorable: true
+```
+
+Volcano sends every pod on each node with the request, so its default timeout
+of 1 second can be too short. Without `extender.ignorable`, a failed request
+leaves the task unscheduled in that scheduling session. Volcano adds the score
+to the other plugins' without a weight, so the weights of plugins like
+`binpack` and `nodeorder` set how much it counts. It scores a pending task
+again in every session, so a pod that waits for resources gets its scores
+once its closure resolves. `extender.managedResources`, like
+`[nvidia.com/gpu]`, sends only the tasks that request those resources.
+
 ### Security
 
 The CSIDriver is cluster-scoped, and every Pod Security level allows its
@@ -289,9 +377,10 @@ of any store path that the configured caches serve. That includes private
 caches that the plugin reaches with the netrc Secret or a service account
 token.
 
-Knowing a store path is enough to mount its closure. `/paths` lists every
-store path on a node to anyone who can reach the metrics port, so
-`--serve-paths` is off by default.
+Knowing a store path is enough to mount its closure. `/paths` and
+`/store-paths` list every store path on a node to anyone who can reach the
+metrics port, so `--serve-paths` is off by default. `locality.enabled` turns
+it on.
 
 Pods can ask for store paths whose closures are any size. A node fetches the
 closure of every pod it runs, and the fetch goes on after the pod is gone.
@@ -451,9 +540,10 @@ failed sync deletes the store paths it covered and counts in
 `prefetched` is 1 once the node store holds the closure of the list with that
 name and hash. `system` is the node's Nix system.
 
-With `--serve-paths` in `extraArgs`, the same port also serves `/paths`, a
-JSON line for each store path in the node store, so a cache operator can see
-what nodes still need:
+With `--serve-paths` in `extraArgs`, or with `locality.enabled`, the same port
+also serves `/paths` and `/store-paths`. `/paths` has a JSON line for each
+store path in the node store, so a cache operator can see what nodes still
+need:
 
 ```json
 {"path":"/nix/store/<hash>-hello-2.12.3","nar_size":274712,"last_use":"2026-11-11T09:30:00Z","held":"mounted"}
@@ -465,6 +555,25 @@ volume, `prefetch` in the `prefetch` list's closures, `fetching` for a publish
 or a pending sync, `recent` for a use within `--keep-recent`, or `none`. The
 next garbage collection deletes the `none` paths, and `recent` ones too if
 `--ensure-free` needs the space.
+
+`/store-paths` lists only the store paths, one on each line. Its `ETag`
+changes when the node store gains or loses a store path, and a request whose
+`If-None-Match` has the current one gets 304 without a listing.
+
+With `locality.enabled`, the locality extender serves its own metrics at
+`/metrics` on port 8080 (`locality.port`), and `metrics.podMonitor.enabled`
+adds a PodMonitor for it:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `locality_scrapes_total` | counter | `result` |
+| `locality_nodes` | gauge | |
+| `locality_closure_resolves_total` | counter | `result` |
+| `locality_prioritize_duration_seconds` | histogram | `scheduler`, `result` |
+
+`locality_scrapes_total` counts reads of the plugins' `/store-paths`, those
+answered with 304 too, and failed lookups of `<release>-plugins`. `locality_nodes` counts the nodes whose
+plugin the extender read within the last 3 intervals.
 
 Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 `severity`:
@@ -481,3 +590,6 @@ Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 | `NixStoreCsiLowSpace` | The filesystem has less free space or inodes than `--ensure-free` keeps, so collection deletes store paths used within `--keep-recent`. |
 | `NixStoreCsiStoreNearLimit` | What garbage collection can't delete is over `ratio`, 90% by default, of `maxStoreSize`, so publishes that need a fetch may fail. |
 | `NixStoreCsiPrefetchBehind` | A node doesn't hold the current version of a prefetch list that it reads. One rule fires for a list that a node has read but doesn't hold. For each list that the chart renders, another fires while a node hasn't read its current version. A list that others add has no such rule, so no rule sees a node still on its old hash. Set `for` above the time a node takes to fetch a list. With `nodePools`, the rules for the chart's lists need the `pool` label. |
+| `NixStoreCsiLocalityDown` | Prometheus can't scrape the locality extender, or it isn't running. It needs the PodMonitor. |
+| `NixStoreCsiLocalityScrapeErrors` | More than `ratio`, 10% by default, of the locality extender's reads of the node plugins fail. |
+| `NixStoreCsiLocalityResolveErrors` | The locality extender fails to resolve closures from the caches for 15 minutes. |

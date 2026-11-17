@@ -63,7 +63,7 @@ pub(crate) fn ghost() -> StorePath {
 
 /// Returns a store that holds hello's closure from the fixtures, along with
 /// hello's store path and the closure.
-pub(super) async fn hello_store(state: &Path) -> Option<(Arc<Store>, StorePath, Arc<[StorePath]>)> {
+pub(crate) async fn hello_store(state: &Path) -> Option<(Arc<Store>, StorePath, Arc<[StorePath]>)> {
     let dir = fixtures()?;
     let hello = fixture_root(&dir, "hello.path");
     let store = Arc::new(Store::new(zstd_config(&dir, state)).unwrap());

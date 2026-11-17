@@ -48,6 +48,25 @@
   "expr" (printf "nix_store_csi_uncollectable_bytes / nix_store_csi_max_store_size_bytes > %v" $alerts.NixStoreCsiStoreNearLimit.ratio)
   "summary" "What garbage collection can't delete on {{ $labels.instance }} is at {{ $value | humanizePercentage }} of --max-store-size."
   "description" "The plugin refuses a volume that needs a fetch if its closure would go over the limit, so its pod stays in ContainerCreating. Pods whose closures are on the node still start. Raise --max-store-size if the disk has room.") }}
+{{- if .Values.locality.enabled }}
+{{- if .Values.metrics.podMonitor.enabled }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiLocalityDown"
+  "expr" (printf "absent(up{job=\"%s/%s-locality\"} == 1)" .Release.Namespace .Release.Name)
+  "summary" "Prometheus can't scrape the locality extender."
+  "description" "Its pod may not be running or ready. With ignorable, kube-scheduler and Volcano place pods without its scores and report no error.") }}
+{{- end }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiLocalityScrapeErrors"
+  "expr" (printf "sum(rate(nix_store_csi_locality_scrapes_total{result=\"error\"}[15m])) / sum(rate(nix_store_csi_locality_scrapes_total[15m])) > %v" $alerts.NixStoreCsiLocalityScrapeErrors.ratio)
+  "summary" "{{ $value | humanizePercentage }} of the locality extender's reads of the node plugins fail."
+  "description" "A node whose plugin misses 3 reads in a row scores 0, so the scheduler ignores the closures it holds. The locality extender's log has the errors, and nix_store_csi_locality_nodes counts the nodes it reads.") }}
+{{- $rules = append $rules (dict
+  "alert" "NixStoreCsiLocalityResolveErrors"
+  "expr" "increase(nix_store_csi_locality_closure_resolves_total{result=\"error\"}[15m]) > 0"
+  "summary" "The locality extender can't resolve closures from the caches."
+  "description" "Pods that use those store paths score 0 on every node. The locality extender's log says why, such as a store path that no cache has or a narinfo without a trusted signature.") }}
+{{- end }}
 {{- $lists := dict "" .Values.prefetch }}
 {{- range $pool, $values := .Values.nodePools }}
 {{- $_ := set $lists $pool ($values.prefetch | default dict) }}

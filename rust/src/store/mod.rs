@@ -130,6 +130,11 @@ pub struct Store {
     ensures: AtomicUsize,
     /// Counts the fetches that wrote a narinfo.
     installs: AtomicU64,
+    /// The `ETag` of `/store-paths`. It counts the store paths that came into
+    /// or left store/, from the plugin's start time in nanoseconds, so no run
+    /// repeats an earlier one's count. It goes up after each change, so a
+    /// listing that reads it first is at least as new as the count.
+    changes: AtomicU64,
     /// The NAR size of the store objects in store/, for the metrics, if
     /// [`Config::measure`] is set.
     size: Option<AtomicU64>,
@@ -187,6 +192,8 @@ impl Store {
             bail!("another nix-store-csi is using {}", state.display());
         }
         check_layout(&state.join("version"))?;
+        let started = std::time::UNIX_EPOCH.elapsed().unwrap_or_default();
+        let started = u64::try_from(started.as_nanos()).unwrap_or_default();
         let dir = state.join("store");
         let narinfos = state.join("narinfo");
         let views = state.join("views");
@@ -233,6 +240,7 @@ impl Store {
             prefetched: Holds::default(),
             ensures: AtomicUsize::default(),
             installs: AtomicU64::default(),
+            changes: AtomicU64::new(started),
             size: None,
             gc: Arc::default(),
             dir_fd,
@@ -449,6 +457,7 @@ impl Store {
         let tree = self.unpacked(path);
         let trash = Scratch::move_in(&self.tmp, &tree)
             .with_context(|| format!("moving {} out of the node store", tree.display()))?;
+        self.changes.fetch_add(1, Ordering::SeqCst);
         if let Some(total) = &self.size {
             total.update(Ordering::Relaxed, Ordering::Relaxed, |total| {
                 total.saturating_sub(size)
@@ -459,6 +468,17 @@ impl Store {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn changes(&self) -> u64 {
+        self.changes.load(Ordering::SeqCst)
+    }
+
+    /// The store paths in store/, sorted.
+    pub fn store_paths(&self) -> anyhow::Result<Vec<StorePath>> {
+        let mut paths = list_store_paths(&self.dir)?;
+        paths.sort_unstable();
+        Ok(paths)
     }
 
     fn unpacked(&self, path: &StorePath) -> PathBuf {

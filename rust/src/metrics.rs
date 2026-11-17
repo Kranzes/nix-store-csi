@@ -102,6 +102,7 @@ pub struct Metrics {
     freed_bytes: Counter,
     failed_syncs: Counter,
     prefetched: Family<ListLabels, Gauge>,
+    prefetched_sizes: Family<ListLabels, Gauge>,
 }
 
 impl Default for Metrics {
@@ -124,6 +125,7 @@ impl Default for Metrics {
             freed_bytes: Counter::default(),
             failed_syncs: Counter::default(),
             prefetched: Family::default(),
+            prefetched_sizes: Family::default(),
         }
     }
 }
@@ -203,16 +205,19 @@ impl Metrics {
         self.failed_syncs.inc();
     }
 
-    /// Reports each prefetch list by name and hash, and whether the node store
-    /// holds its closure.
-    pub fn prefetched(&self, lists: &[(&str, &str, bool)]) {
+    /// Reports each prefetch list by name and hash, whether the node store
+    /// holds its closure, and the NAR size of the closure it holds.
+    pub fn prefetched(&self, lists: &[(&str, &str, bool, u64)]) {
         self.prefetched.clear();
-        for &(list, hash, held) in lists {
+        self.prefetched_sizes.clear();
+        for &(list, hash, held, nar_size) in lists {
             let labels = ListLabels {
                 list: list.to_owned(),
                 hash: hash.to_owned(),
             };
             self.prefetched.get_or_create(&labels).set(i64::from(held));
+            let nar_size = i64::try_from(nar_size).unwrap_or(i64::MAX);
+            self.prefetched_sizes.get_or_create(&labels).set(nar_size);
         }
     }
 
@@ -267,6 +272,12 @@ impl Metrics {
             "prefetched",
             "Whether the node store holds the closure of a prefetch list, by its name and the hash of its file",
             self.prefetched.clone(),
+        );
+        registry.register_with_unit(
+            "prefetched_size",
+            "NAR size of the closure that a prefetch list holds, by its name and the hash of its file",
+            Unit::Bytes,
+            self.prefetched_sizes.clone(),
         );
     }
 }

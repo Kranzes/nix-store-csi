@@ -8,6 +8,9 @@
   of the locality extender's answers, by scheduler. Mostly 0 means no
   candidate node held the pod's closure. High while publishes still fetch
   means a candidate held it and the scheduler chose another node.
+- `nix_store_csi_prefetched_size_bytes`, the NAR size of the closure that
+  each prefetch list holds, with the same labels as
+  `nix_store_csi_prefetched`. A store path in several lists counts in each.
 
 ### Changed
 

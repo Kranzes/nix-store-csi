@@ -54,7 +54,7 @@ struct List {
 struct Held {
     roots: Vec<StorePath>,
     closure: Arc<[StorePath]>,
-    _ensuring: Ensuring,
+    ensuring: Ensuring,
     store: Arc<Store>,
 }
 
@@ -153,7 +153,7 @@ impl Prefetch {
                     *held = Some(Held {
                         roots: list.roots.clone(),
                         closure,
-                        _ensuring: done,
+                        ensuring: done,
                         store: self.store.clone(),
                     });
                     let elapsed_ms = list.since.elapsed().as_millis();
@@ -182,13 +182,15 @@ impl Prefetch {
         }
     }
 
-    /// Tells the metrics whether the node store holds the closures of each
-    /// list.
+    /// Tells the metrics whether the node store holds the closure of each
+    /// list, and the NAR size of the closure that each list holds.
     fn report(&self) {
         let lists: Vec<_> = (self.lists.iter())
             .map(|(file, list)| {
                 let name = list_name(file, &self.system).unwrap_or("");
-                (name, list.hash.as_str(), list.is_held())
+                let held = list.held.as_ref();
+                let nar_size = held.and_then(|held| held.ensuring.nar_size()).unwrap_or(0);
+                (name, list.hash.as_str(), list.is_held(), nar_size)
             })
             .collect();
         self.store.metrics().prefetched(&lists);
@@ -377,8 +379,13 @@ mod tests {
 
     /// The `prefetched` sample of the list `name` whose file holds `text`.
     fn prefetched(registry: &Registry, name: &str, text: &str) -> Option<f64> {
+        list_sample(registry, "prefetched", name, text)
+    }
+
+    /// The sample of `metric` for the list `name` whose file holds `text`.
+    fn list_sample(registry: &Registry, metric: &str, name: &str, text: &str) -> Option<f64> {
         let labels = format!("list=\"{name}\",hash=\"{}\"", hash(text));
-        sample(registry, &format!("nix_store_csi_prefetched{{{labels}}}"))
+        sample(registry, &format!("nix_store_csi_{metric}{{{labels}}}"))
     }
 
     /// Collects the store paths that nothing used within a day, and returns
@@ -553,8 +560,11 @@ mod tests {
         std::fs::write(dir.join("storePaths"), "").unwrap();
         prefetch.tick();
         assert!(volume().done().await.unwrap_err().is::<TooBig>());
-        // A node holds an empty list as soon as it reads it.
+        // A node holds an empty list as soon as it reads it, and it takes no
+        // space.
         assert_eq!(gauge(""), Some(1.0));
+        let size = list_sample(&registry, "prefetched_size_bytes", "", "");
+        assert_eq!(size, Some(0.0));
         assert_eq!(collect().await.unwrap(), listed);
     }
 
@@ -621,6 +631,17 @@ mod tests {
         std::fs::remove_file(dir.join(&web)).unwrap();
         prefetch.tick();
         assert_eq!(keep_a_day(&store).await, 0);
+
+        // A store path in two lists counts in the size of each.
+        write(&web, &hello);
+        write(&batch, &hello);
+        prefetch.tick();
+        prefetch.finish().await;
+        prefetch.finish().await;
+        let store_size = sample(&registry, "nix_store_csi_store_size_bytes");
+        assert!(store_size > Some(0.0));
+        let size = |name| list_sample(&registry, "prefetched_size_bytes", name, &hello);
+        assert_eq!((size("web"), size("batch")), (store_size, store_size));
     }
 
     /// A list's series goes when its hash changes or its file goes, so no

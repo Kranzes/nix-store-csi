@@ -487,6 +487,11 @@ impl Ensuring {
         (&mut self.result).await?
     }
 
+    /// The closure's NAR size, once it's resolved.
+    pub fn nar_size(&self) -> Option<u64> {
+        self.progress.get().map(|f| f.total_bytes)
+    }
+
     /// Whether the store had the whole closure, so the ensure started or
     /// joined no fetch.
     pub fn had_closure(&self) -> bool {

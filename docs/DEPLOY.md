@@ -531,6 +531,7 @@ Every metric starts with `nix_store_csi_`:
 | `gc_deleted_paths_total` | counter | |
 | `gc_freed_bytes_total` | counter | |
 | `prefetched` | gauge | `list`, `hash` |
+| `prefetched_size_bytes` | gauge | `list`, `hash` |
 | `build_info` | gauge | `version`, `system` |
 
 A publish that is still fetching after 90 seconds counts as `Unavailable`, and
@@ -549,7 +550,12 @@ gauges are missing on a filesystem with no limit on inodes, like btrfs. A
 failed sync deletes the store paths it covered and counts in
 `failed_syncs_total`.
 `prefetched` is 1 once the node store holds the closure of the list with that
-name and hash. `system` is the node's Nix system.
+name and hash. `prefetched_size_bytes` is the NAR size of the closure that the
+list holds, so owners of lists that share a `maxStoreSize` can see whose list
+takes the space. Until the node holds the list's current version, it is the
+size of the version it held before, or 0. A store path in several lists counts
+in each, so the lists can add up to more than `uncollectable_bytes`. `system`
+is the node's Nix system.
 
 With `--serve-paths` in `extraArgs`, or with `locality.enabled`, the same port
 also serves `/store-paths`, the store paths in the node store, one on each

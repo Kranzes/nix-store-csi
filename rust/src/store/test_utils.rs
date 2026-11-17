@@ -8,7 +8,7 @@ use harmonia_store_path::StorePath;
 
 use super::fetch::{Ensuring, Progress};
 use super::fs::Scratch;
-use super::{Config, EnsureFree, GcGuard, Store};
+use super::{Config, GcGuard, Size, Store};
 use crate::narinfo::tests::{file_store, fixture_root, fixtures};
 
 pub(super) fn scratch() -> Scratch {
@@ -38,7 +38,7 @@ pub(crate) fn unsigned_config(cache: &Path, state: &Path) -> Config {
         netrc_file: None,
         max_closure_size: None,
         max_store_size: None,
-        ensure_free: EnsureFree::Bytes(1 << 30),
+        ensure_free: Size::Bytes(1 << 30),
         measure: true,
     }
 }

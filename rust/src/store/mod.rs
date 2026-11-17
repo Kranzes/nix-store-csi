@@ -36,7 +36,7 @@ use crate::metrics::Metrics;
 use crate::narinfo::PublicKey;
 
 pub use self::fetch::{Ensuring, StoreTooBig, TooBig};
-pub use self::gc::{EnsureFree, Excess};
+pub use self::gc::{Excess, Size};
 pub use self::narinfos::Narinfos;
 pub use self::views::{Usage, check_volume, root_links};
 
@@ -59,7 +59,7 @@ pub struct Config {
     pub max_closure_size: Option<u64>,
     pub max_store_size: Option<u64>,
     /// The free space that collection keeps.
-    pub ensure_free: EnsureFree,
+    pub ensure_free: Size,
     /// Whether start-up adds up the NAR sizes in store/ for the `store_size`
     /// metric.
     pub measure: bool,
@@ -97,7 +97,7 @@ pub struct Store {
     /// Ensures checked against `max_store_size` hold it until they hold their
     /// closures, so each check sees the closures that earlier checks passed.
     checking_size: Mutex<()>,
-    ensure_free: EnsureFree,
+    ensure_free: Size,
     /// Paths whose narinfos wait for a sync to get their final names, each
     /// with the number of failed syncs when its fetch began writing it. A
     /// fetch adds its path before it writes the narinfo, and collection

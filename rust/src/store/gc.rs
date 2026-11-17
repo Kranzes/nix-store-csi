@@ -290,21 +290,21 @@ impl Space {
     clippy::cast_sign_loss,
     reason = "a share of a total is within it"
 )]
-pub(super) fn target(space: Space, ensure_free: EnsureFree) -> (u64, u64) {
+pub(super) fn target(space: Space, ensure_free: Size) -> (u64, u64) {
     let percent = |total: u64, p: f64| (total as f64 * p / 100.0) as u64;
     match ensure_free {
-        EnsureFree::Bytes(bytes) => {
+        Size::Bytes(bytes) => {
             let share = u128::from(space.inodes) * u128::from(bytes.min(space.size))
                 / u128::from(space.size.max(1));
             (bytes, share as u64)
         }
-        EnsureFree::Percent(p) => (percent(space.size, p), percent(space.inodes, p)),
+        Size::Percent(p) => (percent(space.size, p), percent(space.inodes, p)),
     }
 }
 
 /// Returns how many bytes and inodes to free on a filesystem with `space` to
 /// meet `ensure_free`.
-fn excess(space: Space, ensure_free: EnsureFree) -> Excess {
+fn excess(space: Space, ensure_free: Size) -> Excess {
     let (bytes, inodes) = target(space, ensure_free);
     Excess {
         bytes: bytes.saturating_sub(space.free),
@@ -312,10 +312,10 @@ fn excess(space: Space, ensure_free: EnsureFree) -> Excess {
     }
 }
 
-/// Free space to keep on the state dir's filesystem, and the same share of
-/// its inodes.
+/// A size, or a share of the state dir's filesystem, as `--ensure-free` takes
+/// it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum EnsureFree {
+pub enum Size {
     Bytes(u64),
     /// A percentage of the filesystem's size.
     Percent(f64),
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn measures_excess() {
-        use EnsureFree::{Bytes, Percent};
+        use Size::{Bytes, Percent};
         let excess = |space, ensure_free| {
             let Excess { bytes, inodes } = excess(space, ensure_free);
             (bytes, inodes)
@@ -675,7 +675,7 @@ mod tests {
     /// bytes aren't.
     #[test]
     fn measures_excess_on_xfs() {
-        use EnsureFree::{Bytes, Percent};
+        use Size::{Bytes, Percent};
         // mkfs.xfs defaults to 4 KiB blocks and 512-byte inodes.
         let (blocks, per_block) = (1000, 8);
         let xfs = |used_blocks: u64, used_inodes: u64, cap: u64| {

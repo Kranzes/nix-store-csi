@@ -19,7 +19,7 @@ use crate::csi::Plugin;
 use crate::csi::proto::identity_server::IdentityServer;
 use crate::csi::proto::node_server::NodeServer;
 use crate::narinfo::{NarInfo, PublicKey};
-use crate::store::{Config, EnsureFree, Excess, Store};
+use crate::store::{Config, Excess, Size, Store};
 
 mod cli;
 mod closure;
@@ -107,7 +107,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         netrc_file: cli.netrc_file,
         max_closure_size: None,
         max_store_size: None,
-        ensure_free: EnsureFree::Bytes(0),
+        ensure_free: Size::Bytes(0),
         measure: false,
     };
     match cli.command {

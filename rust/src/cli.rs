@@ -8,7 +8,7 @@ use anyhow::{Context, ensure};
 use clap::{Parser, Subcommand};
 
 use crate::locality::Plugins;
-use crate::store::EnsureFree;
+use crate::store::Size;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -132,9 +132,9 @@ pub enum Command {
             value_name = "SIZE",
             env = "NIX_STORE_CSI_ENSURE_FREE",
             default_value = "20%",
-            value_parser = parse_ensure_free
+            value_parser = parse_size_or_percent
         )]
-        ensure_free: EnsureFree,
+        ensure_free: Size,
         /// Serve Prometheus metrics at `/metrics` on ADDRESS, like
         /// `[::]:9809`. Off unless set.
         #[arg(long, value_name = "ADDRESS", env = "NIX_STORE_CSI_METRICS_ADDRESS")]
@@ -236,9 +236,9 @@ fn parse_interval(s: &str) -> anyhow::Result<Duration> {
     Ok(interval)
 }
 
-/// Parses `--ensure-free` like harmonia-gc does: a percentage like `20%`, or a
+/// Parses a percentage like `20%`, as harmonia-gc's `--ensure-free` does, or a
 /// size for [`parse_size`].
-fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
+fn parse_size_or_percent(s: &str) -> anyhow::Result<Size> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
         let p: f64 = (p.trim().parse()).with_context(|| format!("invalid percentage {s:?}"))?;
@@ -246,9 +246,9 @@ fn parse_ensure_free(s: &str) -> anyhow::Result<EnsureFree> {
             (0.0..=100.0).contains(&p),
             "{s:?} is not between 0% and 100%"
         );
-        return Ok(EnsureFree::Percent(p));
+        return Ok(Size::Percent(p));
     }
-    parse_size(s).map(EnsureFree::Bytes)
+    parse_size(s).map(Size::Bytes)
 }
 
 /// Parses a size like `50G`, where K, M, G and T are powers of 1024.
@@ -330,20 +330,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_ensure_free() {
+    fn parses_sizes_and_percentages() {
         for (s, want) in [
-            ("20%", EnsureFree::Percent(20.0)),
-            ("12.5 %", EnsureFree::Percent(12.5)),
-            ("512", EnsureFree::Bytes(512)),
-            ("1K", EnsureFree::Bytes(1 << 10)),
-            ("50G", EnsureFree::Bytes(50 << 30)),
-            ("1.5g", EnsureFree::Bytes(3 << 29)),
-            ("2T", EnsureFree::Bytes(2 << 40)),
+            ("20%", Size::Percent(20.0)),
+            ("12.5 %", Size::Percent(12.5)),
+            ("512", Size::Bytes(512)),
+            ("1K", Size::Bytes(1 << 10)),
+            ("50G", Size::Bytes(50 << 30)),
+            ("1.5g", Size::Bytes(3 << 29)),
+            ("2T", Size::Bytes(2 << 40)),
         ] {
-            assert_eq!(parse_ensure_free(s).unwrap(), want, "{s}");
+            assert_eq!(parse_size_or_percent(s).unwrap(), want, "{s}");
         }
         for s in ["", "101%", "-1G", "x%", "50GB", "NaN%", "inf"] {
-            assert!(parse_ensure_free(s).is_err(), "{s}");
+            assert!(parse_size_or_percent(s).is_err(), "{s}");
         }
     }
 }

@@ -151,10 +151,30 @@ The chart puts the list in a ConfigMap. Kubelet updates the mounted list
 within about a minute and a half, and the plugin starts fetching a new list
 as soon as it changes, without a restart.
 
+Each key is a list, and a key may add a name after the system, as in
+`storePaths.<system>.<name>`. Helm merges `prefetch` across values files, so
+teams can each keep their own key without overwriting the others':
+
+```yaml
+# web.yaml
+prefetch:
+  storePaths.x86_64-linux.web: /nix/store/<hash>-web
+```
+
+```yaml
+# batch.yaml
+prefetch:
+  storePaths.x86_64-linux.batch: /nix/store/<hash>-batch
+```
+
+A node prefetches the store paths of every key for its system, or if there is
+none, of `storePaths`.
+
 - Garbage collection keeps prefetched closures even when `--ensure-free` needs
   the space, so keep the list small enough to fit next to what pods use.
-- If the list can't be read or fetched, the plugin logs a warning and tries
-  again a minute later. Until then it keeps the closures it last fetched.
+- If a list can't be read or fetched, the plugin logs a warning and tries
+  again a minute later. Until then it keeps the closures it last fetched for
+  every list.
 
 For a rollout:
 

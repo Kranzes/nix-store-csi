@@ -167,10 +167,11 @@ pub enum Command {
         max_store_size: Option<u64>,
         /// Keep the closures of the store paths listed in DIR fetched, even
         /// when `--ensure-free` needs the space. DIR, such as a mounted
-        /// `ConfigMap`, holds a file for each volume attribute, `storePaths`
-        /// or `storePaths.<system>`, and may hold a `revision` file, which the
-        /// `prefetched` metric reports. The plugin reads it when it changes and
-        /// every minute. Off unless set.
+        /// `ConfigMap`, holds lists named `storePaths.<system>`,
+        /// `storePaths.<system>.<name>` or `storePaths`, and may hold a
+        /// `revision` file, which the `prefetched` metric reports. The plugin
+        /// takes every list for its system, or if there is none, `storePaths`.
+        /// It reads DIR when it changes and every minute. Off unless set.
         #[arg(long, value_name = "DIR", env = "NIX_STORE_CSI_PREFETCH_DIR")]
         prefetch_dir: Option<PathBuf>,
     },

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `--prefetch-dir` and the chart's `prefetch` value also take lists named
+  `storePaths.<system>.<name>`, so values files or other owners of the
+  ConfigMap can each keep their own. A node prefetches every list for its
+  system, or if there is none, `storePaths`.
+
 ## 0.1.11 - 2026-11-13
 
 ### Added

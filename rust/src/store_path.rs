@@ -8,7 +8,8 @@ use harmonia_store_path::{StoreDir, StorePath};
 /// replaces it, so one manifest can serve multiple systems. These are the
 /// only volume attributes because pods on a node share the node store. A pod
 /// that could pick a cache or key could put its own content under any store
-/// path for every pod. The files in `--prefetch-dir` have the same names.
+/// path for every pod. The files in `--prefetch-dir` have the same names, and
+/// `storePaths.<system>.<name>` adds a list for `<system>`.
 pub const STORE_PATHS: &str = "storePaths";
 
 /// Store paths by base name, separated by spaces, for logs.

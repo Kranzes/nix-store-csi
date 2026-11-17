@@ -56,8 +56,12 @@ maxClosureSize: ""
 # store paths. Empty means no limit.
 maxStoreSize: ""
 # Store paths whose closures every node fetches and keeps, so pods that need
-# them start without a fetch. The keys are those of a volume's attributes:
+# them start without a fetch. The keys are those of a volume's attributes,
+# and storePaths.<system>.<name> adds a list, so values files can each set
+# their own. A node takes every key for its system, or if there is none,
+# storePaths:
 #   storePaths.x86_64-linux: /nix/store/<hash>-hello-2.12.3
+#   storePaths.x86_64-linux.batch: /nix/store/<hash>-batch
 #   storePaths.aarch64-linux: /nix/store/<hash>-hello-2.12.3
 prefetch: {}
 # Groups of nodes that prefetch their own lists instead of `prefetch`. A

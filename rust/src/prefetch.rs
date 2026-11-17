@@ -2,7 +2,7 @@
 //! mounted `ConfigMap`, in the node store, so pods that need them start without
 //! waiting for a fetch.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, instrument, warn};
 
 use crate::store::{Ensuring, Progress, Store};
-use crate::store_path::{self, Names};
+use crate::store_path::{self, Names, STORE_PATHS};
 
 /// The link that kubelet points at the current files of a `ConfigMap`'s volume.
 const DATA: &str = "..data";
@@ -151,23 +151,38 @@ impl Prefetch {
     }
 
     /// Returns the list's revision and store paths, or `None` while kubelet
-    /// updates the directory. A node whose system has no list gets an empty
-    /// one.
+    /// updates the directory. The store paths are those in the files for the
+    /// node's system, or if it has none, in `storePaths`.
     fn read_list(&self) -> anyhow::Result<Option<(String, Vec<StorePath>)>> {
         let files = read(&self.dir).with_context(|| format!("reading {}", self.dir.display()))?;
         let Some(files) = files else {
             return Ok(None);
         };
         let revision = files.get(REVISION).map_or("", |r| r.trim()).to_owned();
-        let Some((name, list)) = store_path::for_system(&files, &self.system) else {
-            return Ok(Some((revision, Vec::new())));
-        };
-        let mut roots = (store_path::roots(list.split_whitespace()))
-            .with_context(|| format!("reading {}", self.dir.join(name).display()))?;
+        let mut lists: Vec<_> = (files.iter())
+            .filter(|(name, _)| is_list_for(name, &self.system))
+            .collect();
+        if lists.is_empty() {
+            lists.extend(files.get_key_value(STORE_PATHS));
+        }
+        let mut roots = Vec::new();
+        for (name, list) in lists {
+            let paths = (store_path::roots(list.split_whitespace()))
+                .with_context(|| format!("reading {}", self.dir.join(name).display()))?;
+            roots.extend(paths);
+        }
         roots.sort();
         roots.dedup();
         Ok(Some((revision, roots)))
     }
+}
+
+/// Whether `file` is `storePaths.<system>` or `storePaths.<system>.<name>`.
+fn is_list_for(file: &str, system: &str) -> bool {
+    let rest = (file.strip_prefix(STORE_PATHS))
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_prefix(system));
+    rest.is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
 /// Watches `dir` for kubelet's rename of `..data`, and for files written or
@@ -193,7 +208,7 @@ async fn changed(watch: Option<&mut EventStream<[u8; 4096]>>) -> io::Result<()> 
 /// Returns the text of each file in `dir` by name. It reads through `..data`,
 /// which kubelet points at a new directory on each update, and returns `None`
 /// if the link moved meanwhile.
-fn read(dir: &Path) -> io::Result<Option<HashMap<String, String>>> {
+fn read(dir: &Path) -> io::Result<Option<BTreeMap<String, String>>> {
     let link = dir.join(DATA);
     let data = match std::fs::read_link(&link) {
         Ok(data) => Some(data),
@@ -204,7 +219,7 @@ fn read(dir: &Path) -> io::Result<Option<HashMap<String, String>>> {
         .as_ref()
         .map_or_else(|| dir.to_owned(), |d| dir.join(d));
     let files = (|| {
-        let mut files = HashMap::new();
+        let mut files = BTreeMap::new();
         for entry in std::fs::read_dir(&from)? {
             let path = entry?.path();
             if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
@@ -298,20 +313,31 @@ mod tests {
         assert_eq!(listed(&prefetch), Some(vec![B.to_owned(), A.to_owned()]));
         update(&dir, "3", &[("storePaths.x86_64-linux", A)]);
         assert_eq!(listed(&prefetch), Some(vec![]));
-        update(&dir, "4", &[("storePaths", "not a store path")]);
-        assert!(prefetch.read_list().is_err());
+
+        // A node reads the union of its system's lists.
+        let web = "storePaths.aarch64-linux.web";
+        let batch = "storePaths.aarch64-linux.batch";
+        update(&dir, "4", &[(web, B), (batch, &format!("{A} {B}"))]);
+        assert_eq!(listed(&prefetch), Some(vec![B.to_owned(), A.to_owned()]));
+        update(&dir, "5", &[(web, B), ("storePaths", A)]);
+        assert_eq!(listed(&prefetch), Some(vec![B.to_owned()]));
+        // A list that doesn't parse fails the read, which leaves every list as
+        // it was.
+        update(&dir, "6", &[(web, B), (batch, "not a store path")]);
+        let e = prefetch.read_list().unwrap_err();
+        assert!(format!("{e:#}").contains(batch), "{e:#}");
 
         // A read that an update overtakes changes nothing. The pipe holds the
         // read until the update is done.
-        update(&dir, "5", &[]);
-        let fifo = dir.join("..5/storePaths");
+        update(&dir, "7", &[]);
+        let fifo = dir.join("..7/storePaths");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status();
         assert!(made.unwrap().success());
         let updating = std::thread::spawn({
             let dir = dir.clone();
             move || {
                 let pipe = std::fs::OpenOptions::new().write(true).open(fifo);
-                update(&dir, "6", &[("storePaths", B)]);
+                update(&dir, "8", &[("storePaths", B)]);
                 pipe.unwrap().write_all(A.as_bytes()).unwrap();
             }
         });

@@ -189,6 +189,10 @@ the alert rule for lists that a node has read but doesn't hold covers them.
 
 - Garbage collection keeps prefetched closures even when `--ensure-free` needs
   the space, so keep the lists small enough to fit next to what pods use.
+- Once a node holds a list's new version, or the list empties or its key goes,
+  the old version's closure counts as just used. Collection keeps it for
+  `--keep-recent` unless `--ensure-free` needs the space, so old pods that
+  move during a rollout, and a rollback, find it on the node.
 - If the plugin can't read or fetch a list, it logs a warning that names the
   list's file and tries again a minute later. Until then it keeps the closures
   it last fetched for that list.

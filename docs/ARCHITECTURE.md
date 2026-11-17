@@ -59,7 +59,8 @@ every `--gc-interval`, 10 minutes by default. While free space or inodes on
 the state dir's filesystem fall short of `--ensure-free`, it runs every minute
 and also deletes recently used paths, least recently used first, until it
 frees enough. Even then it spares the closures that the plugin prefetches,
-since the plugin would fetch them again within a minute.
+since the plugin would fetch them again within a minute. A closure that leaves
+the prefetch lists counts as used at that moment.
 
 ## Locality
 

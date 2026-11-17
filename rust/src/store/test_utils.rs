@@ -172,7 +172,7 @@ pub(super) async fn reopen(store: Arc<Store>, config: impl Fn() -> Config) -> Ar
 }
 
 /// Makes `paths` look last used `days` ago.
-pub(super) fn age(store: &Store, paths: &[StorePath], days: u64) {
+pub(crate) fn age(store: &Store, paths: &[StorePath], days: u64) {
     let old = SystemTime::now() - Duration::from_hours(24 * days);
     for path in paths {
         let file = (store.narinfos.files(path).iter())

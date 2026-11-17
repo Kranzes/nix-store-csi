@@ -625,7 +625,7 @@ impl Store {
 
     /// Records a use of `paths`. [`Store::collect`] reads the modification
     /// time of a path's narinfo as its last use.
-    fn touch<'a>(&self, paths: impl IntoIterator<Item = &'a StorePath>) -> anyhow::Result<()> {
+    pub fn touch<'a>(&self, paths: impl IntoIterator<Item = &'a StorePath>) -> anyhow::Result<()> {
         let now = Timespec {
             tv_sec: 0,
             tv_nsec: UTIME_NOW,

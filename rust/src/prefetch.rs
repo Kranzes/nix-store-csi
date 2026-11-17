@@ -44,11 +44,31 @@ struct List {
     parsed: bool,
     /// When `roots` last changed.
     since: Instant,
-    /// The last ensure that succeeded, and its store paths. Until a new list
-    /// succeeds, the list empties or its file goes, collection spares its
-    /// closure, and volumes don't count it towards the limit.
-    held: Option<(Vec<StorePath>, Ensuring)>,
+    /// The closure of the last ensure that succeeded. Until a new list
+    /// succeeds, the list empties or its file goes, collection spares it, and
+    /// volumes don't count it towards the limit.
+    held: Option<Held>,
     running: Option<Ensuring>,
+}
+
+struct Held {
+    roots: Vec<StorePath>,
+    closure: Arc<[StorePath]>,
+    _ensuring: Ensuring,
+    store: Arc<Store>,
+}
+
+impl Drop for Held {
+    /// Records a use of the closure before the hold ends, so collection keeps
+    /// it for `--keep-recent` like a closure that a pod just used.
+    fn drop(&mut self) {
+        if let Err(e) = self.store.touch(self.closure.iter()) {
+            warn!(
+                store_paths = %Names(&self.roots),
+                "{e:#}; collection counts the closure as last used at the list's last ensure"
+            );
+        }
+    }
 }
 
 impl Prefetch {
@@ -62,9 +82,7 @@ impl Prefetch {
     }
 
     /// Reads `dir` when it changes and every minute, and ensures each list's
-    /// closure again each time. That fetches what a failed sync deleted, and
-    /// counts as a use, so a closure that leaves the lists stays for
-    /// `--keep-recent`.
+    /// closure again each time, which fetches what a failed sync deleted.
     #[instrument(name = "prefetch", skip_all)]
     pub async fn run(mut self) {
         let mut ticks = tokio::time::interval(crate::MINUTE);
@@ -128,10 +146,16 @@ impl Prefetch {
         let list = self.lists.get_mut(&file).expect("running until it ends");
         let done = list.running.take().expect("running until it ends");
         match result {
-            Ok(_) => {
-                let new = (list.held.as_ref()).is_none_or(|(roots, _)| *roots != list.roots);
-                list.held = Some((list.roots.clone(), done));
-                if new {
+            Ok(closure) => match &mut list.held {
+                // The ensure recorded a use of the closure, which stays held.
+                Some(held) if held.roots == list.roots && held.closure == closure => {}
+                held => {
+                    *held = Some(Held {
+                        roots: list.roots.clone(),
+                        closure,
+                        _ensuring: done,
+                        store: self.store.clone(),
+                    });
                     let elapsed_ms = list.since.elapsed().as_millis();
                     info!(store_paths = %Names(&list.roots), elapsed_ms, "prefetched");
                     if let Ok(Some(limit)) = self.store.max_store_size() {
@@ -146,7 +170,7 @@ impl Prefetch {
                     }
                     self.report();
                 }
-            }
+            },
             Err(e) => {
                 let path = self.dir.join(&file);
                 warn!(
@@ -231,7 +255,7 @@ impl List {
     fn is_held(&self) -> bool {
         self.parsed
             && (self.roots.is_empty()
-                || (self.held.as_ref()).is_some_and(|(roots, _)| *roots == self.roots))
+                || (self.held.as_ref()).is_some_and(|held| held.roots == self.roots))
     }
 }
 
@@ -323,8 +347,8 @@ mod tests {
     use super::*;
     use crate::metrics::tests::sample;
     use crate::narinfo::tests::{empty_cache, fixture_root, fixtures};
-    use crate::store::test_utils::{ALL, UNBOUND, count, ghost, unsigned_config};
-    use crate::store::{Config, TooBig};
+    use crate::store::test_utils::{ALL, UNBOUND, age, count, ghost, unsigned_config};
+    use crate::store::{Config, Excess, TooBig};
 
     const A: &str = "/nix/store/xl1h9i29pgq2q5cszjhm5wpfxfbbqwyi-hello-2.12.3";
     const B: &str = "/nix/store/jxxp01dayz0pv6vp7n39r9042ycsiicx-hello-2.12.3";
@@ -355,6 +379,13 @@ mod tests {
     fn prefetched(registry: &Registry, name: &str, text: &str) -> Option<f64> {
         let labels = format!("list=\"{name}\",hash=\"{}\"", hash(text));
         sample(registry, &format!("nix_store_csi_prefetched{{{labels}}}"))
+    }
+
+    /// Collects the store paths that nothing used within a day, and returns
+    /// how many it deleted.
+    async fn keep_a_day(store: &Arc<Store>) -> usize {
+        let keep_recent = Duration::from_hours(24);
+        (store.collect(UNBOUND, keep_recent, Excess::default()).await).unwrap()
     }
 
     /// The store paths of the lists that `prefetch` reads, as text.
@@ -469,10 +500,11 @@ mod tests {
         let paths = count(store.dir());
         assert_eq!(paths, 5);
         // A volume doesn't count the prefetched closure towards the limit.
-        assert_eq!(volume().done().await.unwrap().len(), paths);
+        let closure = volume().done().await.unwrap();
+        assert_eq!(closure.len(), paths);
 
-        // Each tick ensures the closure again, and the last ensure holds it
-        // until the next one ends.
+        // Each tick ensures the closure again, and the list holds it
+        // throughout.
         prefetch.tick();
         assert_eq!(collect().await.unwrap(), 0);
         prefetch.finish().await;
@@ -499,14 +531,31 @@ mod tests {
         prefetch.tick();
         assert!(prefetch.lists[STORE_PATHS].running.is_some());
 
-        // A store path that leaves the list counts towards the limit again,
-        // and falls back to collection by last use.
+        // Once the node holds a new list, the old list's closure counts as
+        // just used, even if the node last ensured it long ago, like while
+        // the new list failed. Collection keeps it for --keep-recent.
+        age(&store, &closure, 2);
+        let dependency = closure.iter().find(|path| **path != hello).unwrap();
+        std::fs::write(dir.join("storePaths"), format!("/nix/store/{dependency}")).unwrap();
+        prefetch.tick();
+        prefetch.finish().await;
+        assert_eq!(keep_a_day(&store).await, 0);
+        let listed = prefetch.lists[STORE_PATHS]
+            .held
+            .as_ref()
+            .unwrap()
+            .closure
+            .len();
+        age(&store, &closure, 2);
+        assert_eq!(keep_a_day(&store).await, paths - listed);
+
+        // A store path that leaves the list counts towards the limit again.
         std::fs::write(dir.join("storePaths"), "").unwrap();
         prefetch.tick();
         assert!(volume().done().await.unwrap_err().is::<TooBig>());
         // A node holds an empty list as soon as it reads it.
         assert_eq!(gauge(""), Some(1.0));
-        assert_eq!(collect().await.unwrap(), paths);
+        assert_eq!(collect().await.unwrap(), listed);
     }
 
     #[tokio::test]
@@ -565,6 +614,13 @@ mod tests {
         assert_eq!((list("web", &hello), list("web", typo)), (None, Some(0.0)));
         assert!(held(&prefetch, &web));
         assert_eq!(collect().await.unwrap(), 0);
+
+        // The closure of a list whose file goes counts as just used.
+        let closure = prefetch.lists[&web].held.as_ref().unwrap().closure.clone();
+        age(&store, &closure, 2);
+        std::fs::remove_file(dir.join(&web)).unwrap();
+        prefetch.tick();
+        assert_eq!(keep_a_day(&store).await, 0);
     }
 
     /// A list's series goes when its hash changes or its file goes, so no

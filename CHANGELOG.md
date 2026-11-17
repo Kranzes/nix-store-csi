@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Once a node holds a prefetch list's new version, or the list empties or its
+  key goes, the old closure counts as just used. Collection keeps it for
+  `--keep-recent` unless `--ensure-free` needs the space. Before, it counted as
+  last used at the node's last ensure of the old version. A new version that
+  took longer than `--keep-recent` to fetch, or kept failing, left the old
+  closure to the next collection.
+
 ## 0.1.12 - 2026-11-17
 
 ### Added

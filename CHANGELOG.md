@@ -18,6 +18,8 @@
 - The chart's `imagePullSecrets` sets the pods' pull Secrets.
 - `--max-store-size` and the chart's `maxStoreSize` also take a share of the
   state dir's filesystem, like `50%`.
+- The chart's `nodePools.<pool>.maxStoreSize` replaces the top-level
+  `maxStoreSize` on a pool's nodes.
 - `locality`, and the chart's `locality.enabled`, run a scheduler extender
   for kube-scheduler and Volcano. It scores each node by the share of a pod's
   closure, by NAR size, that the node store holds. `locality.nodeSelector`

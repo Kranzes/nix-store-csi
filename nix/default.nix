@@ -222,6 +222,12 @@ rec {
           test "$mounts" = "$(printf 'lists true\ngpu-lists true')"
           secrets=$(yq -N '.spec.template.spec.imagePullSecrets[].name' daemonsets.yaml)
           test "$secrets" = "$(printf 'registry\nregistry')"
+          # A pool's maxStoreSize replaces the top-level one, and an empty one
+          # turns it off.
+          limits=$(helm template ${chartSrc} --set maxStoreSize=200G \
+            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"maxStoreSize":"80%"},"web":{"nodeSelector":{"pool":"web"},"maxStoreSize":""}}' \
+            | yq -N 'select(.kind == "DaemonSet") | .metadata.name as $name | .spec.template.spec.containers[0].args[] | select(test("^--max-store-size")) | $name + " " + .')
+          test "$limits" = "$(printf '%s\n' 'release-name-node --max-store-size=200G' 'release-name-node-gpu --max-store-size=80%')"
           # helm lint ignores fail, so these use helm template.
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null

@@ -19,7 +19,8 @@ plugin on a node can't take the state dir's lock.
   "nodeSelector" $.Values.nodeSelector
   "prefetch" $.Values.prefetch
   "prefetchConfigMap" $.Values.prefetchConfigMap
-  "configMap" (printf "%s-prefetch" $.Release.Name)) }}
+  "configMap" (printf "%s-prefetch" $.Release.Name)
+  "maxStoreSize" $.Values.maxStoreSize) }}
 {{- $earlier := list }}
 {{- range $pool, $values := $.Values.nodePools }}
 {{- $daemonSets = append $daemonSets (dict
@@ -29,6 +30,7 @@ plugin on a node can't take the state dir's lock.
   "prefetch" ($values.prefetch | default dict)
   "prefetchConfigMap" ($values.prefetchConfigMap | default "")
   "configMap" (printf "%s-prefetch-%s" $.Release.Name $pool)
+  "maxStoreSize" (dig "maxStoreSize" $.Values.maxStoreSize $values)
   "outside" $earlier) }}
 {{- $earlier = append $earlier $values.nodeSelector }}
 {{- end }}
@@ -97,7 +99,7 @@ spec:
             {{- with $.Values.maxClosureSize }}
             - --max-closure-size={{ . }}
             {{- end }}
-            {{- with $.Values.maxStoreSize }}
+            {{- with $ds.maxStoreSize }}
             - --max-store-size={{ . }}
             {{- end }}
             {{- if $servesMetrics }}

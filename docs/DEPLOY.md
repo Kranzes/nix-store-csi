@@ -266,6 +266,9 @@ nodePools:
   `storePaths` only if its list has no key for its system, so a pool's
   `storePaths.x86_64-linux` would hide a top-level `storePaths` from the
   pool's x86 nodes.
+- A pool's `maxStoreSize` replaces the top-level one on its nodes, and an
+  empty value turns the limit off for the pool. A percentage already fits
+  pools with different disks.
 - A node that matches more than one pool goes to the first pool by name.
 - If a node's labels move it to another pool, Kubernetes replaces its plugin
   with the other pool's. The node store stays, and mounted volumes keep

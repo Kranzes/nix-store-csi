@@ -117,7 +117,8 @@
             "additionalProperties": { "type": "string" }
           },
           "prefetch": { "$ref": "#/properties/prefetch" },
-          "prefetchConfigMap": { "$ref": "#/properties/prefetchConfigMap" }
+          "prefetchConfigMap": { "$ref": "#/properties/prefetchConfigMap" },
+          "maxStoreSize": { "$ref": "#/properties/maxStoreSize" }
         }
       }
     },

@@ -75,12 +75,14 @@ prefetch: {}
 prefetchConfigMap: ""
 # Groups of nodes that prefetch their own lists instead of `prefetch`, from a
 # pool's prefetch or prefetchConfigMap. A closure that every node needs goes in
-# each pool's list too. Each pool gets its own DaemonSet on the nodes that
-# match its nodeSelector and the top-level one. A node that matches more than
-# one pool goes to the first by name.
+# each pool's list too. A pool's maxStoreSize replaces the top-level one on its
+# nodes, and an empty one turns the limit off there. Each pool gets its own
+# DaemonSet on the nodes that match its nodeSelector and the top-level one. A
+# node that matches more than one pool goes to the first by name.
 #   gpu:
 #     nodeSelector:
 #       karpenter.sh/nodepool: gpu
+#     maxStoreSize: 2T
 #     prefetch:
 #       storePaths.x86_64-linux: /nix/store/<hash>-trainer
 nodePools: {}

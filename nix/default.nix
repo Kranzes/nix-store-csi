@@ -239,6 +239,7 @@ rec {
             --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello,prefetchConfigMap=lists'
           refuses "nodePools.gpu.prefetch and nodePools.gpu.prefetchConfigMap are both set" \
             --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"},"prefetchConfigMap":"gpu-lists"}}'
+          refuses "at '/maxStoreSize'" --set maxStoreSize=150%
           for field in version appVersion; do
             grep -qx "$field: ${package.version}" ${chartSrc}/Chart.yaml || {
               echo "Chart.yaml's $field isn't Cargo.toml's ${package.version}" >&2

@@ -134,7 +134,7 @@ impl Prefetch {
                 if new {
                     let elapsed_ms = list.since.elapsed().as_millis();
                     info!(store_paths = %Names(&list.roots), elapsed_ms, "prefetched");
-                    if let Some(limit) = self.store.max_store_size() {
+                    if let Ok(Some(limit)) = self.store.max_store_size() {
                         let size = self.store.prefetched_size();
                         if size > limit {
                             warn!(

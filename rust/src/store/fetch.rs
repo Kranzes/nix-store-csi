@@ -207,9 +207,11 @@ impl Store {
     ) -> anyhow::Result<(Held, Option<Held>, Vec<StorePath>)> {
         let (present, missing): (Vec<_>, Vec<_>) =
             paths.iter().partition(|path| self.present(path));
-        let limit = self
-            .max_store_size
-            .filter(|_| !prefetch && !missing.is_empty());
+        let limit = if prefetch || missing.is_empty() {
+            None
+        } else {
+            (self.max_store_size()).context("measuring the node store's filesystem")?
+        };
         let turn = (limit.map(|limit| self.check_store_size(closure, limit))).transpose()?;
         let nar_size = |path: &StorePath| closure[path].info.nar_size();
         let held = self.ensuring.hold(paths, nar_size);
@@ -1006,7 +1008,7 @@ mod tests {
             .sum();
         let limit = hello_size + added - 1;
         let store = reopen(store, || crate::store::Config {
-            max_store_size: Some(limit),
+            max_store_size: Some(crate::store::Size::Bytes(limit)),
             ..zstd_config(&dir, tmp.path())
         })
         .await;

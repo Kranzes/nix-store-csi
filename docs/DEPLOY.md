@@ -395,15 +395,19 @@ it, so prefetching a big closure lets pods use it. Once its store paths leave
 store paths in `prefetch` for as long as you may roll back. Many pods with
 different closures can still fill the disk.
 
-`maxStoreSize`, like `200G`, limits the NAR size of what garbage collection
-can't delete: the closures of mounted volumes, of fetches under way and of
-prefetched store paths. The plugin refuses a volume whose closure would take
-that size over the limit before it fetches any of it. The pod's events show the
-limit, that size and what the closure adds. A closure that the node store
-already has always passes, since it takes no more disk space. Mounting it still
-makes it uncollectable if it was only recently used, so that size can go over
-the limit. Until volumes unmount, the plugin then refuses every volume that
-needs a fetch. The `uncollectable_bytes` metric shows that size on each node.
+`maxStoreSize`, like `200G` or `50%` of the state dir's filesystem, limits the
+NAR size of what garbage collection can't delete: the closures of mounted
+volumes, of fetches under way and of prefetched store paths. The plugin refuses
+a volume whose closure would take that size over the limit before it fetches any
+of it. The pod's events show the limit, that size and what the closure adds. A
+closure that the node store already has always passes, since it takes no more
+disk space. Mounting it still makes it uncollectable if it was only recently
+used, so that size can go over the limit. Until volumes unmount, the plugin then
+refuses every volume that needs a fetch. The `uncollectable_bytes` metric shows
+that size on each node.
+
+The filesystem is usually shared with kubelet and other caches, like the
+container runtime's images, so choose a percentage with them in mind.
 
 A pod gets only its own closure, on a read-only mount.
 
@@ -528,7 +532,8 @@ for a fetch or retried after `Unavailable`, and `false` for one whose closure
 the node store already had. `nar_fetched_bytes_total`,
 `gc_freed_bytes_total`, `store_size_bytes` and `uncollectable_bytes` count
 uncompressed NAR sizes. `uncollectable_bytes` is what `maxStoreSize` limits,
-and `max_store_size_bytes` is the limit, missing when there is none.
+and `max_store_size_bytes` is the limit, missing when there is none. A
+percentage counts against the filesystem's size at the time.
 `closures_in_flight` counts closures still being fetched, including those
 whose publish already returned `Unavailable`. `free_bytes` and `free_inodes`
 are free on the state dir's filesystem, and `ensure_free_bytes` and

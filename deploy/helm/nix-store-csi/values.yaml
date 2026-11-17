@@ -54,9 +54,10 @@ serviceAccountToken:
 # limit.
 maxClosureSize: ""
 # Refuses volumes that need a fetch if the NARs of their closure and those that
-# garbage collection can't delete add up to more than this, like 200G. Those
-# are the closures of mounted volumes, of fetches under way and of prefetched
-# store paths. Empty means no limit.
+# garbage collection can't delete add up to more than this, like 200G, or a
+# share of the state dir's filesystem, like 50%. Those are the closures of
+# mounted volumes, of fetches under way and of prefetched store paths. Empty
+# means no limit.
 maxStoreSize: ""
 # Store paths whose closures every node fetches and keeps, so pods that need
 # them start without a fetch. The keys are those of a volume's attributes,

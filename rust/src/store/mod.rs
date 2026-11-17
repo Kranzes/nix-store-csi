@@ -57,7 +57,7 @@ pub struct Config {
     pub netrc_file: Option<PathBuf>,
     /// The limits of [`Store::ensure`].
     pub max_closure_size: Option<u64>,
-    pub max_store_size: Option<u64>,
+    pub max_store_size: Option<Size>,
     /// The free space that collection keeps.
     pub ensure_free: Size,
     /// Whether start-up adds up the NAR sizes in store/ for the `store_size`
@@ -93,7 +93,7 @@ pub struct Store {
     jobs: Arc<Semaphore>,
     max_jobs: usize,
     max_closure_size: Option<u64>,
-    max_store_size: Option<u64>,
+    max_store_size: Option<Size>,
     /// Ensures checked against `max_store_size` hold it until they hold their
     /// closures, so each check sees the closures that earlier checks passed.
     checking_size: Mutex<()>,
@@ -265,8 +265,11 @@ impl Store {
         &self.metrics
     }
 
-    pub fn max_store_size(&self) -> Option<u64> {
-        self.max_store_size
+    /// `--max-store-size` in bytes, for the state dir's filesystem as it is
+    /// now.
+    pub fn max_store_size(&self) -> io::Result<Option<u64>> {
+        let bytes = |limit: Size| Ok(limit.bytes(Space::of(&self.dir)?.size));
+        self.max_store_size.map(bytes).transpose()
     }
 
     /// The NAR size of the store paths that [`Store::prefetch`] holds.
@@ -298,7 +301,8 @@ impl Store {
             store_paths: entries(&self.dir),
             store_size: self.size.as_ref().map(|size| size.load(Ordering::Relaxed)),
             uncollectable_size,
-            max_store_size: self.max_store_size,
+            max_store_size: (self.max_store_size.zip(space))
+                .map(|(limit, space)| limit.bytes(space.size)),
             unsynced_paths,
             views: entries(&self.views),
             free_bytes: space.map(|space| space.free),

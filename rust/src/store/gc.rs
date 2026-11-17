@@ -262,7 +262,7 @@ impl AddAssign for Excess {
 /// What `statvfs` says about a filesystem.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Space {
-    size: u64,
+    pub(super) size: u64,
     pub(super) free: u64,
     /// 0 on a filesystem with no limit on inodes, like btrfs.
     pub(super) inodes: u64,
@@ -284,22 +284,25 @@ impl Space {
 /// Returns how many bytes and inodes `ensure_free` keeps free on a filesystem
 /// with `space`. The inode target is the same share of the filesystem's
 /// inodes as the byte target is of its size.
+pub(super) fn target(space: Space, ensure_free: Size) -> (u64, u64) {
+    match ensure_free {
+        Size::Bytes(bytes) => {
+            let share = u128::from(space.inodes) * u128::from(bytes.min(space.size))
+                / u128::from(space.size.max(1));
+            (bytes, u64::try_from(share).unwrap_or(u64::MAX))
+        }
+        Size::Percent(p) => (percent(space.size, p), percent(space.inodes, p)),
+    }
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     reason = "a share of a total is within it"
 )]
-pub(super) fn target(space: Space, ensure_free: Size) -> (u64, u64) {
-    let percent = |total: u64, p: f64| (total as f64 * p / 100.0) as u64;
-    match ensure_free {
-        Size::Bytes(bytes) => {
-            let share = u128::from(space.inodes) * u128::from(bytes.min(space.size))
-                / u128::from(space.size.max(1));
-            (bytes, share as u64)
-        }
-        Size::Percent(p) => (percent(space.size, p), percent(space.inodes, p)),
-    }
+fn percent(total: u64, p: f64) -> u64 {
+    (total as f64 * p / 100.0) as u64
 }
 
 /// Returns how many bytes and inodes to free on a filesystem with `space` to
@@ -312,13 +315,23 @@ fn excess(space: Space, ensure_free: Size) -> Excess {
     }
 }
 
-/// A size, or a share of the state dir's filesystem, as `--ensure-free` takes
-/// it.
+/// A size, or a share of the state dir's filesystem, as `--ensure-free` and
+/// `--max-store-size` take it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Size {
     Bytes(u64),
     /// A percentage of the filesystem's size.
     Percent(f64),
+}
+
+impl Size {
+    /// The size in bytes on a filesystem of `total` bytes.
+    pub fn bytes(self, total: u64) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes,
+            Self::Percent(p) => percent(total, p),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -664,6 +677,7 @@ mod tests {
         assert_eq!(excess(ext4, Percent(20.0)), (0, 15));
         // 200 of 1000 bytes is 20%.
         assert_eq!(excess(ext4, Bytes(200)), (0, 15));
+        assert_eq!(Percent(20.0).bytes(1000), Bytes(200).bytes(1000));
         assert_eq!(excess(ext4, Bytes(5000)), (4500, 95));
         assert_eq!(target(ext4, Bytes(200)), (200, 20));
         // `0` turns it off, even with no bytes or inodes free.

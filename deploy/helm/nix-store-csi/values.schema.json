@@ -93,7 +93,10 @@
       }
     },
     "maxClosureSize": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?[KMGTkmgt]?)?$" },
-    "maxStoreSize": { "$ref": "#/properties/maxClosureSize" },
+    "maxStoreSize": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?[KMGTkmgt]?|([0-9]{1,2}(\\.[0-9]+)?|100)%)?$"
+    },
     "prefetch": {
       "type": "object",
       "propertyNames": { "pattern": "^storePaths(\\..+)?$" },

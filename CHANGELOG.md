@@ -16,6 +16,8 @@
   The plugin starts before the ConfigMap exists and reads its lists once it
   does.
 - The chart's `imagePullSecrets` sets the pods' pull Secrets.
+- `--max-store-size` and the chart's `maxStoreSize` also take a share of the
+  state dir's filesystem, like `50%`.
 - `locality`, and the chart's `locality.enabled`, run a scheduler extender
   for kube-scheduler and Volcano. It scores each node by the share of a pod's
   closure, by NAR size, that the node store holds. `locality.nodeSelector`

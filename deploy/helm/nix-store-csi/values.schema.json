@@ -98,6 +98,7 @@
       "propertyNames": { "pattern": "^storePaths(\\..+)?$" },
       "additionalProperties": { "type": "string" }
     },
+    "prefetchConfigMap": { "type": "string" },
     "nodePools": {
       "type": "object",
       "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
@@ -111,7 +112,8 @@
             "minProperties": 1,
             "additionalProperties": { "type": "string" }
           },
-          "prefetch": { "$ref": "#/properties/prefetch" }
+          "prefetch": { "$ref": "#/properties/prefetch" },
+          "prefetchConfigMap": { "$ref": "#/properties/prefetchConfigMap" }
         }
       }
     },

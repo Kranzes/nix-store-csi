@@ -171,6 +171,19 @@ A node prefetches the store paths of every key for its system, or if there is
 none, of `storePaths`. It fetches each key's list on its own, so a list with a
 typo or a store path that no cache has doesn't stop the others.
 
+Owners who write their keys outside Helm, like a CI job with
+`kubectl patch`, need a ConfigMap that the chart doesn't render. Name it in
+`prefetchConfigMap` in place of `prefetch`:
+
+```yaml
+# values.yaml
+prefetchConfigMap: prefetch-lists
+```
+
+It has to be in the release's namespace. The plugin starts before it exists
+and reads its lists once it does. The chart doesn't know these lists, so only
+the alert rule for lists that a node has read but doesn't hold covers them.
+
 - Garbage collection keeps prefetched closures even when `--ensure-free` needs
   the space, so keep the lists small enough to fit next to what pods use.
 - If the plugin can't read or fetch a list, it logs a warning that names the
@@ -243,8 +256,8 @@ nodePools:
   both its `nodeSelector` and the top-level one, and a ConfigMap,
   `<release>-prefetch-<pool>`.
 - A pool's list replaces `prefetch`. Its nodes don't fetch the top-level list,
-  and a pool without `prefetch` prefetches nothing. `prefetch` is the list for
-  the nodes outside every pool.
+  and a pool without `prefetch` or `prefetchConfigMap` prefetches nothing.
+  `prefetch` is the list for the nodes outside every pool.
 - A closure that every node needs, like a log shipper, goes in `prefetch` and
   in each pool's list. The chart doesn't merge the lists. A node reads
   `storePaths` only if its list has no key for its system, so a pool's

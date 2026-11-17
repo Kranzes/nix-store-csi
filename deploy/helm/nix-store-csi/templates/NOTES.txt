@@ -27,9 +27,10 @@ nothing:
 
 <name> is the key's name after the system, empty for storePaths.<system> and
 storePaths. For storePaths, select the systems without keys of their own.
-<hash> is the first 12 hex digits of the SHA-256 of the key's value:
+<hash> is the first 12 hex digits of the SHA-256 of the key's value in its
+ConfigMap, {{ .Release.Name }}-prefetch{{ if .Values.nodePools }}[-<pool>]{{ end }} or the one that prefetchConfigMap names:
 
-  kubectl -n {{ .Release.Namespace }} get configmap {{ .Release.Name }}-prefetch{{ if .Values.nodePools }}[-<pool>]{{ end }} \
+  kubectl -n {{ .Release.Namespace }} get configmap <configmap> \
     -o jsonpath='{.data.storePaths\.<system>\.<name>}' | sha256sum | head -c 12
 {{- if and .Values.nodePools (not .Values.metrics.podMonitor.enabled) }}
 

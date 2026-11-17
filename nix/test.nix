@@ -230,10 +230,15 @@ testers.runNixOSTest {
             "storePaths.${stdenv.hostPlatform.system}" = "${busybox}";
             storePaths = "/nix/store/00000000000000000000000000000000-missing";
           };
-          # The test moves the node into it at the end.
+          # The test moves the node into these at the end. owned's ConfigMap
+          # doesn't exist until then.
           nodePools.warm = {
             nodeSelector.pool = "warm";
             prefetch."storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}";
+          };
+          nodePools.owned = {
+            nodeSelector.pool = "owned";
+            prefetchConfigMap = "owned-prefetch";
           };
         };
       };
@@ -321,6 +326,15 @@ testers.runNixOSTest {
     def nar_size(name):
         """The NAR size of the store path named `name`, from the fixture cache."""
         return int(machine.succeed(f"sed -n 's/^NarSize: //p' ${fixtures}/cache-zstd/{name[:32]}.narinfo"))
+
+    def join_pool(pool):
+        """Moves the node into `pool`, and waits until only that pool's plugin runs and serves."""
+        machine.succeed(f"kubectl label node machine pool={pool} --overwrite")
+        pods = "kubectl -n kube-system get pod -o name -l"
+        only = f'[ "$({pods} app.kubernetes.io/name=nix-store-csi)" = "$({pods} nix-store-csi/pool={pool})" ]'
+        machine.wait_until_succeeds(f'{only} && [ -n "$({pods} nix-store-csi/pool={pool})" ]', timeout=300)
+        # The probe that the startup probe makes, without its 10 second period.
+        machine.wait_until_succeeds("${curl}/bin/curl -sf http://127.0.0.1:9808/healthz", timeout=300)
 
     def phase(pod, want):
         try:
@@ -445,10 +459,11 @@ testers.runNixOSTest {
     with subtest("the plugin prefetches the store paths in its ConfigMap as kubelet updates it"):
         # The node holds a list once its series has the hash that
         # docs/DEPLOY.md computes.
-        def prefetched(configmap):
-            value = f"kubectl -n kube-system get configmap {configmap} -o jsonpath='{{.data.storePaths\\.${stdenv.hostPlatform.system}}}'"
+        def prefetched(configmap, name=""):
+            key = "storePaths\\.${stdenv.hostPlatform.system}" + (f"\\.{name}" if name else "")
+            value = f"kubectl -n kube-system get configmap {configmap} -o jsonpath='{{.data.{key}}}'"
             digest = machine.succeed(f"{value} | sha256sum | head -c 12")
-            line = f'nix_store_csi_prefetched{{list="",hash="{digest}"}} 1'
+            line = f'nix_store_csi_prefetched{{list="{name}",hash="{digest}"}} 1'
             return f"${curl}/bin/curl -sf http://127.0.0.1:9809/metrics | grep -qxF '{line}'"
         machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch"), timeout=60)
         machine.succeed(f"{plugin} | grep 'prefetched store_paths=.*-${busybox.name}' > /dev/null")
@@ -492,11 +507,16 @@ testers.runNixOSTest {
         machine.wait_until_succeeds(f"[ -z \"$({views})\" ]", timeout=60)
 
     with subtest("a node that joins a pool gets the pool's plugin, which prefetches the pool's list"):
-        machine.succeed("kubectl label node machine pool=warm")
-        pool = "kubectl -n kube-system get pod -l nix-store-csi/pool=warm"
-        machine.wait_until_succeeds(f"{pool} -o jsonpath='{{.items[*].status.containerStatuses[*].ready}}' | grep -qx 'true true true'", timeout=300)
-        machine.wait_until_succeeds("[ $(kubectl -n kube-system get pod -l app.kubernetes.io/name=nix-store-csi -o name | wc -l) = 1 ]", timeout=120)
+        join_pool("warm")
         # The cache is still down, and warm is on the node already.
         machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch-warm"), timeout=180)
+
+    with subtest("a plugin whose prefetchConfigMap doesn't exist yet reads its lists once it does"):
+        join_pool("owned")
+        machine.succeed(
+            "kubectl -n kube-system create configmap owned-prefetch"
+            " --from-literal=storePaths.${stdenv.hostPlatform.system}.team=${fixtures.warm}"
+        )
+        machine.wait_until_succeeds(prefetched("owned-prefetch", "team"), timeout=180)
   '';
 }

@@ -10,6 +10,11 @@
   system, or if there is none, `storePaths`. It fetches each list on its own,
   so one that fails doesn't stop the others.
 - `nix_store_csi_build_info` has a `system` label, the node's Nix system.
+- The chart's `prefetchConfigMap`, at the top level and in each node pool,
+  names a ConfigMap to mount as the prefetch dir in place of one that the
+  chart renders from `prefetch`, so owners can write their keys outside Helm.
+  The plugin starts before the ConfigMap exists and reads its lists once it
+  does.
 
 ### Changed
 

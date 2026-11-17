@@ -16,6 +16,7 @@ plugin on a node can't take the state dir's lock.
   "pool" ""
   "nodeSelector" $.Values.nodeSelector
   "prefetch" $.Values.prefetch
+  "prefetchConfigMap" $.Values.prefetchConfigMap
   "configMap" (printf "%s-prefetch" $.Release.Name)) }}
 {{- $earlier := list }}
 {{- range $pool, $values := $.Values.nodePools }}
@@ -24,12 +25,18 @@ plugin on a node can't take the state dir's lock.
   "pool" $pool
   "nodeSelector" (merge (dict) $values.nodeSelector $.Values.nodeSelector)
   "prefetch" ($values.prefetch | default dict)
+  "prefetchConfigMap" ($values.prefetchConfigMap | default "")
   "configMap" (printf "%s-prefetch-%s" $.Release.Name $pool)
   "outside" $earlier) }}
 {{- $earlier = append $earlier $values.nodeSelector }}
 {{- end }}
 {{- $_ := set (first $daemonSets) "outside" $earlier }}
 {{- range $ds := $daemonSets }}
+{{- if and $ds.prefetch $ds.prefetchConfigMap }}
+{{- $values := ternary "" (printf "nodePools.%s." $ds.pool) (empty $ds.pool) }}
+{{- fail (printf "%sprefetch and %sprefetchConfigMap are both set. Set only one." $values $values) }}
+{{- end }}
+{{- $prefetches := or $ds.prefetch $ds.prefetchConfigMap }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -108,7 +115,7 @@ spec:
             # The plugin binds 0.0.0.0 instead on nodes without IPv6.
             - "--metrics-address=[::]:{{ $.Values.metrics.port }}"
             {{- end }}
-            {{- if $ds.prefetch }}
+            {{- if $prefetches }}
             - --prefetch-dir=/etc/nix-store-csi/prefetch
             {{- end }}
             {{- with $.Values.extraArgs }}
@@ -171,7 +178,7 @@ spec:
               mountPath: /var/run/secrets/nix-store-csi
               readOnly: true
             {{- end }}
-            {{- if $ds.prefetch }}
+            {{- if $prefetches }}
             # Kubelet updates the files when the list changes, so the pod
             # template has no checksum of it that would restart the plugin.
             - name: prefetch
@@ -239,9 +246,14 @@ spec:
                       path: netrc
               {{- end }}
         {{- end }}
-        {{- if $ds.prefetch }}
+        {{- if $prefetches }}
         - name: prefetch
           configMap:
-            name: {{ $ds.configMap }}
+            name: {{ $ds.prefetchConfigMap | default $ds.configMap }}
+            {{- if $ds.prefetchConfigMap }}
+            # The plugin starts without it, and reads its lists once it
+            # exists.
+            optional: true
+            {{- end }}
         {{- end }}
 {{- end }}

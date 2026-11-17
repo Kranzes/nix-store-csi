@@ -28,6 +28,8 @@
   `NixStoreCsiPrefetchBehind` fires for a list that a node has read but
   doesn't hold, and for a list that the chart renders while a node hasn't read
   its current version.
+- The plugin resolves cache host names with hickory-dns instead of musl's
+  resolver. It reads `/etc/hosts` and `/etc/resolv.conf` as before.
 
 ## 0.1.11 - 2026-11-13
 

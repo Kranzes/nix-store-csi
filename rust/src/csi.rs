@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use harmonia_store_path::StorePath;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
@@ -86,13 +87,7 @@ impl Plugin {
         if !request.readonly {
             return Err(Status::invalid_argument("the volume needs readOnly: true"));
         }
-        let (attribute, store_paths) = store_paths(&request.volume_context, &system())?;
-        let roots = (store_path::roots(store_paths.split_whitespace()))
-            .map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
-        if roots.is_empty() {
-            return Err(Status::invalid_argument(format!("{attribute} is empty")));
-        }
-        store::root_links(&roots).map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
+        let roots = volume_roots(&request.volume_context, &system())?;
 
         let (started, timed_out) = {
             let mut waiting = self.waiting.lock().unwrap();
@@ -354,6 +349,22 @@ impl Node for Plugin {
     }
 }
 
+/// The roots that a volume with `attributes` lists for a node of `system`. An
+/// error means the plugin refuses the volume on every such node.
+pub fn volume_roots(
+    attributes: &HashMap<String, String>,
+    system: &str,
+) -> Result<Vec<StorePath>, Status> {
+    let (attribute, store_paths) = store_paths(attributes, system)?;
+    let invalid = |e: anyhow::Error| Status::invalid_argument(format!("{e:#}"));
+    let roots = store_path::roots(store_paths.split_whitespace()).map_err(invalid)?;
+    if roots.is_empty() {
+        return Err(Status::invalid_argument(format!("{attribute} is empty")));
+    }
+    store::root_links(&roots).map_err(invalid)?;
+    Ok(roots)
+}
+
 fn store_paths<'a>(
     context: &'a HashMap<String, String>,
     system: &str,
@@ -421,6 +432,19 @@ mod tests {
             e.message(),
             "no storePaths.x86_64-linux or storePaths attribute"
         );
+    }
+
+    #[test]
+    fn refuses_empty_or_clashing_roots() {
+        let roots = |value: &str| {
+            let attributes = HashMap::from([(STORE_PATHS.to_owned(), value.to_owned())]);
+            volume_roots(&attributes, "x86_64-linux")
+        };
+        let (a, b) = ("0".repeat(32) + "-a", "1".repeat(32) + "-a");
+        assert_eq!(roots(&format!("/nix/store/{a}/bin/a")).unwrap().len(), 1);
+        assert_eq!(roots(" ").unwrap_err().message(), "storePaths is empty");
+        let clash = roots(&format!("{a} {b}")).unwrap_err();
+        assert_eq!(clash.message(), format!("{a} and {b} have the same name"));
     }
 
     #[test]

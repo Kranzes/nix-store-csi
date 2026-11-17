@@ -11,6 +11,8 @@
 - `nix_store_csi_prefetched_size_bytes`, the NAR size of the closure that
   each prefetch list holds, with the same labels as
   `nix_store_csi_prefetched`. A store path in several lists counts in each.
+- The dashboard has a Prefetch list size panel, and a Locality row, collapsed,
+  for the locality extender's answers, scrapes and closure resolves.
 
 ### Changed
 

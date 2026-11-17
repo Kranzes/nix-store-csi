@@ -1,7 +1,7 @@
 {
   "uid": "nix-store-csi",
   "title": "nix-store-csi",
-  "description": "Publishes, NAR fetches, the node store and garbage collection of the nix-store-csi node plugins.",
+  "description": "Publishes, NAR fetches, the node store, garbage collection and prefetching of the nix-store-csi node plugins, and the locality extender.",
   "tags": [
     "nix-store-csi",
     "csi"
@@ -1379,12 +1379,561 @@
         "showHeader": true
       },
       "gridPos": {
-        "h": 8,
+        "h": 16,
         "w": 8,
         "x": 16,
         "y": 41
       },
       "id": 28
+    },
+    {
+      "type": "timeseries",
+      "title": "Prefetch list size",
+      "description": "NAR size of the closure that each prefetch list holds, by its name and hash. Every node that holds a list holds the same closure, so this is the largest size on any node, not the sum over nodes. A store path in several lists counts in each. On each node, prefetched closures count towards uncollectable_bytes, which the Store size panel shows. max_store_size_bytes is its limit there, from --max-store-size.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (list, hash) (nix_store_csi_prefetched_size_bytes{instance=~\"$instance\"})",
+          "legendFormat": "{{list}} {{hash}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 16,
+        "h": 8
+      },
+      "id": 31
+    },
+    {
+      "type": "row",
+      "title": "Locality",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "id": 32,
+      "panels": [
+        {
+          "type": "heatmap",
+          "title": "Best score, kube-scheduler",
+          "description": "Prioritize answers to kube-scheduler by their best score, as a share of the top score, for pods whose closure has resolved. The extender never learns which node the scheduler picks, so read this next to Publishes that fetched. Mostly 0 means no candidate node held the pod's closure. High while publishes still count with fetched=\"true\" means a candidate held it and the scheduler chose another node, because its other scores outweighed the extender's.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (le) ((nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"} - nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"} offset $__interval >= 0) or nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"})",
+              "legendFormat": "{{le}}",
+              "format": "heatmap"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "No answers"
+            },
+            "overrides": []
+          },
+          "options": {
+            "calculate": false,
+            "yAxis": {
+              "unit": "percentunit"
+            },
+            "cellGap": 1,
+            "color": {
+              "mode": "scheme",
+              "scheme": "Oranges",
+              "steps": 64
+            },
+            "tooltip": {
+              "mode": "single",
+              "yHistogram": true
+            },
+            "legend": {
+              "show": true
+            },
+            "rowsFrame": {
+              "layout": "auto"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 58,
+            "w": 8,
+            "h": 8
+          },
+          "id": 33
+        },
+        {
+          "type": "heatmap",
+          "title": "Best score, Volcano",
+          "description": "Prioritize answers to Volcano by their best score, as a share of the top score, for pods whose closure has resolved. The extender never learns which node the scheduler picks, so read this next to Publishes that fetched. Mostly 0 means no candidate node held the pod's closure. High while publishes still count with fetched=\"true\" means a candidate held it and the scheduler chose another node, because its other scores outweighed the extender's.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (le) ((nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"} - nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"} offset $__interval >= 0) or nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"})",
+              "legendFormat": "{{le}}",
+              "format": "heatmap"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "No answers"
+            },
+            "overrides": []
+          },
+          "options": {
+            "calculate": false,
+            "yAxis": {
+              "unit": "percentunit"
+            },
+            "cellGap": 1,
+            "color": {
+              "mode": "scheme",
+              "scheme": "Oranges",
+              "steps": 64
+            },
+            "tooltip": {
+              "mode": "single",
+              "yHistogram": true
+            },
+            "legend": {
+              "show": true
+            },
+            "rowsFrame": {
+              "layout": "auto"
+            }
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 58,
+            "w": 8,
+            "h": 8
+          },
+          "id": 34
+        },
+        {
+          "type": "timeseries",
+          "title": "Publishes that fetched",
+          "description": "Share of the publishes that succeeded which waited for a fetch, on the nodes that the Node variable selects. It counts every pod with a volume of this driver, including those of a scheduler without the extender.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}) / sum ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"} - nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"})",
+              "legendFormat": "fetched"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "custom": {
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 58,
+            "w": 8,
+            "h": 8
+          },
+          "id": 35
+        },
+        {
+          "type": "timeseries",
+          "title": "Answer time",
+          "description": "Time to answer the prioritize requests that succeeded, by scheduler. Volcano sends every pod on each candidate node, so its requests take longer to read.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.5, sum by (scheduler, le) ((nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} - nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} offset $__interval >= 0) or nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}))",
+              "legendFormat": "p50 {{scheduler}}"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.99, sum by (scheduler, le) ((nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} - nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} offset $__interval >= 0) or nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}))",
+              "legendFormat": "p99 {{scheduler}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none"
+                },
+                "scaleDistribution": {
+                  "type": "log",
+                  "log": 10
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 66,
+            "w": 8,
+            "h": 8
+          },
+          "id": 36
+        },
+        {
+          "type": "timeseries",
+          "title": "Failed answers",
+          "description": "Prioritize requests that the extender answered with 400, by scheduler. With ignorable, the scheduler places the pod without the extender's scores. Without it, Volcano leaves the task for its next session.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (scheduler) ((nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"} - nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"} offset $__interval >= 0) or nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"})",
+              "legendFormat": "{{scheduler}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "custom": {
+                "fillOpacity": 80,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "normal"
+                },
+                "drawStyle": "bars",
+                "lineWidth": 1,
+                "axisSoftMax": 1
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 66,
+            "w": 8,
+            "h": 8
+          },
+          "id": 37
+        },
+        {
+          "type": "timeseries",
+          "title": "Nodes read",
+          "description": "Nodes whose plugin the extender read within its last 3 intervals, against the node plugins that Prometheus scrapes, the dashed line. The extender scores the nodes in the gap 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "max(nix_store_csi_locality_nodes)",
+              "legendFormat": "read by the extender"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count(nix_store_csi_build_info) and on () max(nix_store_csi_locality_nodes)",
+              "legendFormat": "node plugins"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "decimals": 0,
+              "custom": {
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none"
+                },
+                "axisSoftMax": 1
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "text"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 66,
+            "w": 8,
+            "h": 8
+          },
+          "id": 38
+        },
+        {
+          "type": "timeseries",
+          "title": "Scrapes",
+          "description": "Reads of the node plugins' /store-paths, by result, those answered with 304 too. Failed lookups of the plugins' Service count as errors.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (result) ((nix_store_csi_locality_scrapes_total - nix_store_csi_locality_scrapes_total offset $__interval >= 0) or nix_store_csi_locality_scrapes_total)",
+              "legendFormat": "{{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "custom": {
+                "fillOpacity": 80,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "normal"
+                },
+                "drawStyle": "bars",
+                "lineWidth": 1,
+                "axisSoftMax": 1
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 74,
+            "w": 12,
+            "h": 8
+          },
+          "id": 39
+        },
+        {
+          "type": "timeseries",
+          "title": "Closure resolves",
+          "description": "Closures that the extender resolved from the caches, by result. A failed resolve scores the pod 0 on every node for a minute.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (result) ((nix_store_csi_locality_closure_resolves_total - nix_store_csi_locality_closure_resolves_total offset $__interval >= 0) or nix_store_csi_locality_closure_resolves_total)",
+              "legendFormat": "{{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "custom": {
+                "fillOpacity": 80,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "normal"
+                },
+                "drawStyle": "bars",
+                "lineWidth": 1,
+                "axisSoftMax": 1
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 74,
+            "w": 12,
+            "h": 8
+          },
+          "id": 40
+        }
+      ]
     },
     {
       "type": "row",
@@ -1394,7 +1943,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 58
       },
       "panels": [
         {
@@ -1444,7 +1993,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 50,
+            "y": 59,
             "w": 8,
             "h": 8
           },
@@ -1497,7 +2046,7 @@
           },
           "gridPos": {
             "x": 8,
-            "y": 50,
+            "y": 59,
             "w": 8,
             "h": 8
           },
@@ -1535,7 +2084,7 @@
           },
           "gridPos": {
             "x": 16,
-            "y": 50,
+            "y": 59,
             "w": 8,
             "h": 8
           },

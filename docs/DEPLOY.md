@@ -377,10 +377,9 @@ of any store path that the configured caches serve. That includes private
 caches that the plugin reaches with the netrc Secret or a service account
 token.
 
-Knowing a store path is enough to mount its closure. `/paths` and
-`/store-paths` list every store path on a node to anyone who can reach the
-metrics port, so `--serve-paths` is off by default. `locality.enabled` turns
-it on.
+Knowing a store path is enough to mount its closure. `/store-paths` lists
+every store path on a node to anyone who can reach the metrics port, so
+`--serve-paths` is off by default. `locality.enabled` turns it on.
 
 Pods can ask for store paths whose closures are any size. A node fetches the
 closure of every pod it runs, and the fetch goes on after the pod is gone.
@@ -541,24 +540,10 @@ failed sync deletes the store paths it covered and counts in
 name and hash. `system` is the node's Nix system.
 
 With `--serve-paths` in `extraArgs`, or with `locality.enabled`, the same port
-also serves `/paths` and `/store-paths`. `/paths` has a JSON line for each
-store path in the node store, so a cache operator can see what nodes still
-need:
-
-```json
-{"path":"/nix/store/<hash>-hello-2.12.3","nar_size":274712,"last_use":"2026-11-11T09:30:00Z","held":"mounted"}
-```
-
-`last_use` is when a publish, prefetch or unpublish last used the path.
-`held` is the first reason garbage collection keeps the path: `mounted` in a
-volume, `prefetch` in the `prefetch` list's closures, `fetching` for a publish
-or a pending sync, `recent` for a use within `--keep-recent`, or `none`. The
-next garbage collection deletes the `none` paths, and `recent` ones too if
-`--ensure-free` needs the space.
-
-`/store-paths` lists only the store paths, one on each line. Its `ETag`
-changes when the node store gains or loses a store path, and a request whose
-`If-None-Match` has the current one gets 304 without a listing.
+also serves `/store-paths`, the store paths in the node store, one on each
+line. Its `ETag` changes when the node store gains or loses a store path, and
+a request whose `If-None-Match` has the current one gets 304 without a
+listing.
 
 With `locality.enabled`, the locality extender serves its own metrics at
 `/metrics` on port 8080 (`locality.port`), and `metrics.podMonitor.enabled`

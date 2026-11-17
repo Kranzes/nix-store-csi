@@ -1,11 +1,10 @@
 //! Prometheus metrics, which `csi --metrics-address` serves at `/metrics`,
-//! and the node store's paths, which it serves at `/paths` and
-//! `/store-paths`.
+//! and the node store's store paths, which it serves at `/store-paths`.
 
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use harmonia_store_path::{StoreDir, StorePath};
@@ -27,12 +26,10 @@ use tokio::net::TcpListener;
 use tracing::warn;
 
 use crate::http::{self, response};
-use crate::store::{HeldPath, Reason, Store};
+use crate::store::Store;
 use crate::store_path::system;
 
 pub(crate) const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
-
-const PATHS_CONTENT_TYPE: &str = "application/x-ndjson";
 
 const STORE_PATHS_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
@@ -471,43 +468,34 @@ pub fn registry(store: &Arc<Store>) -> Registry {
 struct Served {
     registry: Registry,
     store: Arc<Store>,
-    /// Set if `--serve-paths` turns `/paths` and `/store-paths` on.
+    /// Set if `--serve-paths` turns `/store-paths` on.
     paths: Option<Paths>,
-    /// Lets one `/paths` listing run at a time, since each reads every
-    /// narinfo.
-    listing: Arc<tokio::sync::Mutex<()>>,
 }
 
-/// `/paths` and `/store-paths`, which `--serve-paths` turns on.
+/// `/store-paths`, which `--serve-paths` turns on.
 pub struct Paths {
-    /// `--keep-recent`, for the `recent` reason.
-    keep_recent: Duration,
     /// The node and its Nix system, for `locality`.
     headers: header::HeaderMap,
 }
 
 impl Paths {
-    pub fn new(keep_recent: Duration, node: &str) -> anyhow::Result<Self> {
+    pub fn new(node: &str) -> anyhow::Result<Self> {
         let mut headers = header::HeaderMap::new();
         let node =
             header::HeaderValue::try_from(node).context("--node-id is not a header value")?;
         headers.insert(NODE_HEADER, node);
         headers.insert(SYSTEM_HEADER, header::HeaderValue::try_from(system())?);
-        Ok(Self {
-            keep_recent,
-            headers,
-        })
+        Ok(Self { headers })
     }
 }
 
 /// Serves the store's metrics at `/metrics` to every connection on
-/// `listener`, and with `paths` its paths at `/paths` and `/store-paths`.
+/// `listener`, and with `paths` its store paths at `/store-paths`.
 pub async fn serve(listener: TcpListener, store: Arc<Store>, paths: Option<Paths>) {
     let served = Arc::new(Served {
         registry: registry(&store),
         store,
         paths,
-        listing: Arc::default(),
     });
     http::serve(listener, "metrics", move |request| {
         respond(request, served.clone())
@@ -522,22 +510,6 @@ async fn respond<B>(request: Request<B>, served: Arc<Served>) -> Response<Full<B
             let served = served.clone();
             let encoded = move || Ok(encode(&served.registry)?.into());
             answer(path, CONTENT_TYPE, encoded).await
-        }
-        ("/paths", Some(paths)) => {
-            // Waiting for the turn would let callers queue without limit.
-            let Ok(turn) = served.listing.clone().try_lock_owned() else {
-                let body = "a listing is already running\n";
-                return response(StatusCode::SERVICE_UNAVAILABLE, "text/plain", body);
-            };
-            let (keep_recent, store) = (paths.keep_recent, served.store.clone());
-            // The turn lasts until the listing ends, even if the client
-            // leaves.
-            let encoded = move || {
-                let _turn = turn;
-                let paths = store.held_paths(crate::mounts::is_bound, keep_recent)?;
-                Ok(json_lines(&paths)?.into())
-            };
-            answer(path, PATHS_CONTENT_TYPE, encoded).await
         }
         ("/store-paths", Some(paths)) => {
             // Read before the listing, so a change during it changes the next
@@ -590,30 +562,6 @@ fn store_path_lines(paths: &[StorePath]) -> String {
     })
 }
 
-/// Encodes `paths` as JSON lines.
-fn json_lines(paths: &[HeldPath]) -> serde_json::Result<Vec<u8>> {
-    #[derive(serde::Serialize)]
-    struct Line {
-        path: String,
-        nar_size: u64,
-        last_use: String,
-        held: Reason,
-    }
-    let store_dir = StoreDir::default();
-    let mut body = Vec::new();
-    for path in paths {
-        let line = Line {
-            path: store_dir.display(&path.path).to_string(),
-            nar_size: path.nar_size,
-            last_use: humantime::format_rfc3339_seconds(path.last_use).to_string(),
-            held: path.held,
-        };
-        serde_json::to_writer(&mut body, &line)?;
-        body.push(b'\n');
-    }
-    Ok(body)
-}
-
 pub(crate) fn encode(registry: &Registry) -> Result<String, fmt::Error> {
     let mut body = String::new();
     text::encode(&mut body, registry)?;
@@ -622,12 +570,7 @@ pub(crate) fn encode(registry: &Registry) -> Result<String, fmt::Error> {
 
 #[cfg(test)]
 pub mod tests {
-    use std::time::SystemTime;
-
-    use harmonia_store_path::StorePath;
-
     use super::*;
-    use crate::store::test_utils::unsigned_config;
 
     /// The value of `sample`, a metric name with its labels, in `registry`.
     pub fn sample(registry: &Registry, sample: &str) -> Option<f64> {
@@ -635,44 +578,6 @@ pub mod tests {
         text.lines()
             .find_map(|line| line.strip_prefix(sample)?.strip_prefix(' '))
             .map(|value| value.parse().unwrap())
-    }
-
-    #[tokio::test]
-    async fn refuses_a_second_listing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = unsigned_config(tmp.path(), &tmp.path().join("state"));
-        let store = Arc::new(Store::new(config).unwrap());
-        let served = Arc::new(Served {
-            registry: registry(&store),
-            store,
-            paths: Some(Paths::new(Duration::ZERO, "node").unwrap()),
-            listing: Arc::default(),
-        });
-        let paths = || respond(Request::get("/paths").body(()).unwrap(), served.clone());
-        let turn = served.listing.clone().try_lock_owned().unwrap();
-        assert_eq!(paths().await.status(), StatusCode::SERVICE_UNAVAILABLE);
-        drop(turn);
-        assert_eq!(paths().await.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn lists_paths_as_json_lines() {
-        let hash = "0".repeat(32);
-        let path = |name| StorePath::from_base_path(&format!("{hash}-{name}")).unwrap();
-        let held = |name, held| HeldPath {
-            path: path(name),
-            nar_size: 42,
-            last_use: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            held,
-        };
-        let body = json_lines(&[held("a", Reason::Prefetch), held("b", Reason::None)]).unwrap();
-        assert_eq!(
-            String::from_utf8(body).unwrap(),
-            format!(
-                "{{\"path\":\"/nix/store/{hash}-a\",\"nar_size\":42,\"last_use\":\"2023-11-14T22:13:20Z\",\"held\":\"prefetch\"}}\n\
-                 {{\"path\":\"/nix/store/{hash}-b\",\"nar_size\":42,\"last_use\":\"2023-11-14T22:13:20Z\",\"held\":\"none\"}}\n"
-            )
-        );
     }
 
     #[test]

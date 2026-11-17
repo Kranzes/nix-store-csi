@@ -328,7 +328,7 @@ pub mod tests {
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/store-paths", listener.local_addr().unwrap());
-        let paths = crate::metrics::Paths::new(Duration::ZERO, "node-a").unwrap();
+        let paths = crate::metrics::Paths::new("node-a").unwrap();
         tokio::spawn(crate::metrics::serve(listener, store.clone(), Some(paths)));
         let (client, timeout) = (reqwest::Client::new(), Duration::from_secs(15));
         let read = |etag: Option<String>| {

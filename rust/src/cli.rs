@@ -139,9 +139,8 @@ pub enum Command {
         /// `[::]:9809`. Off unless set.
         #[arg(long, value_name = "ADDRESS", env = "NIX_STORE_CSI_METRICS_ADDRESS")]
         metrics_address: Option<SocketAddr>,
-        /// Also serve the node store's paths on `--metrics-address`, at
-        /// `/paths` with why garbage collection keeps each, and at
-        /// `/store-paths` alone. Anyone who can reach the address can read
+        /// Also serve the node store's store paths at `/store-paths` on
+        /// `--metrics-address`. Anyone who can reach the address can read
         /// them, and so mount their closures.
         #[arg(
             long,

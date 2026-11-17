@@ -47,7 +47,7 @@ Options:
       --log-level <LEVEL>           off, error, warn, info, debug or trace [env: NIX_STORE_CSI_LOG_LEVEL=] [default: info]
       --metrics-address <ADDRESS>   Serve Prometheus metrics at `/metrics` on ADDRESS, like `[::]:9809`. Off unless set [env: NIX_STORE_CSI_METRICS_ADDRESS=]
       --log-format <FORMAT>         text or json [env: NIX_STORE_CSI_LOG_FORMAT=] [default: text] [possible values: text, json]
-      --serve-paths                 Also serve the node store's paths on `--metrics-address`, at `/paths` with why garbage collection keeps each, and at `/store-paths` alone. Anyone who can reach the address can read them, and so mount their closures [env: NIX_STORE_CSI_SERVE_PATHS=]
+      --serve-paths                 Also serve the node store's store paths at `/store-paths` on `--metrics-address`. Anyone who can reach the address can read them, and so mount their closures [env: NIX_STORE_CSI_SERVE_PATHS=]
       --max-closure-size <SIZE>     Refuse a volume whose closure's NARs add up to more than SIZE, like `20G`, before fetching any of it. Prefetched closures don't count. Off unless set [env: NIX_STORE_CSI_MAX_CLOSURE_SIZE=]
       --max-substitution-jobs <N>   NARs to fetch at once [env: NIX_STORE_CSI_MAX_SUBSTITUTION_JOBS=] [default: 16]
       --max-store-size <SIZE>       Refuse a volume that needs a fetch if the NARs of its closure and those that garbage collection can't delete add up to more than SIZE, like `200G`. Those are the closures of mounted volumes, of fetches under way and of prefetched store paths. A closure that the node store already has always passes. Off unless set [env: NIX_STORE_CSI_MAX_STORE_SIZE=]

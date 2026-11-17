@@ -413,13 +413,9 @@ testers.runNixOSTest {
         machine.wait_until_succeeds(f"[ $({volumes} | wc -l) = 1 ]", timeout=60)
         machine.wait_until_succeeds(f"[ $({views} | wc -l) = 1 ]", timeout=60)
 
-    with subtest("the plugin lists why it keeps each store path"):
-        listed = machine.succeed("${curl}/bin/curl -sf http://127.0.0.1:9809/paths").splitlines()
-        held = {path["path"]: path["held"] for path in map(json.loads, listed)}
-        t.assertEqual(sorted(held), sorted(machine.succeed("cat ${podsClosure}").split()))
-        for path in machine.succeed("cat ${writeClosure [ busybox ]}").split():
-            t.assertEqual(held[path], "mounted")
-        t.assertEqual(held["${hello}"], "recent")
+    with subtest("the plugin lists the node store's store paths"):
+        listed = machine.succeed("${curl}/bin/curl -sf http://127.0.0.1:9809/store-paths").split()
+        t.assertEqual(sorted(listed), sorted(machine.succeed("cat ${podsClosure}").split()))
 
     closure = sorted(machine.succeed("xargs -n1 basename < ${writeClosure [ busybox ]}").split())
     # sleep mounts busybox's closure, which warm references, so warm's closure

@@ -145,7 +145,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let address = listener.local_addr()?;
                 let url = format!("http://{address}/metrics");
                 info!(%url, "serving metrics");
-                let paths = serve_paths.then(|| metrics::Paths::new(keep_recent, &node_id));
+                let paths = serve_paths.then(|| metrics::Paths::new(&node_id));
                 let paths = paths.transpose()?;
                 tokio::spawn(metrics::serve(listener, store.clone(), paths));
             }

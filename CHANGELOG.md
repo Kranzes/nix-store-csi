@@ -22,10 +22,9 @@
   and `locality.tolerations` place its pod. The `NixStoreCsiLocalityDown`,
   `NixStoreCsiLocalityScrapeErrors` and `NixStoreCsiLocalityResolveErrors`
   alerts cover it.
-- With `--serve-paths`, the plugin also serves `/store-paths`, the node
-  store's store paths alone, which `locality` reads. Its `ETag` changes when
-  the node store gains or loses a store path, and a request with the current
-  one gets 304.
+- With `--serve-paths`, the plugin serves `/store-paths`, the node store's
+  store paths, which `locality` reads. Its `ETag` changes when the node store
+  gains or loses a store path, and a request with the current one gets 304.
 
 ### Changed
 
@@ -40,6 +39,13 @@
   its current version.
 - The plugin resolves cache host names with hickory-dns instead of musl's
   resolver. It reads `/etc/hosts` and `/etc/resolv.conf` as before.
+
+### Removed
+
+- `/paths`, which listed each store path in the node store with its NAR size,
+  last use and why garbage collection keeps it. `--serve-paths` turns on
+  `/store-paths` instead.
+
 ## 0.1.11 - 2026-11-13
 
 ### Added

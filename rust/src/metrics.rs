@@ -438,7 +438,7 @@ impl Collector for StoreGauges {
         )?;
         gauge(
             "closures_in_flight",
-            "Closures being resolved or fetched for publishes",
+            "Closures being resolved or fetched, for publishes and prefetch lists",
             None,
             count(gauges.closures_in_flight),
         )?;

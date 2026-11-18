@@ -526,7 +526,7 @@
     {
       "type": "timeseries",
       "title": "Closures in flight",
-      "description": "Closures being resolved or fetched, by node. A closure counts until its fetches end, even after its publish returns Unavailable at 90 seconds.",
+      "description": "Closures being resolved or fetched, for publishes and prefetch lists, by node. A closure counts until its fetches end, even after its publish returns Unavailable at 90 seconds.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

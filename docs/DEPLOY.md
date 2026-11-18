@@ -568,13 +568,13 @@ same bytes for one closure in its `caches` field, a JSON object by cache that
 leaves out caches that served nothing. `uncollectable_bytes` is what
 `maxStoreSize` limits, and `max_store_size_bytes` is the limit, missing when
 there is none. A percentage counts against the filesystem's size at the time.
-`closures_in_flight` counts closures still being fetched, including those
-whose publish already returned `Unavailable`. `free_bytes` and `free_inodes`
-are free on the state dir's filesystem, and `ensure_free_bytes` and
-`ensure_free_inodes` are what `--ensure-free` keeps free there. The inode
-gauges are missing on a filesystem with no limit on inodes, like btrfs. A
-failed sync deletes the store paths it covered and counts in
-`failed_syncs_total`.
+`closures_in_flight` counts closures still being fetched, for publishes and
+prefetch lists, including those whose publish already returned
+`Unavailable`. `free_bytes` and `free_inodes` are free on the state dir's
+filesystem, and `ensure_free_bytes` and `ensure_free_inodes` are what
+`--ensure-free` keeps free there. The inode gauges are missing on a
+filesystem with no limit on inodes, like btrfs. A failed sync deletes the
+store paths it covered and counts in `failed_syncs_total`.
 `prefetched` is 1 once the node store holds the closure of the list with that
 name and hash. `prefetched_size_bytes` is the NAR size of the closure that the
 list holds, so owners of lists that share a `maxStoreSize` can see whose list

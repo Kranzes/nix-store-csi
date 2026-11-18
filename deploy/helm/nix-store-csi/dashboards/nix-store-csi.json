@@ -593,7 +593,7 @@
     {
       "type": "timeseries",
       "title": "NAR throughput",
-      "description": "Uncompressed NAR bytes fetched, by cache.",
+      "description": "Uncompressed NAR bytes received per second, by cache, also from tries that failed or started over.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -605,7 +605,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cache) ((nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"} - last_over_time(nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}) / ($__interval_ms / 1000)",
+          "expr": "sum by (cache) (rate(nix_store_csi_nar_received_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{cache}}"
         }
       ],

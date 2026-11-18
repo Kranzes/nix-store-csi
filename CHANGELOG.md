@@ -21,6 +21,9 @@
 - The `fetched the closure` log line has a `caches` field, a JSON object with
   the NAR bytes that each cache served for the closure, as
   `nar_fetched_bytes_total` counts them.
+- `nix_store_csi_nar_received_bytes_total`, the uncompressed NAR bytes
+  received from each cache as they arrive, also from tries that failed or
+  started over. The dashboard's NAR throughput panel plots it.
 
 ### Changed
 

@@ -15,6 +15,7 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use harmonia_file_nar::{NarWriteError, RestoreOptions, parse_nar_stream};
 use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, Hash};
+use prometheus_client::metrics::counter::Counter;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -387,6 +388,7 @@ impl Store {
         debug!(cache = %name, %url, nar_size = info.nar_size(), "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
+        let received = self.metrics.nar_received(name);
         let part = (|| async {
             let body = (self.caches)
                 .stream(cache, info.url(), info.compression)
@@ -400,6 +402,7 @@ impl Store {
                 info.nar_size(),
                 dest,
                 bytes.clone(),
+                received.clone(),
             ));
             match unpacked.await.map_err(anyhow::Error::from).flatten() {
                 Ok(()) => Ok(part),
@@ -655,7 +658,8 @@ impl std::error::Error for StoreTooBig {}
 /// Unpacks the NAR at `dest` as it streams in, with Nix's canonical modes and
 /// modification time, and fails unless its size and hash match. The caller
 /// moves the tree into the store only after that.
-/// `bytes` counts the NAR bytes read so far.
+/// `bytes` counts the NAR bytes read so far, and `received` adds them up
+/// across tries.
 async fn unpack_nar(
     body: impl AsyncBufRead + Send + Unpin + 'static,
     compression: Compression,
@@ -663,6 +667,7 @@ async fn unpack_nar(
     nar_size: u64,
     dest: PathBuf,
     bytes: Arc<AtomicU64>,
+    received: Counter,
 ) -> anyhow::Result<()> {
     let mut size = 0;
     // Reading one byte past the expected size catches a NAR that's too long.
@@ -670,6 +675,7 @@ async fn unpack_nar(
     let mut nar = chunks.inspect_ok(|chunk| {
         size += chunk.len() as u64;
         bytes.store(size, Ordering::Relaxed);
+        received.inc_by(chunk.len() as u64);
     });
     // `restore` rejects entries that would leave `dest`, so a NAR that isn't
     // verified yet can't write elsewhere.
@@ -822,8 +828,16 @@ mod tests {
         let tmp = scratch();
         let dest = tmp.path().join("out");
         let body = std::io::Cursor::new(compressed.to_vec());
-        let bytes = Arc::default();
-        unpack_nar(body, compression, *hash, size, dest.clone(), bytes).await?;
+        unpack_nar(
+            body,
+            compression,
+            *hash,
+            size,
+            dest.clone(),
+            Arc::default(),
+            Counter::default(),
+        )
+        .await?;
         Ok((tmp, dest))
     }
 
@@ -1082,6 +1096,8 @@ mod tests {
         assert_eq!(metric(unpublished), Some(0.0));
         let bytes = format!("nar_fetched_bytes_total{{cache=\"{cache}\"}}");
         assert!(metric(&bytes).unwrap() > 0.0);
+        let received = bytes.replace("fetched", "received");
+        assert_eq!(metric(&received), metric(&bytes));
         assert_eq!(metric("store_paths"), Some(fetched));
         let size: u64 = (paths.iter())
             .map(|path| store.caches.local_info(path).unwrap().unwrap().nar_size())
@@ -1293,6 +1309,14 @@ mod tests {
             store.caches.name(0)
         );
         assert_eq!(sample(&registry, &failed), Some(1.0));
+        // Only the corrupt NAR's bytes arrived without being fetched.
+        let bytes = |counted: &str, cache: &url::Url| {
+            let series = format!("nix_store_csi_nar_{counted}_bytes_total{{cache=\"{cache}\"}}");
+            sample(&registry, &series).unwrap()
+        };
+        let (first, second) = (store.caches.name(0), store.caches.name(1));
+        assert!(bytes("received", first) > bytes("fetched", first));
+        assert_eq!(bytes("received", second), bytes("fetched", second));
         assert_eq!(count(state.join("tmp")), 0);
         let total: u64 = paths.iter().map(|path| store.nar_size(path)).sum();
         let caches = serde_json::json!({

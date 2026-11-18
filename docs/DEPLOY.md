@@ -538,6 +538,7 @@ Every metric starts with `nix_store_csi_`:
 | `closures_in_flight` | gauge | |
 | `nar_fetch_duration_seconds` | histogram | `cache`, `result` |
 | `nar_fetched_bytes_total` | counter | `cache` |
+| `nar_received_bytes_total` | counter | `cache` |
 | `nar_fetches_in_flight` | gauge | |
 | `cache_paused` | gauge | `cache` |
 | `store_paths` | gauge | |
@@ -565,9 +566,12 @@ the node store already had. `nar_fetched_bytes_total`,
 `gc_freed_bytes_total`, `store_size_bytes` and `uncollectable_bytes` count
 uncompressed NAR sizes. The plugin's `fetched the closure` log line has the
 same bytes for one closure in its `caches` field, a JSON object by cache that
-leaves out caches that served nothing. `uncollectable_bytes` is what
-`maxStoreSize` limits, and `max_store_size_bytes` is the limit, missing when
-there is none. A percentage counts against the filesystem's size at the time.
+leaves out caches that served nothing. `nar_received_bytes_total` counts
+uncompressed NAR bytes as they arrive, also from tries that failed or
+started over, so received minus fetched is what those tries cost.
+`uncollectable_bytes` is what `maxStoreSize` limits, and
+`max_store_size_bytes` is the limit, missing when there is none. A
+percentage counts against the filesystem's size at the time.
 `closures_in_flight` counts closures still being fetched, for publishes and
 prefetch lists, including those whose publish already returned
 `Unavailable`. `free_bytes` and `free_inodes` are free on the state dir's

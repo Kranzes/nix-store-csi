@@ -97,6 +97,7 @@ pub struct Metrics {
     unpublishes: Histograms<CallLabels>,
     nar_fetches: Histograms<FetchLabels>,
     nar_bytes: Family<CacheLabels, Counter>,
+    nar_received: Family<CacheLabels, Counter>,
     collections: Histograms<ResultLabels>,
     deleted_paths: Counter,
     freed_bytes: Counter,
@@ -120,6 +121,7 @@ impl Default for Metrics {
             unpublishes: Family::new_with_constructor(calls),
             nar_fetches: Family::new_with_constructor(fetches),
             nar_bytes: Family::default(),
+            nar_received: Family::default(),
             collections: Family::new_with_constructor(collections),
             deleted_paths: Counter::default(),
             freed_bytes: Counter::default(),
@@ -154,7 +156,10 @@ impl Metrics {
                     result,
                 });
             }
-            let _ = self.nar_bytes.get_or_create(&CacheLabels { cache });
+            let _ = (self.nar_bytes).get_or_create(&CacheLabels {
+                cache: cache.clone(),
+            });
+            let _ = self.nar_received.get_or_create(&CacheLabels { cache });
         }
         for result in ["ok", "error"] {
             let _ = self.collections.get_or_create(&ResultLabels { result });
@@ -170,6 +175,13 @@ impl Metrics {
     /// Times a `NodeUnpublishVolume` call.
     pub fn unpublish(&self) -> Call<'_> {
         Call::new(&self.unpublishes, None)
+    }
+
+    /// The counter of NAR bytes received from `cache`.
+    pub fn nar_received(&self, cache: &url::Url) -> Counter {
+        let cache = cache.to_string();
+        self.nar_received
+            .get_or_create_owned(&CacheLabels { cache })
     }
 
     /// Counts one try at fetching a NAR of `size` bytes from `cache`.
@@ -245,6 +257,12 @@ impl Metrics {
             "Uncompressed size of the NARs fetched, by cache",
             Unit::Bytes,
             self.nar_bytes.clone(),
+        );
+        registry.register_with_unit(
+            "nar_received",
+            "Uncompressed NAR bytes received, by cache, also from tries that failed or started over",
+            Unit::Bytes,
+            self.nar_received.clone(),
         );
         registry.register_with_unit(
             "gc_duration",

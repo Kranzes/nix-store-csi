@@ -173,15 +173,6 @@ or add it to the RUNPATH of the library that loads `libcuda.so`, like
 `LD_LIBRARY_PATH` before RUNPATH, so it suits only an image with no libraries
 of its own in that dir, like the runner image.
 
-### What is tested
-
-The VM test covers NixOS nodes with stand-ins for the driver and glibc.
-containerd and runc bind them into containers on a published volume, from a
-CDI spec like NixOS's and from `mountpoints.paths`, and crictl starts the
-containers. After the spec changes, a new container in the same pod gets the
-new binds. Nothing tests a GPU, NixOS's generated spec, a device plugin, or
-the steps for other nodes.
-
 ## Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an

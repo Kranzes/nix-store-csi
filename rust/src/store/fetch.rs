@@ -1257,8 +1257,9 @@ mod tests {
 
         let state = tmp.path().join("state");
         let mut config = config(&dir, &corrupt, &state);
-        config.stores[0].push_str("?priority=10");
-        config.stores.push(file_store(&dir.join("cache-zstd")));
+        // A lower priority comes first.
+        let zstd = file_store(&dir.join("cache-zstd"));
+        config.stores.push(format!("{zstd}?priority=10"));
         let store = Arc::new(Store::new(config).unwrap());
         let paths = store
             .ensure(std::slice::from_ref(&hello))
@@ -1269,6 +1270,12 @@ mod tests {
         assert_eq!(count(store.dir()), paths.len());
         let narinfo = std::fs::read_to_string(store.narinfos.synced(&hello)).unwrap();
         assert!(narinfo.contains("Compression: zstd"), "{narinfo}");
+        let registry = crate::metrics::registry(&store);
+        let failed = format!(
+            "nix_store_csi_nar_fetch_duration_seconds_count{{cache=\"{}\",result=\"error\"}}",
+            store.caches.name(0)
+        );
+        assert_eq!(sample(&registry, &failed), Some(1.0));
         assert_eq!(count(state.join("tmp")), 0);
     }
 

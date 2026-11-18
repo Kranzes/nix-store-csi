@@ -39,6 +39,9 @@
   writes. Before, the interval after one showed everything that the plugin
   had counted since it started. The stats also count across a restart of the
   plugin's container.
+- The dashboard's Publish time and NAR fetch time panels ask for at most 200
+  points, so their queries stay under Prometheus's default limit of 50 million
+  samples on clusters of about 1,000 nodes.
 
 ## 0.1.12 - 2026-11-17
 

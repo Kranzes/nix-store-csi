@@ -9,10 +9,10 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
-async-compression = { version = "0.4.51", features = ["tokio", "xz", "zstd", "bzip2", "gzip", "brotli"] }
+async-compression = { version = "0.4.52", features = ["tokio", "xz", "zstd", "bzip2", "gzip", "brotli"] }
 backon = { version = "1.6.0", default-features = false, features = ["std", "tokio-sleep"] }
 bytesize = "2.7.0"
-clap = { version = "4.6.7", features = ["derive", "env"] }
+clap = { version = "4.6.8", features = ["derive", "env"] }
 # Faster than std's SipHash. It seeds each map at random, so unlike with
 # rustc-hash, a cache can't send store paths that collide in every map.
 foldhash = "0.2.0"
@@ -51,7 +51,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "tracing-log"] }
 url = "2.5.8"
 walkdir = "2.5"
-prometheus-client = "0.25.2"
+prometheus-client = "0.26.0"
 hyper = { version = "1.12.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 http-body-util = "0.1.5"

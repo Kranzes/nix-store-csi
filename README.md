@@ -13,8 +13,8 @@ it with podman:
 
 ```sh
 exe=$(nix eval --raw nixpkgs#pkgs --apply 'pkgs: pkgs.lib.getExe pkgs.hello')
-store=$(nix run github:Kranzes/nix-store-csi/v0.1.12 -- --state-dir /tmp/nix-store-csi unpack "$exe")
-podman run --rm -v "$store":/nix/store:ro ghcr.io/kranzes/nix-store-csi-runner:0.1.12 "$exe"
+store=$(nix run github:Kranzes/nix-store-csi/v0.1.13 -- --state-dir /tmp/nix-store-csi unpack "$exe")
+podman run --rm -v "$store":/nix/store:ro ghcr.io/kranzes/nix-store-csi-runner:0.1.13 "$exe"
 ```
 
 ## Why a CSI driver

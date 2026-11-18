@@ -1400,7 +1400,7 @@
     {
       "type": "timeseries",
       "title": "Prefetch list size",
-      "description": "NAR size of the closure that each prefetch list holds, by its name and hash. Every node that holds a list holds the same closure, so this is the largest size on any node, not the sum over nodes. A store path in several lists counts in each. On each node, prefetched closures count towards uncollectable_bytes, which the Store size panel shows. max_store_size_bytes is its limit there, from --max-store-size.",
+      "description": "NAR size of the closure that each prefetch list holds, by name, on the node where it is largest. The nodes that hold a list hold the same closure, so this is not a sum. During a rollout, a node holds the old version's closure until it has fetched the new one. storePaths stands for the lists without a name. A store path in several lists counts in each. Prefetched closures count towards each node's uncollectable_bytes, which the Store size panel shows and --max-store-size limits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1412,8 +1412,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (list, hash) (nix_store_csi_prefetched_size_bytes{instance=~\"$instance\"})",
-          "legendFormat": "{{list}} {{hash}}"
+          "expr": "label_replace(max by (list) (nix_store_csi_prefetched_size_bytes{instance=~\"$instance\"}), \"list\", \"storePaths\", \"list\", \"\")",
+          "legendFormat": "{{list}}"
         }
       ],
       "fieldConfig": {

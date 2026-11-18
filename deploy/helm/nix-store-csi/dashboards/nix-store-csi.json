@@ -1370,7 +1370,6 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
           "decimals": 0
         },
         "overrides": []
@@ -2074,9 +2073,7 @@
             }
           ],
           "fieldConfig": {
-            "defaults": {
-              "unit": "none"
-            },
+            "defaults": {},
             "overrides": []
           },
           "options": {

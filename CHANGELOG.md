@@ -31,6 +31,11 @@
   took longer than `--keep-recent` to fetch, or kept failing, left the old
   closure to the next collection.
 
+### Fixed
+
+- The dashboard's Prefetch lists table shows hashes and list names as text. A
+  hash like `241e89981382` showed as ∞.
+
 ## 0.1.12 - 2026-11-17
 
 ### Added

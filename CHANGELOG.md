@@ -35,6 +35,10 @@
 
 - The dashboard's Prefetch lists table shows hashes and list names as text. A
   hash like `241e89981382` showed as ∞.
+- The dashboard's counts skip the staleness markers that a failed scrape
+  writes. Before, the interval after one showed everything that the plugin
+  had counted since it started. The stats also count across a restart of the
+  plugin's container.
 
 ## 0.1.12 - 2026-11-17
 

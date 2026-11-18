@@ -142,8 +142,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum ((last_over_time(nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code!~\"OK|Unavailable\"}[$__range]) - nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code!~\"OK|Unavailable\"} offset $__range >= 0) or last_over_time(nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code!~\"OK|Unavailable\"}[$__range])) or vector(0)",
-          "legendFormat": ""
+          "expr": "sum_over_time(sum((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code!~\"OK|Unavailable\"} - last_over_time(nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code!~\"OK|Unavailable\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code!~\"OK|Unavailable\"})[$__range:$__interval]) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -204,8 +206,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum ((last_over_time(nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\",result=\"error\"}[$__range]) - nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\",result=\"error\"} offset $__range >= 0) or last_over_time(nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\",result=\"error\"}[$__range])) or vector(0)",
-          "legendFormat": ""
+          "expr": "sum_over_time(sum((nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\",result=\"error\"} - last_over_time(nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\",result=\"error\"}[15m] offset $__interval) >= 0) or nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\",result=\"error\"})[$__range:$__interval]) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -398,7 +402,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (grpc_code) ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\"} - nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\"})",
+          "expr": "sum by (grpc_code) ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\"} - last_over_time(nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\"})",
           "legendFormat": "{{grpc_code}}"
         }
       ],
@@ -453,7 +457,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}))",
+          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} - last_over_time(nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}))",
           "legendFormat": "p50 on node"
         },
         {
@@ -462,7 +466,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}))",
+          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"} - last_over_time(nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"false\"}))",
           "legendFormat": "p95 on node"
         },
         {
@@ -471,7 +475,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}))",
+          "expr": "histogram_quantile(0.5, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - last_over_time(nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}))",
           "legendFormat": "p50 fetched"
         },
         {
@@ -480,7 +484,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}))",
+          "expr": "histogram_quantile(0.95, sum by (le) ((nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - last_over_time(nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_bucket{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}))",
           "legendFormat": "p95 fetched"
         }
       ],
@@ -600,7 +604,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cache) ((nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"} - nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"} offset $__interval >= 0) or nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}) / ($__interval_ms / 1000)",
+          "expr": "sum by (cache) ((nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"} - last_over_time(nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}) / ($__interval_ms / 1000)",
           "legendFormat": "{{cache}}"
         }
       ],
@@ -651,7 +655,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cache, result) ((nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\"} - nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\"} offset $__interval >= 0) or nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\"})",
+          "expr": "sum by (cache, result) ((nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\"} - last_over_time(nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_nar_fetch_duration_seconds_count{instance=~\"$instance\"})",
           "legendFormat": "{{cache}} {{result}}"
         }
       ],
@@ -706,7 +710,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sort_desc(sum by (cache) ((last_over_time(nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}[$__range]) - nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"} offset $__range >= 0) or last_over_time(nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}[$__range])))",
+          "expr": "sort_desc(sum_over_time(sum by (cache) ((nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"} - last_over_time(nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_nar_fetched_bytes_total{instance=~\"$instance\"})[$__range:$__interval]))",
           "legendFormat": "{{cache}}",
           "instant": true,
           "range": false
@@ -757,7 +761,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (le) ((nix_store_csi_nar_fetch_duration_seconds_bucket{instance=~\"$instance\",result=\"ok\"} - nix_store_csi_nar_fetch_duration_seconds_bucket{instance=~\"$instance\",result=\"ok\"} offset $__interval >= 0) or nix_store_csi_nar_fetch_duration_seconds_bucket{instance=~\"$instance\",result=\"ok\"})",
+          "expr": "sum by (le) ((nix_store_csi_nar_fetch_duration_seconds_bucket{instance=~\"$instance\",result=\"ok\"} - last_over_time(nix_store_csi_nar_fetch_duration_seconds_bucket{instance=~\"$instance\",result=\"ok\"}[15m] offset $__interval) >= 0) or nix_store_csi_nar_fetch_duration_seconds_bucket{instance=~\"$instance\",result=\"ok\"})",
           "legendFormat": "{{le}}",
           "format": "heatmap"
         }
@@ -939,8 +943,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum ((last_over_time(nix_store_csi_gc_freed_bytes_total{instance=~\"$instance\"}[$__range]) - nix_store_csi_gc_freed_bytes_total{instance=~\"$instance\"} offset $__range >= 0) or last_over_time(nix_store_csi_gc_freed_bytes_total{instance=~\"$instance\"}[$__range])) or vector(0)",
-          "legendFormat": ""
+          "expr": "sum_over_time(sum((nix_store_csi_gc_freed_bytes_total{instance=~\"$instance\"} - last_over_time(nix_store_csi_gc_freed_bytes_total{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_gc_freed_bytes_total{instance=~\"$instance\"})[$__range:$__interval]) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -996,8 +1002,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum ((last_over_time(nix_store_csi_gc_deleted_paths_total{instance=~\"$instance\"}[$__range]) - nix_store_csi_gc_deleted_paths_total{instance=~\"$instance\"} offset $__range >= 0) or last_over_time(nix_store_csi_gc_deleted_paths_total{instance=~\"$instance\"}[$__range])) or vector(0)",
-          "legendFormat": ""
+          "expr": "sum_over_time(sum((nix_store_csi_gc_deleted_paths_total{instance=~\"$instance\"} - last_over_time(nix_store_csi_gc_deleted_paths_total{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_gc_deleted_paths_total{instance=~\"$instance\"})[$__range:$__interval]) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -1054,8 +1062,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum ((last_over_time(nix_store_csi_gc_duration_seconds_count{instance=~\"$instance\",result=\"error\"}[$__range]) - nix_store_csi_gc_duration_seconds_count{instance=~\"$instance\",result=\"error\"} offset $__range >= 0) or last_over_time(nix_store_csi_gc_duration_seconds_count{instance=~\"$instance\",result=\"error\"}[$__range])) or vector(0)",
-          "legendFormat": ""
+          "expr": "sum_over_time(sum((nix_store_csi_gc_duration_seconds_count{instance=~\"$instance\",result=\"error\"} - last_over_time(nix_store_csi_gc_duration_seconds_count{instance=~\"$instance\",result=\"error\"}[15m] offset $__interval) >= 0) or nix_store_csi_gc_duration_seconds_count{instance=~\"$instance\",result=\"error\"})[$__range:$__interval]) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -1166,8 +1176,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum ((last_over_time(nix_store_csi_failed_syncs_total{instance=~\"$instance\"}[$__range]) - nix_store_csi_failed_syncs_total{instance=~\"$instance\"} offset $__range >= 0) or last_over_time(nix_store_csi_failed_syncs_total{instance=~\"$instance\"}[$__range])) or vector(0)",
-          "legendFormat": ""
+          "expr": "sum_over_time(sum((nix_store_csi_failed_syncs_total{instance=~\"$instance\"} - last_over_time(nix_store_csi_failed_syncs_total{instance=~\"$instance\"}[15m] offset $__interval) >= 0) or nix_store_csi_failed_syncs_total{instance=~\"$instance\"})[$__range:$__interval]) or vector(0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -1463,7 +1475,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (le) ((nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"} - nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"} offset $__interval >= 0) or nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"})",
+              "expr": "sum by (le) ((nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"} - last_over_time(nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"}[15m] offset $__interval) >= 0) or nix_store_csi_locality_best_score_bucket{scheduler=\"kube-scheduler\"})",
               "legendFormat": "{{le}}",
               "format": "heatmap"
             }
@@ -1519,7 +1531,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (le) ((nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"} - nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"} offset $__interval >= 0) or nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"})",
+              "expr": "sum by (le) ((nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"} - last_over_time(nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"}[15m] offset $__interval) >= 0) or nix_store_csi_locality_best_score_bucket{scheduler=\"volcano\"})",
               "legendFormat": "{{le}}",
               "format": "heatmap"
             }
@@ -1575,7 +1587,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}) / sum ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"} - nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"} offset $__interval >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"})",
+              "expr": "sum ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"} - last_over_time(nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\",fetched=\"true\"}) / sum ((nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"} - last_over_time(nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"}[15m] offset $__interval) >= 0) or nix_store_csi_publish_duration_seconds_count{instance=~\"$instance\",grpc_code=\"OK\"})",
               "legendFormat": "fetched"
             }
           ],
@@ -1627,7 +1639,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "histogram_quantile(0.5, sum by (scheduler, le) ((nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} - nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} offset $__interval >= 0) or nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}))",
+              "expr": "histogram_quantile(0.5, sum by (scheduler, le) ((nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} - last_over_time(nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}[15m] offset $__interval) >= 0) or nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}))",
               "legendFormat": "p50 {{scheduler}}"
             },
             {
@@ -1636,7 +1648,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "histogram_quantile(0.99, sum by (scheduler, le) ((nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} - nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} offset $__interval >= 0) or nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}))",
+              "expr": "histogram_quantile(0.99, sum by (scheduler, le) ((nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"} - last_over_time(nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}[15m] offset $__interval) >= 0) or nix_store_csi_locality_prioritize_duration_seconds_bucket{result=\"ok\"}))",
               "legendFormat": "p99 {{scheduler}}"
             }
           ],
@@ -1690,7 +1702,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (scheduler) ((nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"} - nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"} offset $__interval >= 0) or nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"})",
+              "expr": "sum by (scheduler) ((nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"} - last_over_time(nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"}[15m] offset $__interval) >= 0) or nix_store_csi_locality_prioritize_duration_seconds_count{result!=\"ok\"})",
               "legendFormat": "{{scheduler}}"
             }
           ],
@@ -1837,7 +1849,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (result) ((nix_store_csi_locality_scrapes_total - nix_store_csi_locality_scrapes_total offset $__interval >= 0) or nix_store_csi_locality_scrapes_total)",
+              "expr": "sum by (result) ((nix_store_csi_locality_scrapes_total - last_over_time(nix_store_csi_locality_scrapes_total[15m] offset $__interval) >= 0) or nix_store_csi_locality_scrapes_total)",
               "legendFormat": "{{result}}"
             }
           ],
@@ -1892,7 +1904,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (result) ((nix_store_csi_locality_closure_resolves_total - nix_store_csi_locality_closure_resolves_total offset $__interval >= 0) or nix_store_csi_locality_closure_resolves_total)",
+              "expr": "sum by (result) ((nix_store_csi_locality_closure_resolves_total - last_over_time(nix_store_csi_locality_closure_resolves_total[15m] offset $__interval) >= 0) or nix_store_csi_locality_closure_resolves_total)",
               "legendFormat": "{{result}}"
             }
           ],

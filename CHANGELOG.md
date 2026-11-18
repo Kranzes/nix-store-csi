@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The images and the chart are published again. 0.1.13 has neither, because
+  building the images' SBOMs failed on a wrong source hash for
+  cargo-cyclonedx in nixpkgs. 0.1.14 is 0.1.13 with that fixed.
+
 ## 0.1.13 - 2026-11-18
 
 ### Added

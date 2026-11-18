@@ -14,6 +14,17 @@ let
     );
   craneLib = craneLibFor pkgs;
   bombonLib = import bombon { inherit pkgs; };
+  # Until NixOS/nixpkgs#589378 reaches nixpkgs-unstable. Upstream changed the
+  # archive of cargo-cyclonedx's tag after nixpkgs took its hash.
+  sbomPkgs = pkgs.extend (
+    _: prev: {
+      cargo-cyclonedx = prev.cargo-cyclonedx.overrideAttrs (old: {
+        src = old.src.overrideAttrs {
+          outputHash = "sha256-Ne+oufpXfI19KwRjnBAPeSM65ja+5O26+Yl8e+DUsjM=";
+        };
+      });
+    }
+  );
   # The images copy their contents in, so the SBOM names them as extraPaths.
   withSbom =
     extraPaths: image:
@@ -45,7 +56,7 @@ let
           craneLib = craneLibFor pkgs.pkgsStatic;
         };
       in
-      bombonLib.passthruVendoredSbom.rust package { pkgs = pkgs.pkgsStatic; };
+      bombonLib.passthruVendoredSbom.rust package { pkgs = sbomPkgs.pkgsStatic; };
 
     csi-image =
       withSbom

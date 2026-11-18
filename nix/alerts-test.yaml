@@ -1,6 +1,7 @@
 # promtool unit tests for the chart's PrometheusRule. The chart check renders
-# the rules for release nix-store-csi in namespace default with the PodMonitor
-# and a prefetch list, and replaces @hash@ with the hash of the list.
+# the rules for release nix-store-csi in namespace default with the PodMonitor,
+# a prefetch list, and the node pools gpu, which inherits the list, and web.
+# It replaces @hash@ with the hash of the list.
 rule_files:
   - rules.yaml
 
@@ -245,6 +246,11 @@ tests:
         values: 1x40
       - series: nix_store_csi_build_info{instance="node-c", version="0.1.3"}
         values: 1x40
+      # Neither has read the list, which only gpu's nodes read.
+      - series: nix_store_csi_build_info{instance="node-d", pool="gpu", version="0.1.3"}
+        values: 1x40
+      - series: nix_store_csi_build_info{instance="node-e", pool="web", version="0.1.3"}
+        values: 1x40
       # Read the chart's list but still fetches it.
       - series: nix_store_csi_prefetched{instance="node-a", hash="@hash@"}
         values: 0x40
@@ -287,6 +293,15 @@ tests:
               version: 0.1.3
             exp_annotations:
               summary: node-c hasn't read the prefetch list storePaths at hash @hash@.
+              description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+          - exp_labels:
+              severity: warning
+              hash: "@hash@"
+              instance: node-d
+              pool: gpu
+              version: 0.1.3
+            exp_annotations:
+              summary: node-d hasn't read the prefetch list storePaths at hash @hash@.
               description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
 
   - interval: 1m

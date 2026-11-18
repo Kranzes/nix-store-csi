@@ -32,6 +32,17 @@ matches a node without the label.
 {{- end }}
 {{- end }}
 
+{{- /* The systems that a dict of prefetch lists has storePaths.<system> keys for, joined by spaces. */}}
+{{- define "nix-store-csi.systems" -}}
+{{- $systems := list }}
+{{- range $key, $_ := . }}
+{{- if hasPrefix "storePaths." $key }}
+{{- $systems = append $systems (index (splitList "." $key) 1) }}
+{{- end }}
+{{- end }}
+{{- $systems | uniq | join " " }}
+{{- end }}
+
 {{- /* The locality pods' labels differ from the node plugins', so selectors for one don't pick the other. */}}
 {{- define "nix-store-csi.localitySelectorLabels" -}}
 app.kubernetes.io/name: {{ .Chart.Name }}-locality

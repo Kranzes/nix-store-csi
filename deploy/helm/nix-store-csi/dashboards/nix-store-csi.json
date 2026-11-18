@@ -1229,7 +1229,7 @@
     {
       "type": "timeseries",
       "title": "Prefetch rollout",
-      "description": "Node plugins that fetched the closure of each prefetch list, by its name and hash. A list's rollout is done once its new hash reaches the dashed line of its system, the node plugins of that system that Prometheus scrapes. With node pools, a pool's lists reach only the node plugins in that pool.",
+      "description": "Node plugins that fetched the closure of each prefetch list, by its name and hash. A list's rollout is done once its new hash reaches the dashed line of its system, the node plugins of that system that Prometheus scrapes. With node pools, a pool's lists reach only the node plugins in that pool, and the top-level lists those outside every pool and in the pools that inherit them.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

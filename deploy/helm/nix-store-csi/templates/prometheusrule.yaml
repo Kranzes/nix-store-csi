@@ -69,19 +69,21 @@
 {{- end }}
 {{- $lists := dict "" .Values.prefetch }}
 {{- range $pool, $values := .Values.nodePools }}
-{{- $_ := set $lists $pool ($values.prefetch | default dict) }}
+{{- $prefetch := $values.prefetch | default dict }}
+{{- if $values.inheritPrefetch }}
+{{- $prefetch = merge (dict) $prefetch $.Values.prefetch }}
+{{- end }}
+{{- $_ := set $lists $pool $prefetch }}
 {{- end }}
 {{- range $pool, $prefetch := $lists }}
-{{- $systems := list }}
-{{- range $key, $_ := $prefetch }}
-{{- if hasPrefix "storePaths." $key }}
-{{- $systems = append $systems (index (splitList "." $key) 1) }}
-{{- end }}
-{{- end }}
+{{- $systems := include "nix-store-csi.systems" $prefetch }}
 {{- range $key, $value := $prefetch }}
 {{- $matchers := list }}
+{{- $labels := dict }}
 {{- if $.Values.nodePools }}
 {{- $matchers = append $matchers (printf "pool=%q" $pool) }}
+{{- /* Keeps apart the rules of a list that several pools read. An empty value drops the label. */}}
+{{- $_ := set $labels "pool" $pool }}
 {{- end }}
 {{- $name := "" }}
 {{- if hasPrefix "storePaths." $key }}
@@ -90,7 +92,7 @@
 {{- $name = trimPrefix (printf "storePaths.%s" $system) $key | trimPrefix "." }}
 {{- else if $systems }}
 {{- /* Nodes of a system with a key of its own don't read storePaths. */}}
-{{- $matchers = append $matchers (printf "system!~%q" (join "|" (uniq $systems))) }}
+{{- $matchers = append $matchers (printf "system!~%q" (replace " " "|" $systems)) }}
 {{- end }}
 {{- $selector := "" }}
 {{- with $matchers }}
@@ -100,7 +102,7 @@
 {{- $rules = append $rules (dict
   "alert" "NixStoreCsiPrefetchBehind"
   "expr" (printf "nix_store_csi_build_info%s unless on (instance) nix_store_csi_prefetched{list=%q, hash=%q}" $selector $name $hash)
-  "labels" (dict "list" $name "hash" $hash)
+  "labels" (merge $labels (dict "list" $name "hash" $hash))
   "summary" (printf "{{ $labels.instance }} hasn't read the prefetch list %s at hash %s." $key $hash)
   "description" "Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.") }}
 {{- end }}

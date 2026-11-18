@@ -255,7 +255,8 @@ testers.runNixOSTest {
           # doesn't exist until then.
           nodePools.warm = {
             nodeSelector.pool = "warm";
-            prefetch."storePaths.${stdenv.hostPlatform.system}" = "${fixtures.warm}";
+            inheritPrefetch = true;
+            prefetch."storePaths.${stdenv.hostPlatform.system}.warm" = "${fixtures.warm}";
           };
           nodePools.owned = {
             nodeSelector.pool = "owned";
@@ -537,10 +538,11 @@ testers.runNixOSTest {
         machine.wait_until_fails(volumes)
         machine.wait_until_succeeds(f"[ -z \"$({views})\" ]", timeout=60)
 
-    with subtest("a node that joins a pool gets the pool's plugin, which prefetches the pool's list"):
+    with subtest("a node that joins a pool gets the pool's plugin, which prefetches the pool's list and the top-level one"):
         join_pool("warm")
         # The cache is still down, and warm is on the node already.
-        machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch-warm"), timeout=180)
+        machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch-warm", "warm"), timeout=180)
+        machine.wait_until_succeeds(prefetched("nix-store-csi-prefetch"), timeout=60)
 
     with subtest("a plugin whose prefetchConfigMap doesn't exist yet reads its lists once it does"):
         join_pool("owned")

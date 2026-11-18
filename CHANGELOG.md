@@ -13,6 +13,11 @@
   `nix_store_csi_prefetched`. A store path in several lists counts in each.
 - The dashboard has a Prefetch list size panel, and a Locality row, collapsed,
   for the locality extender's answers, scrapes and closure resolves.
+- `nodePools.<pool>.inheritPrefetch` makes a pool's nodes read the top-level
+  prefetch lists, from `prefetch` or `prefetchConfigMap`, beside the pool's,
+  so a closure that every node needs goes in one list. The chart refuses a key
+  that both `prefetch` and the pool's `prefetch` set, and a `storePaths` in
+  one that the other's key for a system would hide.
 
 ### Changed
 

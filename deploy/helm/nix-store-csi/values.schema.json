@@ -118,6 +118,7 @@
           },
           "prefetch": { "$ref": "#/properties/prefetch" },
           "prefetchConfigMap": { "$ref": "#/properties/prefetchConfigMap" },
+          "inheritPrefetch": { "type": "boolean" },
           "maxStoreSize": { "$ref": "#/properties/maxStoreSize" }
         }
       }

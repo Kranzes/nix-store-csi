@@ -262,14 +262,9 @@ nodePools:
 - Each pool gets a DaemonSet, `<release>-node-<pool>`, on the nodes that match
   both its `nodeSelector` and the top-level one, and a ConfigMap,
   `<release>-prefetch-<pool>`.
-- A pool's list replaces `prefetch`. Its nodes don't fetch the top-level list,
-  and a pool without `prefetch` or `prefetchConfigMap` prefetches nothing.
-  `prefetch` is the list for the nodes outside every pool.
-- A closure that every node needs, like a log shipper, goes in `prefetch` and
-  in each pool's list. The chart doesn't merge the lists. A node reads
-  `storePaths` only if its list has no key for its system, so a pool's
-  `storePaths.x86_64-linux` would hide a top-level `storePaths` from the
-  pool's x86 nodes.
+- Without `inheritPrefetch`, below, a pool's list replaces `prefetch`, and a
+  pool without `prefetch` or `prefetchConfigMap` prefetches nothing. `prefetch`
+  is the list for the nodes outside every pool.
 - A pool's `maxStoreSize` replaces the top-level one on its nodes, and an
   empty value turns the limit off for the pool. A percentage already fits
   pools with different disks.
@@ -278,12 +273,41 @@ nodePools:
   with the other pool's. The node store stays, and mounted volumes keep
   working.
 
+A closure that every node needs, like a log shipper, goes in `prefetch` and in
+each pool's list, unless the pools set `inheritPrefetch`. Their nodes read the
+top-level lists, from `prefetch` or `prefetchConfigMap`, beside the pool's:
+
+```yaml
+# values.yaml
+prefetch:
+  storePaths.x86_64-linux.logs: /nix/store/<hash>-vector
+nodePools:
+  gpu:
+    nodeSelector:
+      karpenter.sh/nodepool: gpu
+    inheritPrefetch: true
+    prefetch:
+      storePaths.x86_64-linux.trainer: /nix/store/<hash>-trainer
+```
+
+- The chart refuses a key that both `prefetch` and the pool's `prefetch` set.
+  It can't see the keys of a ConfigMap that it doesn't render. If such a
+  ConfigMap shares a key with the other source, the pool's list wins.
+- A node reads `storePaths` only if none of the lists that it reads has a key
+  for its system, the top-level ones included. Here the pool's
+  `storePaths.x86_64-linux.trainer` would hide a top-level `storePaths` from
+  the pool's x86 nodes. The chart refuses that too. With a ConfigMap that it
+  doesn't render, give the lists a system.
+
 The chart's PodMonitor puts the pool's name in a `pool` label, which is empty
 outside the pools, and the chart's notes add it to the query:
 
 ```promql
 nix_store_csi_build_info{pool="gpu", system="x86_64-linux"} unless on (instance) nix_store_csi_prefetched{list="", hash="<hash>"} == 1
 ```
+
+For a top-level list, match the pools that inherit it too, as in
+`pool=~"|gpu"`.
 
 Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
 pods into the metrics in your own scrape config.
@@ -604,7 +628,7 @@ Each alert in `metrics.prometheusRule.alerts` has `enabled`, `for` and
 | `NixStoreCsiGcErrors` | Collections fail. |
 | `NixStoreCsiLowSpace` | The filesystem has less free space or inodes than `--ensure-free` keeps, so collection deletes store paths used within `--keep-recent`. |
 | `NixStoreCsiStoreNearLimit` | What garbage collection can't delete is over `ratio`, 90% by default, of `maxStoreSize`, so publishes that need a fetch may fail. |
-| `NixStoreCsiPrefetchBehind` | A node doesn't hold the current version of a prefetch list that it reads. One rule fires for a list that a node has read but doesn't hold. For each list that the chart renders, another fires while a node hasn't read its current version. A list that others add has no such rule, so no rule sees a node still on its old hash. Set `for` above the time a node takes to fetch a list. With `nodePools`, the rules for the chart's lists need the `pool` label. |
+| `NixStoreCsiPrefetchBehind` | A node doesn't hold the current version of a prefetch list that it reads. One rule fires for a list that a node has read but doesn't hold. For each list that the chart renders, another fires while a node hasn't read its current version. A list that others add has no such rule, so no rule sees a node still on its old hash. Set `for` above the time a node takes to fetch a list. With `nodePools`, the rules for the chart's lists need the `pool` label, and a top-level list's rules cover the pools that inherit it too. |
 | `NixStoreCsiLocalityDown` | Prometheus can't scrape the locality extender, or it isn't running. It needs the PodMonitor. |
 | `NixStoreCsiLocalityScrapeErrors` | More than `ratio`, 10% by default, of the locality extender's reads of the node plugins fail. |
 | `NixStoreCsiLocalityResolveErrors` | The locality extender fails to resolve closures from the caches for 15 minutes. |

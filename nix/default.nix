@@ -197,15 +197,20 @@ rec {
             --set-json 'serviceAccount.annotations={"eks.amazonaws.com/role-arn":"arn:aws:iam::111122223333:role/nix-store-csi"}' \
             --set-json 'substituters=["https://cache.nixos.org","s3://my-cache?region=eu-west-1","file:///srv/cache"]'
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.grafanaDashboard.enabled=true,metrics.prometheusRule.enabled=true
-          # The alerts' rules, with each kind of alert.
+          # The alerts' rules, with each kind of alert. The tests take the node
+          # pools that alerts-test.yaml describes.
           rendered() {
             helm template nix-store-csi ${chartSrc} --namespace default \
               --set metrics.enabled=true,metrics.podMonitor.enabled=true,metrics.prometheusRule.enabled=true,locality.enabled=true \
               --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello' \
-              --show-only "templates/$1.yaml"
+              --show-only "templates/$1.yaml" "''${@:2}"
           }
           rendered prometheusrule | yq .spec > rules.yaml
-          promtool check rules rules.yaml
+          promtool check rules --lint-fatal rules.yaml
+          rendered prometheusrule \
+            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"inheritPrefetch":true},"web":{"nodeSelector":{"pool":"web"}}}' \
+            | yq .spec > rules.yaml
+          promtool check rules --lint-fatal rules.yaml
           hash=$(printf %s "$(rendered prefetch | yq .data.storePaths)" | sha256sum | head -c 12)
           sed "s/@hash@/$hash/g" ${./alerts-test.yaml} > alerts-test.yaml
           promtool test rules alerts-test.yaml
@@ -213,15 +218,17 @@ rec {
           helm lint --strict ${chartSrc} --set 'prefetch.storePaths\.x86_64-linux=/nix/store/00000000000000000000000000000000-hello'
           helm lint --strict ${chartSrc} --set metrics.enabled=true,metrics.prometheusRule.enabled=true --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu","accel":"nvidia"},"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"}},"web":{"nodeSelector":{"pool":"web"}}}'
           # Each DaemonSet mounts the ConfigMap that its prefetchConfigMap
-          # names, which may not exist yet, and pulls with imagePullSecrets.
+          # names, which may not exist yet, a pool that inherits the top-level
+          # lists mounts that ConfigMap too, and each pulls with
+          # imagePullSecrets.
           pools=(--set prefetchConfigMap=lists --set 'imagePullSecrets={registry}' \
-            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"prefetchConfigMap":"gpu-lists"}}')
+            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"prefetchConfigMap":"gpu-lists"},"web":{"nodeSelector":{"pool":"web"},"prefetchConfigMap":"web-lists","inheritPrefetch":true}}')
           helm lint --strict ${chartSrc} "''${pools[@]}"
           helm template ${chartSrc} "''${pools[@]}" | yq 'select(.kind == "DaemonSet")' > daemonsets.yaml
-          mounts=$(yq -N '.spec.template.spec.volumes[] | select(.name == "prefetch") | .configMap.name + " " + (.configMap.optional | tostring)' daemonsets.yaml)
-          test "$mounts" = "$(printf 'lists true\ngpu-lists true')"
+          mounts=$(yq -N '.metadata.name as $name | .spec.template.spec.volumes[] | select(.name == "prefetch") | (keys | .[1]) as $form | (.configMap // .projected.sources[].configMap) | $name + " " + $form + " " + .name + " " + (.optional | tostring)' daemonsets.yaml)
+          test "$mounts" = "$(printf '%s\n' 'release-name-node configMap lists true' 'release-name-node-gpu configMap gpu-lists true' 'release-name-node-web projected lists true' 'release-name-node-web projected web-lists true')"
           secrets=$(yq -N '.spec.template.spec.imagePullSecrets[].name' daemonsets.yaml)
-          test "$secrets" = "$(printf 'registry\nregistry')"
+          test "$secrets" = "$(printf 'registry\nregistry\nregistry')"
           # A pool's maxStoreSize replaces the top-level one, and an empty one
           # turns it off.
           limits=$(helm template ${chartSrc} --set maxStoreSize=200G \
@@ -245,6 +252,12 @@ rec {
             --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello,prefetchConfigMap=lists'
           refuses "nodePools.gpu.prefetch and nodePools.gpu.prefetchConfigMap are both set" \
             --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"},"prefetchConfigMap":"gpu-lists"}}'
+          refuses "prefetch and nodePools.gpu.prefetch both set storePaths" \
+            --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello' \
+            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"inheritPrefetch":true,"prefetch":{"storePaths":"/nix/store/00000000000000000000000000000000-hello"}}}'
+          refuses "nodePools.gpu.prefetch has a key for x86_64-linux and prefetch has none" \
+            --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello' \
+            --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"inheritPrefetch":true,"prefetch":{"storePaths.x86_64-linux.trainer":"/nix/store/00000000000000000000000000000000-hello"}}}'
           refuses "at '/maxStoreSize'" --set maxStoreSize=150%
           for field in version appVersion; do
             grep -qx "$field: ${package.version}" ${chartSrc}/Chart.yaml || {

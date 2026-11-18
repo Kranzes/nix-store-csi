@@ -13,14 +13,16 @@ One DaemonSet for the nodes outside every pool, and one for each pool. A node
 that matches more than one pool goes to the first by name, since a second
 plugin on a node can't take the state dir's lock.
 */}}
-{{- $daemonSets := list (dict
+{{- $top := dict
   "name" (printf "%s-node" $.Release.Name)
   "pool" ""
   "nodeSelector" $.Values.nodeSelector
   "prefetch" $.Values.prefetch
   "prefetchConfigMap" $.Values.prefetchConfigMap
   "configMap" (printf "%s-prefetch" $.Release.Name)
-  "maxStoreSize" $.Values.maxStoreSize) }}
+  "inherits" false
+  "maxStoreSize" $.Values.maxStoreSize }}
+{{- $daemonSets := list $top }}
 {{- $earlier := list }}
 {{- range $pool, $values := $.Values.nodePools }}
 {{- $daemonSets = append $daemonSets (dict
@@ -30,17 +32,49 @@ plugin on a node can't take the state dir's lock.
   "prefetch" ($values.prefetch | default dict)
   "prefetchConfigMap" ($values.prefetchConfigMap | default "")
   "configMap" (printf "%s-prefetch-%s" $.Release.Name $pool)
+  "inherits" ($values.inheritPrefetch | default false)
   "maxStoreSize" (dig "maxStoreSize" $.Values.maxStoreSize $values)
   "outside" $earlier) }}
 {{- $earlier = append $earlier $values.nodeSelector }}
 {{- end }}
-{{- $_ := set (first $daemonSets) "outside" $earlier }}
+{{- $_ := set $top "outside" $earlier }}
 {{- range $ds := $daemonSets }}
 {{- if and $ds.prefetch $ds.prefetchConfigMap }}
 {{- $values := ternary "" (printf "nodePools.%s." $ds.pool) (empty $ds.pool) }}
 {{- fail (printf "%sprefetch and %sprefetchConfigMap are both set. Set only one." $values $values) }}
 {{- end }}
-{{- $prefetches := or $ds.prefetch $ds.prefetchConfigMap }}
+{{- /*
+The ConfigMaps of the plugin's lists. For a pool that inherits the top-level
+lists, the volume projects them first, so where both have a key, the pool's
+wins.
+*/}}
+{{- $configMaps := list }}
+{{- range $source := ternary (list $top $ds) (list $ds) $ds.inherits }}
+{{- if $source.prefetch }}
+{{- $configMaps = append $configMaps (dict "name" $source.configMap) }}
+{{- else if $source.prefetchConfigMap }}
+{{- $configMaps = append $configMaps (dict "name" $source.prefetchConfigMap "optional" true) }}
+{{- end }}
+{{- end }}
+{{- if $ds.inherits }}
+{{- $pool := printf "nodePools.%s.prefetch" $ds.pool }}
+{{- range $key, $_ := $ds.prefetch }}
+{{- if hasKey $.Values.prefetch $key }}
+{{- fail (printf "prefetch and %s both set %s, and the pool inherits prefetch. Rename one of the keys." $pool $key) }}
+{{- end }}
+{{- end }}
+{{- /* A node reads storePaths only if no list in its prefetch dir has a key for its system. */}}
+{{- $sources := dict "prefetch" $.Values.prefetch $pool $ds.prefetch }}
+{{- range $name, $lists := $sources }}
+{{- $other := ternary $pool "prefetch" (eq $name "prefetch") }}
+{{- $systems := include "nix-store-csi.systems" $lists | splitList " " }}
+{{- range $system := include "nix-store-csi.systems" (get $sources $other) | splitList " " | compact }}
+{{- if and (hasKey $lists "storePaths") (not (has $system $systems)) }}
+{{- fail (printf "%s has a key for %s and %s has none, so the pool's %s nodes would skip %s.storePaths. Give it a system, as in storePaths.%s.<name>." $other $system $name $system $name $system) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -110,7 +144,7 @@ spec:
             {{- if $.Values.locality.enabled }}
             - --serve-paths
             {{- end }}
-            {{- if $prefetches }}
+            {{- if $configMaps }}
             - --prefetch-dir=/etc/nix-store-csi/prefetch
             {{- end }}
             {{- with $.Values.extraArgs }}
@@ -164,7 +198,7 @@ spec:
             {{- with include "nix-store-csi.credentialsMount" $ }}
             {{- . | nindent 12 }}
             {{- end }}
-            {{- if $prefetches }}
+            {{- if $configMaps }}
             # Kubelet updates the files when the list changes, so the pod
             # template has no checksum of it that would restart the plugin.
             - name: prefetch
@@ -218,14 +252,20 @@ spec:
         {{- with include "nix-store-csi.credentials" $ }}
         {{- . | nindent 8 }}
         {{- end }}
-        {{- if $prefetches }}
+        {{- with $configMaps }}
+        # The plugin starts without an optional ConfigMap, and reads its lists
+        # once it exists.
         - name: prefetch
+          {{- if eq (len .) 1 }}
           configMap:
-            name: {{ $ds.prefetchConfigMap | default $ds.configMap }}
-            {{- if $ds.prefetchConfigMap }}
-            # The plugin starts without it, and reads its lists once it
-            # exists.
-            optional: true
-            {{- end }}
+            {{- toYaml (first .) | nindent 12 }}
+          {{- else }}
+          projected:
+            sources:
+              {{- range . }}
+              - configMap:
+                  {{- toYaml . | nindent 18 }}
+              {{- end }}
+          {{- end }}
         {{- end }}
 {{- end }}

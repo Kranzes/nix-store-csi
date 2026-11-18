@@ -969,7 +969,7 @@ dependencies = [
 [[package]]
 name = "harmonia-file-core"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "serde",
  "serde_json",
@@ -979,7 +979,7 @@ dependencies = [
 [[package]]
 name = "harmonia-file-nar"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "bstr",
  "bytes",
@@ -1003,7 +1003,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-content-address"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "derive_more",
  "harmonia-store-path",
@@ -1015,7 +1015,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-nar-info"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "harmonia-store-content-address",
  "harmonia-store-path",
@@ -1029,7 +1029,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-path"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "derive_more",
  "harmonia-utils-base-encoding",
@@ -1042,7 +1042,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-path-info"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "harmonia-store-content-address",
  "harmonia-store-path",
@@ -1054,7 +1054,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-base-encoding"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -1064,7 +1064,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-hash"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "aws-lc-rs",
  "blake3",
@@ -1082,7 +1082,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-io"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1096,7 +1096,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-signature"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#e85cab1d43bf70121f34645a44123e6d61f4a498"
+source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
 dependencies = [
  "data-encoding",
  "ed25519-dalek",
@@ -2105,9 +2105,9 @@ dependencies = [
 
 [[package]]
 name = "prometheus-client"
-version = "0.25.2"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d150ad7bf80e60f45769d18a0a8c01028ab8f56355f33ed7bfce3a31f82e696"
+checksum = "f021d42d29841d029b61b45a25a7ef94feaf1d744913e59665103333a56045b8"
 dependencies = [
  "dtoa",
  "itoa",
@@ -2128,9 +2128,9 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+checksum = "3ef0b569d1d907ab3a28596aee62cf1f61dacb0529a4bedcd8e7460e2d5228b4"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -2157,12 +2157,12 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2170,9 +2170,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+checksum = "f29a7c4c7a84cef41a53d338a2d10d4f1b043ea5c3dde26db22ee2c9c1b1c75b"
 dependencies = [
  "prost",
 ]

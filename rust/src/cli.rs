@@ -182,6 +182,19 @@ pub enum Command {
         /// minute. Off unless set.
         #[arg(long, value_name = "DIR", env = "NIX_STORE_CSI_PREFETCH_DIR")]
         prefetch_dir: Option<PathBuf>,
+        /// Paths in store paths, separated by spaces, where a container
+        /// runtime or hook binds, like `/nix/store/<hash>-glibc-2.40-66/lib/`.
+        /// It cannot create their mountpoints in the read-only volume, so each
+        /// view gets an empty file at each path, or a directory for one that
+        /// ends in a slash. A view whose closure has the store path gets none.
+        #[arg(long, value_name = "PATHS", env = "NIX_STORE_CSI_MOUNTPOINTS")]
+        mountpoints: Option<String>,
+        /// The node's root directory, mounted read-only. Each view then also
+        /// gets a mountpoint for each path in a store path that the CDI specs
+        /// in the node's `/etc/cdi` and `/var/run/cdi` bind. The plugin reads
+        /// them every 10 seconds, and adds new mountpoints to every view.
+        #[arg(long, value_name = "DIR", env = "NIX_STORE_CSI_HOST_ROOT")]
+        host_root: Option<PathBuf>,
     },
     /// Fetch the closures of store paths into the node store and print its
     /// directory, for use with `podman -v DIR:/nix/store:ro`.

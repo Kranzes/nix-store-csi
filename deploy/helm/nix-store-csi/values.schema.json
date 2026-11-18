@@ -123,6 +123,17 @@
         }
       }
     },
+    "mountpoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^/nix/store/[^/\\s]+(/\\S*)?$" }
+        },
+        "cdi": { "type": "boolean" }
+      }
+    },
     "extraArgs": { "type": "array", "items": { "type": "string" } },
     "admissionPolicy": {
       "type": "object",

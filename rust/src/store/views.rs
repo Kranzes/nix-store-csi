@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::Permissions;
 use std::io;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,17 +12,18 @@ use std::sync::{Arc, PoisonError};
 
 use anyhow::{Context, bail, ensure};
 use foldhash::{HashSet, HashSetExt};
-use harmonia_store_path::StorePath;
+use harmonia_store_path::{StoreDir, StorePath};
 use harmonia_utils_hash::{Algorithm, HashFormat};
 use rayon::prelude::*;
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, Timespec, Timestamps, UTIME_OMIT, fchmod, futimens,
-    linkat, mkdirat, openat, statat, utimensat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, Timespec, Timestamps, UTIME_OMIT, fchmod,
+    fstat, futimens, linkat, mkdirat, openat, statat, utimensat,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use super::fs::{Scratch, count_inodes, remove_file};
-use super::{GcGuard, Store, list_names, list_store_paths, write_synced};
+use super::{GcGuard, Store, list_names, write_synced};
+use crate::store_path::Names;
 
 /// The directory in a view that links each root under its name without the
 /// hash. Pods reach a root there by the same path on every system.
@@ -41,7 +42,207 @@ const CANONICAL_TIME: Timestamps = Timestamps {
     },
 };
 
+/// An empty file or directory in a view, where the container runtime binds
+/// something of the node's. The runtime cannot create it in the read-only
+/// volume. A view's name and store paths leave mountpoints out. The plugin
+/// adds them to views that exist, and never removes one, since a container
+/// may be bound there.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Mountpoint {
+    pub store_path: StorePath,
+    /// The path inside `store_path`, empty for the store path itself.
+    pub rest: String,
+    pub dir: bool,
+}
+
+impl Mountpoint {
+    /// Parses a path in `store_dir` like the container runtime does, with
+    /// `.`, `..` and repeated slashes resolved. A path that ends in a slash is
+    /// a directory. Returns `None` for a path that resolves outside the store
+    /// dir, or to the store dir itself.
+    pub fn parse(store_dir: &StoreDir, path: &str) -> anyhow::Result<Option<Self>> {
+        let mut parts = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                part => parts.push(part),
+            }
+        }
+        let dir: Vec<_> = (store_dir.to_str().split('/'))
+            .filter(|part| !part.is_empty())
+            .collect();
+        let Some([name, rest @ ..]) = parts.strip_prefix(dir.as_slice()) else {
+            return Ok(None);
+        };
+        let store_path = StorePath::from_base_path(name)
+            .with_context(|| format!("{path} is not in a store path"))?;
+        Ok(Some(Self {
+            store_path,
+            rest: rest.join("/"),
+            dir: path.ends_with('/'),
+        }))
+    }
+}
+
+/// Like `--mountpoints` takes it, without the store dir.
+impl std::fmt::Display for Mountpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.store_path)?;
+        if !self.rest.is_empty() {
+            write!(f, "/{}", self.rest)?;
+        }
+        if self.dir {
+            f.write_str("/")?;
+        }
+        Ok(())
+    }
+}
+
+/// Opens a directory in a view without following a symlink.
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// The type of the mountpoint that `stat` is of, or `None` for a store
+/// object. The plugin creates mountpoints writable by their owner, and no
+/// store object is.
+fn mountpoint_kind(stat: &Stat) -> Option<FileType> {
+    let kind = FileType::from_raw_mode(stat.st_mode);
+    let writable = stat.st_mode & 0o200 != 0;
+    (writable && matches!(kind, FileType::Directory | FileType::RegularFile)).then_some(kind)
+}
+
+/// Creates `mountpoint` in the view `view` unless it is there, and returns
+/// whether it did. It works in directory fds and never follows a symlink, so
+/// it writes only in the view, and only in directories it made. A store path
+/// that the view's closure has stays as it is, and the runtime binds the
+/// node's copy of it over the closure's, which has the same contents.
+fn add_mountpoint(view: &OwnedFd, mountpoint: &Mountpoint) -> anyhow::Result<bool> {
+    let name = mountpoint.store_path.to_string();
+    match statat(view, &name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if mountpoint_kind(&stat).is_none() => return Ok(false),
+        Ok(_) | Err(rustix::io::Errno::NOENT) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let parts: Vec<_> = std::iter::once(name.as_str())
+        .chain(mountpoint.rest.split('/').filter(|part| !part.is_empty()))
+        .collect();
+    let (last, parents) = parts.split_last().expect("a mountpoint has a store path");
+    let mut dir = view.try_clone()?;
+    for (i, part) in parents.iter().enumerate() {
+        match mkdirat(&dir, *part, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        let opened = openat(&dir, *part, DIR_FLAGS, Mode::empty());
+        dir = match opened {
+            Ok(fd) if mountpoint_kind(&fstat(&fd)?) == Some(FileType::Directory) => fd,
+            Ok(_) | Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
+                bail!(
+                    "{} is not a directory that the plugin made",
+                    parts[..=i].join("/")
+                );
+            }
+            Err(e) => return Err(e.into()),
+        };
+    }
+    let (made, kind) = if mountpoint.dir {
+        let made = mkdirat(&dir, *last, Mode::from_raw_mode(0o755));
+        (made, FileType::Directory)
+    } else {
+        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
+        let made = openat(&dir, *last, flags, Mode::from_raw_mode(0o644)).map(drop);
+        (made, FileType::RegularFile)
+    };
+    match made {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::EXIST) => {
+            let stat = statat(&dir, *last, AtFlags::SYMLINK_NOFOLLOW)?;
+            ensure!(
+                mountpoint_kind(&stat) == Some(kind),
+                "{} is already there as something else",
+                parts.join("/")
+            );
+            Ok(false)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The store paths whose store objects the view `dir` holds, without its
+/// mountpoints.
+fn view_store_paths(dir: &Path) -> anyhow::Result<Vec<StorePath>> {
+    list_names(dir, |name| {
+        let path = StorePath::from_base_path(name.to_str()?).ok()?;
+        let stat = statat(CWD, dir.join(name), AtFlags::SYMLINK_NOFOLLOW);
+        // A failed stat counts the store path, so garbage collection keeps it.
+        (!stat.is_ok_and(|stat| mountpoint_kind(&stat).is_some())).then_some(path)
+    })
+}
+
+/// Like [`Store::add_mountpoints`] with `mountpoints`. One it cannot add gets
+/// a warning.
+fn add_to_view(view: &Path, mountpoints: &[Mountpoint]) -> anyhow::Result<Vec<Mountpoint>> {
+    let fd = rustix::fs::open(view, DIR_FLAGS, Mode::empty())
+        .map_err(io::Error::from)
+        .with_context(|| format!("opening {}", view.display()))?;
+    let mut created = Vec::new();
+    for mountpoint in mountpoints {
+        match add_mountpoint(&fd, mountpoint) {
+            Ok(true) => created.push(mountpoint.clone()),
+            Ok(false) => {}
+            Err(e) => warn!(
+                "adding the mountpoint {mountpoint} to {}: {e:#}; leaving it out",
+                view.display()
+            ),
+        }
+    }
+    Ok(created)
+}
+
 impl Store {
+    /// Makes `mountpoints` those that publishes add, and adds them to every
+    /// view. It sets them first, so a publish whose view this misses adds them
+    /// itself.
+    pub fn set_mountpoints(&self, mountpoints: impl Into<Arc<[Mountpoint]>>) -> anyhow::Result<()> {
+        let mountpoints = mountpoints.into();
+        *self.mountpoints.lock().unwrap() = mountpoints.clone();
+        let mut created = BTreeSet::new();
+        let mut updated = 0;
+        for view in list_names(&self.views, |name| Some(self.views.join(name)))? {
+            match add_to_view(&view, &mountpoints) {
+                Ok(new) if new.is_empty() => {}
+                Ok(new) => {
+                    updated += 1;
+                    created.extend(new);
+                }
+                // An unpublish moved it to the trash meanwhile.
+                Err(e)
+                    if e.downcast_ref()
+                        .is_some_and(|e: &io::Error| e.kind() == io::ErrorKind::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if updated > 0 {
+            let created: Vec<_> = created.into_iter().collect();
+            info!(mountpoints = %Names(&created), updated, "added mountpoints to views");
+        }
+        Ok(())
+    }
+
+    /// Adds the mountpoints that the view `view` lacks, and returns those it
+    /// created. Call it once the view is in views/, since a
+    /// [`Store::set_mountpoints`] that misses it has set its mountpoints by
+    /// then.
+    pub fn add_mountpoints(&self, view: &Path) -> anyhow::Result<Vec<Mountpoint>> {
+        let mountpoints = self.mountpoints.lock().unwrap().clone();
+        add_to_view(view, &mountpoints)
+    }
+
     /// Returns the view of `paths`, the closure of `roots`, for `volume` to
     /// mount at `target`. `paths` must be in order, as [`Store::ensure`]
     /// returns them. Volumes with the same roots and closure share a view of
@@ -147,13 +348,13 @@ impl Store {
         self.trash_view(&key).map(Some)
     }
 
-    /// The NAR size of each store path in the view `key`. Views never change,
-    /// so this reads their narinfos once.
+    /// The NAR size of each store path in the view `key`. A view's store paths
+    /// never change, so this reads their narinfos once.
     pub(super) fn view_nar_sizes(&self, key: &str) -> anyhow::Result<NarSizes> {
         if let Some(sizes) = self.view_sizes.lock().unwrap().get(key) {
             return Ok(sizes.clone());
         }
-        let paths = list_store_paths(&self.views.join(key))?;
+        let paths = view_store_paths(&self.views.join(key))?;
         let sizes: NarSizes = (paths.iter())
             .map(|path| (path.clone(), self.nar_size(path)))
             .collect();
@@ -165,13 +366,14 @@ impl Store {
     /// whole views. Records a use of its paths.
     fn trash_view(&self, key: &str) -> anyhow::Result<Scratch> {
         let dir = self.views.join(key);
-        self.touch(&list_store_paths(&dir)?)?;
+        self.touch(&view_store_paths(&dir)?)?;
         Scratch::move_in(&self.tmp, &dir)
             .with_context(|| format!("moving {} to the trash", dir.display()))
     }
 
     /// Measures the view of `volume`, or returns `None` if `volume` isn't
-    /// published at `target`. Views never change, so this measures each once.
+    /// published at `target`. A view changes only by gaining mountpoints, so
+    /// this measures each view once, and mountpoints added later don't count.
     pub fn usage(&self, volume: &str, target: &Path) -> anyhow::Result<Option<Usage>> {
         let record = self.volumes.join(check_volume(volume)?);
         let Some(Volume { key, .. }) = Volume::read(&record)?.filter(|v| v.target == target) else {
@@ -223,7 +425,7 @@ impl Store {
     pub(super) fn view_paths(&self, keys: &HashSet<String>) -> anyhow::Result<HashSet<StorePath>> {
         let mut paths = HashSet::new();
         for key in keys {
-            match list_store_paths(&self.views.join(key)) {
+            match view_store_paths(&self.views.join(key)) {
                 Ok(linked) => paths.extend(linked),
                 Err(e)
                     if e.downcast_ref()
@@ -374,9 +576,8 @@ fn link_tree(
         return Ok(linkat(src_dir, name, dst_dir, name, AtFlags::empty())?);
     }
     mkdirat(&dst_dir, name, Mode::RWXU)?;
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut entries = Dir::new(openat(&src_dir, name, flags, Mode::empty())?)?;
-    let dst = openat(&dst_dir, name, flags, Mode::empty())?;
+    let mut entries = Dir::new(openat(&src_dir, name, DIR_FLAGS, Mode::empty())?)?;
+    let dst = openat(&dst_dir, name, DIR_FLAGS, Mode::empty())?;
     while let Some(entry) = entries.read() {
         let entry = entry?;
         let child = entry.file_name();
@@ -394,9 +595,145 @@ fn link_tree(
 mod tests {
     use std::os::unix::fs::MetadataExt;
 
+    use tracing_test::traced_test;
+
     use super::*;
     use crate::narinfo::tests::fixtures;
     use crate::store::test_utils::*;
+
+    const DRIVER: &str = "00000000000000000000000000000000-nvidia-x11";
+    const GLIBC: &str = "11111111111111111111111111111111-glibc";
+
+    fn mountpoint(path: &str) -> Mountpoint {
+        Mountpoint::parse(&StoreDir::default(), path)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn parses_mountpoints() {
+        let parse = |path: &str| -> Option<String> {
+            let parsed = Mountpoint::parse(&StoreDir::default(), path).unwrap();
+            parsed.map(|m| m.to_string())
+        };
+        for (path, parsed) in [
+            (format!("/nix/store/{GLIBC}"), Some(GLIBC.to_owned())),
+            (
+                format!("//nix//store/./{GLIBC}//lib/./x/"),
+                Some(format!("{GLIBC}/lib/x/")),
+            ),
+            (
+                format!("/nix/store/{DRIVER}/../{GLIBC}/lib"),
+                Some(format!("{GLIBC}/lib")),
+            ),
+            (format!("/nix/store/{GLIBC}/lib/../../../etc/passwd"), None),
+            (format!("/nix/store/{GLIBC}/.."), None),
+            ("/nix/store/".to_owned(), None),
+            ("/usr/lib/libcuda.so.1".to_owned(), None),
+        ] {
+            assert_eq!(parse(&path), parsed, "{path}");
+        }
+        for path in ["/nix/store/.roots/hello", "/nix/store/not-a-store-path/lib"] {
+            assert!(
+                Mountpoint::parse(&StoreDir::default(), path).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn adds_mountpoints() {
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        let view = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
+        let mountpoints = [
+            format!("/nix/store/{DRIVER}/"),
+            format!("/nix/store/{DRIVER}/lib/libcuda.so.1"),
+            // Like glibc's in NixOS's CDI spec, below a store path that the
+            // closure doesn't have.
+            format!("/nix/store/{GLIBC}/lib/"),
+            format!("/nix/store/{GLIBC}/lib64/"),
+            // The closure has hello, so the view's copy stays as it is.
+            format!("/nix/store/{hello}/lib/"),
+            format!("/nix/store/{hello}/bin/"),
+        ]
+        .map(|path| mountpoint(&path));
+        store.set_mountpoints(mountpoints).unwrap();
+        let libcuda = std::fs::metadata(view.join(DRIVER).join("lib/libcuda.so.1")).unwrap();
+        assert!(libcuda.is_file() && libcuda.len() == 0);
+        for dir in ["lib", "lib64"] {
+            assert!(view.join(GLIBC).join(dir).is_dir());
+        }
+        let hello_dir = view.join(hello.to_string());
+        assert!(!hello_dir.join("lib").exists());
+        let mode = std::fs::metadata(&hello_dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o555);
+        assert_eq!(count(&view), paths.len() + 3);
+        assert_eq!(store.add_mountpoints(&view).unwrap(), []);
+    }
+
+    /// The node store has the store path of the mountpoint, but the view
+    /// doesn't hold it.
+    #[tokio::test]
+    async fn leaves_mountpoints_out_of_the_closure() {
+        let tmp = scratch();
+        let Some((store, _, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let (closure, other) = (&paths[..1], &paths[1]);
+        let target = tmp.path().join("target");
+        let view = (store.guarded_view("v1", closure, closure, &target, UNBOUND)).unwrap();
+        let key = view.file_name().unwrap().to_str().unwrap().to_owned();
+        let other_lib = mountpoint(&format!("/nix/store/{other}/lib/"));
+        store.set_mountpoints([other_lib]).unwrap();
+        assert!(view.join(other.to_string()).join("lib").is_dir());
+        let held = store.view_paths(&HashSet::from_iter([key])).unwrap();
+        assert_eq!(held, HashSet::from_iter(closure.iter().cloned()));
+        let bytes = store.usage("v1", &target).unwrap().unwrap().bytes;
+        assert_eq!(bytes, store.nar_size(&closure[0]));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn adds_mountpoints_only_in_directories_it_made() {
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        let view = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
+        let file = mountpoint(&format!("/nix/store/{DRIVER}/lib/libcuda.so.1"));
+        let lib = mountpoint(&format!("/nix/store/{GLIBC}/lib/"));
+        store.set_mountpoints([file, lib]).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, view.join(GLIBC).join("link")).unwrap();
+        // A store object that is a symlink.
+        let symlinked = "22222222222222222222222222222222-link";
+        std::os::unix::fs::symlink(&outside, view.join(symlinked)).unwrap();
+        let refused = [
+            format!("/nix/store/{GLIBC}/link/x/"),
+            format!("/nix/store/{symlinked}/x/"),
+            format!("/nix/store/{DRIVER}/lib/libcuda.so.1/x"),
+            format!("/nix/store/{GLIBC}/lib"),
+        ]
+        .map(|path| mountpoint(&path));
+        store.set_mountpoints(refused).unwrap();
+        assert_eq!(store.add_mountpoints(&view).unwrap(), []);
+        assert_eq!(count(&outside), 0);
+        for warning in [
+            format!("{GLIBC}/link is not a directory that the plugin made"),
+            format!("{DRIVER}/lib/libcuda.so.1 is not a directory that the plugin made"),
+            format!("{GLIBC}/lib is already there as something else"),
+        ] {
+            assert!(logs_contain(&warning), "{warning}");
+        }
+    }
 
     #[tokio::test]
     async fn builds_views() {

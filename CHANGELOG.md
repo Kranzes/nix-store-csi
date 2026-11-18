@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `mountpoints.cdi` and `mountpoints.paths`, or `--host-root` and
+  `--mountpoints`, give each volume empty mountpoints where the container
+  runtime binds under `/nix/store`, from the node's CDI specs or a list.
+  Without them, such a container fails with `read-only file system`, like a
+  GPU pod on NixOS. The plugin reads the specs every 10 seconds and adds new
+  mountpoints to mounted volumes, so restarted containers find them after a
+  rebuild.
+
 ## 0.1.14 - 2026-11-18
 
 ### Fixed

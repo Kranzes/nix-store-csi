@@ -88,6 +88,21 @@ prefetchConfigMap: ""
 #     prefetch:
 #       storePaths.x86_64-linux.trainer: /nix/store/<hash>-trainer
 nodePools: {}
+# A container runtime cannot bind anything under /nix/store in a pod that
+# mounts the driver's volume, since it cannot create the mountpoint in the
+# read-only volume. These give each volume empty mountpoints there.
+# docs/PODS.md has what GPU pods need.
+mountpoints:
+  # Paths that runtimes or hooks bind without CDI, each in a store path. A path
+  # that ends in a slash gets a directory, and others an empty file:
+  #   - /nix/store/<hash>-glibc-2.40-66/lib/
+  paths: []
+  # Adds one for each path under /nix/store that the CDI specs in the node's
+  # /etc/cdi and /var/run/cdi bind, like nvidia-container-toolkit's on NixOS,
+  # also to mounted volumes when the specs change. The plugin reads the specs
+  # and the files they bind through the node's root directory, which this
+  # mounts read-only.
+  cdi: false
 # More nix-store-csi flags, like --keep-recent=7d.
 extraArgs: []
 

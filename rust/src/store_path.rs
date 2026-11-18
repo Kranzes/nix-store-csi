@@ -12,10 +12,10 @@ use harmonia_store_path::{StoreDir, StorePath};
 /// `storePaths.<system>.<name>` adds a list for `<system>`.
 pub const STORE_PATHS: &str = "storePaths";
 
-/// Store paths by base name, separated by spaces, for logs.
-pub struct Names<'a>(pub &'a [StorePath]);
+/// Store paths by base name, or other items, separated by spaces, for logs.
+pub struct Names<'a, T>(pub &'a [T]);
 
-impl std::fmt::Display for Names<'_> {
+impl<T: std::fmt::Display> std::fmt::Display for Names<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         for (i, path) in self.0.iter().enumerate() {
             if i > 0 {

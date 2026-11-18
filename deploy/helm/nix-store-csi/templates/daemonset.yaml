@@ -147,6 +147,12 @@ spec:
             {{- if $configMaps }}
             - --prefetch-dir=/etc/nix-store-csi/prefetch
             {{- end }}
+            {{- with $.Values.mountpoints.paths }}
+            - --mountpoints={{ join " " . }}
+            {{- end }}
+            {{- if $.Values.mountpoints.cdi }}
+            - --host-root=/host
+            {{- end }}
             {{- with $.Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -205,6 +211,16 @@ spec:
               mountPath: /etc/nix-store-csi/prefetch
               readOnly: true
             {{- end }}
+            {{- if $.Values.mountpoints.cdi }}
+            # The node's root, since systemd deletes /run/cdi and creates it
+            # again when NixOS's generator restarts, and a mount of the dir
+            # would keep the deleted one. HostToContainer makes the plugin's
+            # copy follow mounts and unmounts on the node.
+            - name: host
+              mountPath: /host
+              readOnly: true
+              mountPropagation: HostToContainer
+            {{- end }}
         - name: registrar
           image: {{ $.Values.registrar.image.repository }}:{{ $.Values.registrar.image.tag }}
           args:
@@ -249,6 +265,12 @@ spec:
           hostPath:
             path: {{ $.Values.stateDir }}
             type: DirectoryOrCreate
+        {{- if $.Values.mountpoints.cdi }}
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
+        {{- end }}
         {{- with include "nix-store-csi.credentials" $ }}
         {{- . | nindent 8 }}
         {{- end }}

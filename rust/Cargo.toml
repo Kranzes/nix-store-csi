@@ -58,6 +58,7 @@ http-body-util = "0.1.5"
 landlock = "0.4.7"
 hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 lru = "0.19.0"
+serde-saphyr = { version = "2.2.0", default-features = false, features = ["deserialize"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

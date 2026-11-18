@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use harmonia_store_path::StorePath;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument, warn};
+use tracing::{field, info, instrument, warn};
 
 use crate::metrics::Call;
 use crate::mounts;
@@ -137,14 +137,19 @@ impl Plugin {
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
         let view_roots = roots.clone();
-        self.for_volume(&request.volume_id, move |store, gc| {
-            let view = store.view(gc, &volume, &view_roots, &names, &target, mounts::is_bound)?;
-            mounts::publish(&view, &target)
-        })
-        .await?;
+        let created = self
+            .for_volume(&request.volume_id, move |store, gc| {
+                let view =
+                    store.view(gc, &volume, &view_roots, &names, &target, mounts::is_bound)?;
+                let created = store.add_mountpoints(&view)?;
+                mounts::publish(&view, &target)?;
+                Ok(created)
+            })
+            .await?;
         self.waiting.lock().unwrap().remove(&request.volume_id);
         let elapsed_ms = started.elapsed().as_millis();
-        info!(store_paths = %Names(&roots), elapsed_ms, "published");
+        let mountpoints = (!created.is_empty()).then(|| field::display(Names(&created)));
+        info!(store_paths = %Names(&roots), mountpoints, elapsed_ms, "published");
         Ok(NodePublishVolumeResponse {})
     }
 

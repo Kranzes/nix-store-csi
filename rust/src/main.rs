@@ -18,6 +18,7 @@ use crate::closure::Caches;
 use crate::csi::Plugin;
 use crate::csi::proto::identity_server::IdentityServer;
 use crate::csi::proto::node_server::NodeServer;
+use crate::mountpoints::Mountpoints;
 use crate::narinfo::{NarInfo, PublicKey};
 use crate::store::{Config, Excess, Size, Store};
 
@@ -27,6 +28,7 @@ mod csi;
 mod http;
 mod locality;
 mod metrics;
+mod mountpoints;
 mod mounts;
 mod narinfo;
 mod prefetch;
@@ -128,6 +130,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             max_closure_size,
             max_store_size,
             prefetch_dir,
+            mountpoints,
+            host_root,
         } => {
             let config = Config {
                 max_closure_size,
@@ -137,7 +141,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 ..config
             };
             let store = Arc::new(Store::new(config)?);
+            let mountpoints =
+                Mountpoints::new(&mountpoints.unwrap_or_default(), host_root.as_deref())?;
             store.prune_views(mounts::is_bound).await?;
+            tokio::spawn(mountpoints.run(store.clone()));
             if let Some(address) = metrics_address {
                 let listener = http::listen(address)
                     .await

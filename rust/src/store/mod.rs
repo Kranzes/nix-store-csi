@@ -38,7 +38,7 @@ use crate::narinfo::PublicKey;
 pub use self::fetch::{Ensuring, StoreTooBig, TooBig};
 pub use self::gc::{Excess, Size};
 pub use self::narinfos::Narinfos;
-pub use self::views::{Usage, check_volume, root_links};
+pub use self::views::{Mountpoint, Usage, check_volume, root_links};
 
 /// The kernel's id for the current boot, which a reboot changes.
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
@@ -86,6 +86,8 @@ pub struct Store {
     /// What [`Store::view_nar_sizes`] read, by view key, until no mounted
     /// volume uses the view.
     view_sizes: Mutex<HashMap<String, NarSizes>>,
+    /// What [`Store::add_mountpoints`] adds.
+    mountpoints: Mutex<Arc<[Mountpoint]>>,
     tmp: PathBuf,
     /// Unpacks NARs into tmp/.
     sandbox: Sandbox,
@@ -223,6 +225,7 @@ impl Store {
             building: Mutex::default(),
             measured: Mutex::default(),
             view_sizes: Mutex::default(),
+            mountpoints: Mutex::new(Arc::new([])),
             sandbox: Sandbox::new(&tmp, config.jobs)?,
             tmp,
             jobs: Arc::new(Semaphore::new(config.jobs)),

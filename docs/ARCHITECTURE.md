@@ -73,6 +73,23 @@ closure's NAR size that the node store holds. Resolving can take longer than
 the scheduler waits, so a closure that isn't resolved yet scores 0 while it
 resolves in the background.
 
+## Mountpoints
+
+A container runtime creates a bind's mountpoint before it binds, and it cannot
+do that in a read-only view. So views hold empty files and directories where
+the runtime binds the node's store paths, like the driver and glibc that
+NVIDIA's CDI spec binds on NixOS. They come from a list and from the node's
+CDI specs, which the plugin reads every 10 seconds. A watch would miss specs
+that change through symlinks, like NixOS's `/etc`, and spec dirs that systemd
+creates again.
+
+Mountpoints aren't part of a view. They don't change its hash and don't count
+among its store paths. The plugin adds them to a view when it publishes it,
+and to every view when the specs bring new ones, so a container that restarts
+after a NixOS rebuild finds the new driver's. It never removes one, since a
+container may be bound there. It never writes inside a store object of the
+closure, since the runtime binds the node's copy of that store path over it.
+
 ## State dir structure
 
 ```
@@ -86,8 +103,8 @@ resolves in the background.
   narinfo/<name>.narinfo      a narinfo per store path, dated by last use, and
                               named <name>.unsynced until the path is synced
   views/<generation>-<hash>/  a closure's store objects, hard-linked from
-                              store/, and .roots/. The hash covers the closure
-                              and the roots.
+                              store/, .roots/ and mountpoints. The hash covers
+                              the closure and the roots.
   volumes/<volume>            which view the volume mounts, and where
   tmp/                        store objects being unpacked, views being built,
                               and trash being deleted

@@ -2,6 +2,10 @@
 # volumes.
 # The VM has no internet, so nginx serves the fixture caches, versitygw serves
 # them as S3 buckets, and every image is preloaded.
+# Kubelet asks for CDI devices only for a device plugin, so crictl runs
+# containers on a published volume in place of a GPU pod's. Their CDI spec
+# binds stand-ins for the node's driver and glibc like nvidia-container-toolkit's
+# spec on NixOS. No test has a GPU.
 {
   lib,
   stdenv,
@@ -9,6 +13,7 @@
   dockerTools,
   writeClosure,
   writeText,
+  writeTextDir,
   runCommand,
   k3s,
   skopeo,
@@ -184,6 +189,64 @@ let
     }
   );
 
+  # Stand-ins for the store paths of the node that NixOS's CDI spec binds:
+  # the driver, and glibc, whose lib64 is a symlink to lib.
+  nodeDriver = runCommand "nvidia-x11" { } ''
+    mkdir -p $out/lib
+    echo driver > $out/lib/libdriver.so
+  '';
+  nodeGlibc =
+    name:
+    runCommand name { } ''
+      mkdir -p $out/lib
+      echo ${name} > $out/lib/libc.so
+      ln -s lib $out/lib64
+    '';
+  glibc = nodeGlibc "glibc";
+  # The glibc of a rebuild while pods run.
+  newGlibc = nodeGlibc "new-glibc";
+  # Bound without CDI, so the plugin knows it from mountpoints.paths.
+  nodeExtra = writeTextDir "etc/extra" "extra\n";
+  # Bound without a mountpoint.
+  nodeUnlisted = writeTextDir "etc/unlisted" "unlisted\n";
+  bind = hostPath: containerPath: {
+    inherit hostPath containerPath;
+    options = [
+      "ro"
+      "nosuid"
+      "nodev"
+      "bind"
+    ];
+  };
+  cdiSpec =
+    glibc:
+    writeText "cdi.json" (
+      builtins.toJSON {
+        cdiVersion = "0.6.0";
+        kind = "nix-store-csi.test/device";
+        # Like the NixOS module's mounts.
+        containerEdits.mounts = [
+          (bind "${nodeDriver}" "${nodeDriver}")
+          (bind "${glibc}/lib" "${glibc}/lib")
+          (bind "${glibc}/lib64" "${glibc}/lib64")
+        ];
+        devices = [
+          {
+            name = "test";
+            containerEdits.mounts = [
+              # Like a library that nvidia-ctk binds, through an absolute
+              # symlink on the node.
+              (bind "/run/nix-store-csi-test/lib/libdriver.so" "${nodeDriver}/lib/libdriver.so")
+              # The node store has hello for the hello pod.
+              (bind "${hello}/share" "${hello}/share")
+              # The pods' closure has busybox, so their views keep its own.
+              (bind "${busybox}/bin" "${busybox}/bin")
+            ];
+          }
+        ];
+      }
+    );
+
   prefetchWarm = writeText "prefetch.json" (
     builtins.toJSON {
       data = {
@@ -200,6 +263,12 @@ testers.runNixOSTest {
     virtualisation.diskSize = 4096;
     virtualisation.cores = 4;
     virtualisation.memorySize = 2048;
+    systemd.tmpfiles.rules = [
+      # Where NixOS writes its spec.
+      "d /run/cdi 0755 root root -"
+      "C /run/cdi/nix-store-csi-test.json - - - - ${cdiSpec glibc}"
+      "L /run/nix-store-csi-test - - - - ${nodeDriver}"
+    ];
     services.k3s = {
       enable = true;
       # Kubelet updates the mounted ConfigMaps when it syncs a pod, and the
@@ -245,6 +314,10 @@ testers.runNixOSTest {
           # Turns on --serve-paths too.
           locality.enabled = true;
           admissionPolicy.allowedNamespaces = [ "default" ];
+          mountpoints = {
+            cdi = true;
+            paths = [ "${nodeExtra}/etc/" ];
+          };
           # The other store path doesn't exist, so the prefetch succeeds only
           # if the plugin picks this system's.
           prefetch = {
@@ -419,6 +492,8 @@ testers.runNixOSTest {
         t.assertEqual(sorted(listed), sorted(machine.succeed("cat ${podsClosure}").split()))
 
     closure = sorted(machine.succeed("xargs -n1 basename < ${writeClosure [ busybox ]}").split())
+    mountpoints = ["${baseNameOf nodeDriver}", "${baseNameOf glibc}", "${baseNameOf nodeExtra}", "${baseNameOf hello}"]
+    in_volume = sorted(closure + mountpoints)
     # sleep mounts busybox's closure, which warm references, so warm's closure
     # adds only warm.
     held = sum(map(nar_size, closure))
@@ -437,8 +512,8 @@ testers.runNixOSTest {
 
     ls = "kubectl exec sleep -- ${busybox}/bin/ls /nix/store"
 
-    with subtest("the pod sees only its closure, on one read-only mount"):
-        t.assertEqual(sorted(machine.succeed(ls).split()), closure)
+    with subtest("the pod sees only its closure and the mountpoints, on one read-only mount"):
+        t.assertEqual(sorted(machine.succeed(ls).split()), in_volume)
         t.assertEqual(machine.succeed("kubectl exec sleep -- ${busybox}/bin/stat -c %a /nix/store").strip(), "755")
         t.assertEqual(machine.succeed(f"{ls}/.roots").strip(), "${busybox.name}")
         [mount] = machine.succeed(volumes).splitlines()
@@ -447,6 +522,14 @@ testers.runNixOSTest {
             t.assertIn(option, options)
         [mount] = machine.succeed("kubectl exec sleep -- ${busybox}/bin/grep ' /nix/store ' /proc/mounts").splitlines()
         t.assertIn("ro", mount.split()[3].split(","))
+
+    with subtest("the plugin adds mountpoints below store paths, also through absolute symlinks on the node"):
+        glibc = f"{target}/${baseNameOf glibc}"
+        machine.succeed(f"test -d {glibc}/lib && test -d {glibc}/lib64 && test ! -L {glibc}/lib64")
+        machine.succeed(f"test -f {target}/${baseNameOf nodeDriver}/lib/libdriver.so")
+        machine.succeed(f"test -d {target}/${baseNameOf hello}/share")
+        machine.succeed(f"{plugin} | grep -E 'published store_paths=\\S+ mountpoints=.*${baseNameOf glibc}/lib64/' > /dev/null")
+        machine.fail(f"{plugin} | grep 'skipping the mount'")
 
     with subtest("the runner image gives nobody a home it can write to"):
         machine.succeed("kubectl exec sleep -- ${busybox}/bin/sh -c 'test \"$HOME\" = /home/nobody && ${busybox}/bin/touch \"$HOME\"/x'")
@@ -461,12 +544,64 @@ testers.runNixOSTest {
         t.assertEqual([stats[k] for k in ["usedBytes", "capacityBytes", "availableBytes"]], [size, size, 0])
         t.assertEqual([stats[k] for k in ["inodesUsed", "inodes", "inodesFree"]], [inodes, inodes, 0])
 
+    with subtest("the container runtime binds the node's store paths in the volume, also after a rebuild changes them"):
+        # The containers run in sleep's sandbox, since kubelet kills the
+        # sandboxes of pods it doesn't know. Kubelet may also delete them and
+        # their logs once they exit, so they write what they read to the node.
+        pod = machine.succeed("k3s crictl pods --name sleep --state ready -q").strip()
+        config = json.loads(machine.succeed(f"k3s crictl inspectp {pod} | ${jq}/bin/jq .info.config | tee /tmp/pod.json"))
+        # Kubelet gives a pod's containers its namespaces.
+        namespaces = config["linux"]["security_context"]["namespace_options"]
+        machine.succeed("mkdir -m 1777 /tmp/out")
+
+        def start(name, command, mounts=[], devices=[]):
+            """Starts a container with sleep's volume at /nix/store, as kubelet restarts a pod's."""
+            container = {
+                "metadata": {"name": name},
+                "image": {"image": "${runner-image.imageName}:${runner-image.imageTag}"},
+                "command": command,
+                "mounts": [
+                    {"container_path": "/nix/store", "host_path": target, "readonly": True},
+                    {"container_path": "/out", "host_path": "/tmp/out"},
+                ] + mounts,
+                "CDI_devices": [{"name": device} for device in devices],
+                "linux": {"security_context": {"namespace_options": namespaces}},
+            }
+            machine.succeed(f"echo '{json.dumps(container)}' > /tmp/{name}.json")
+            container = machine.succeed(f"k3s crictl create {pod} /tmp/{name}.json /tmp/pod.json").strip()
+            return machine.execute(f"k3s crictl start {container} 2>&1")
+
+        def ro_bind(path):
+            return {"container_path": path, "host_path": path, "readonly": True}
+
+        def read(name, glibc):
+            """What a container with the device reads from the binds."""
+            files = ["${nodeDriver}/lib/libdriver.so", f"{glibc}/lib/libc.so", f"{glibc}/lib64/libc.so", "${nodeExtra}/etc/extra"]
+            script = f"test -d ${hello}/share/man && ${busybox}/bin/cat {' '.join(files)} > /out/{name}.tmp && ${busybox}/bin/mv /out/{name}.tmp /out/{name}"
+            status, out = start(name, ["${busybox}/bin/sh", "-c", script], [ro_bind("${nodeExtra}/etc")], ["nix-store-csi.test/device=test"])
+            t.assertEqual(status, 0, out)
+            machine.wait_for_file(f"/tmp/out/{name}", timeout=60)
+            return machine.succeed(f"cat /tmp/out/{name}").split()
+
+        status, out = start("unlisted", ["${busybox}/bin/true"], [ro_bind("${nodeUnlisted}/etc")])
+        t.assertNotEqual(status, 0)
+        t.assertIn("read-only file system", out)
+        t.assertEqual(read("before", "${glibc}"), ["driver", "glibc", "glibc", "extra"])
+
+        # The generator writes a new spec, and a container restarts.
+        machine.succeed("install -m 644 ${cdiSpec newGlibc} /run/cdi/.new && mv /run/cdi/.new /run/cdi/nix-store-csi-test.json")
+        machine.wait_until_succeeds(f"test -d {target}/${baseNameOf newGlibc}/lib64", timeout=60)
+        t.assertEqual(read("after", "${newGlibc}"), ["driver", "new-glibc", "new-glibc", "extra"])
+        machine.succeed(f"{plugin} | grep 'added mountpoints to views mountpoints=.*${baseNameOf newGlibc}/lib64/' > /dev/null")
+        mountpoints.append("${baseNameOf newGlibc}")
+        in_volume = sorted(closure + mountpoints)
+
     with subtest("a restarted kubelet republishes over another mount at the target"):
         machine.succeed(f"umount {target} && mkdir /tmp/other && mount --bind /tmp/other {target}")
         machine.succeed("systemctl restart k3s")
         machine.wait_until_succeeds(f"{volumes} | grep -q ' ro,'", timeout=300)
         machine.succeed(f"[ $({volumes} | wc -l) = 1 ]")
-        t.assertEqual(sorted(machine.succeed(f"ls {target}").split()), closure)
+        t.assertEqual(sorted(machine.succeed(f"ls {target}").split()), in_volume)
 
     with subtest("the plugin refuses a volume that would take the node store over --max-store-size"):
         # The limit is one byte short of warm's closure, and stays set.

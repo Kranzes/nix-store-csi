@@ -123,6 +123,65 @@ volumeAttributes:
   storePaths: ${NIX_STORE_PATH_TOOLS}
 ```
 
+## GPU pods
+
+How a pod finds the GPU driver depends on the node.
+
+### NixOS nodes
+
+With `hardware.nvidia-container-toolkit.enable`, NixOS writes a CDI spec to
+`/var/run/cdi`. For a container that gets a GPU, the container runtime binds
+the driver's store path, glibc's `lib` and `lib64` at their own store paths,
+and `/run/opengl-driver`. Programs from nixpkgs find `libcuda.so` in
+`/run/opengl-driver/lib`, whose links point into the driver's store path.
+
+The runtime cannot create those binds' mountpoints in the read-only volume, so
+the container fails to start with `read-only file system`. Turn on
+`mountpoints.cdi`:
+
+```yaml
+# values.yaml
+mountpoints:
+  cdi: true
+```
+
+Each volume then has an empty directory or file at each path under
+`/nix/store` that a spec in the node's `/etc/cdi` or `/var/run/cdi` binds, and
+every pod on the node sees them. The plugin reads the specs every 10 seconds,
+and adds new mountpoints to the volumes that are already mounted. So after a
+NixOS rebuild changes the driver or glibc, a container that restarts in a
+running pod finds the new ones. The plugin never removes a mountpoint.
+
+- A bind gets a mountpoint of the type of its host path, once that path exists.
+  A mountpoint can't change later, so the plugin doesn't guess.
+- A mount that isn't a bind, like a tmpfs, gets a directory.
+- A path in a store path that the pod's closure has gets none. The plugin never
+  changes a store object, and the runtime binds the node's copy of the store
+  path over the closure's.
+
+For a runtime or hook that binds under `/nix/store` without CDI, list the paths
+in `mountpoints.paths`.
+
+### Other nodes
+
+The NVIDIA Container Toolkit binds the driver's libraries at their paths on the
+node, in a dir like `/usr/lib/x86_64-linux-gnu` or `/usr/lib64`. Programs from
+nixpkgs don't search there, and nixpkgs' glibc doesn't read the
+`/etc/ld.so.cache` that the toolkit updates. Set `LD_LIBRARY_PATH` to the dir,
+or add it to the RUNPATH of the library that loads `libcuda.so`, like
+`libcudart.so`, with `patchelf --add-rpath`. The loader searches
+`LD_LIBRARY_PATH` before RUNPATH, so it suits only an image with no libraries
+of its own in that dir, like the runner image.
+
+### What is tested
+
+The VM test covers NixOS nodes with stand-ins for the driver and glibc.
+containerd and runc bind them into containers on a published volume, from a
+CDI spec like NixOS's and from `mountpoints.paths`, and crictl starts the
+containers. After the spec changes, a new container in the same pod gets the
+new binds. Nothing tests a GPU, NixOS's generated spec, a device plugin, or
+the steps for other nodes.
+
 ## Your own image
 
 The example runs in the runner image, which has tini as its entrypoint, an

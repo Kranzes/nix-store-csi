@@ -18,6 +18,9 @@
   so a closure that every node needs goes in one list. The chart refuses a key
   that both `prefetch` and the pool's `prefetch` set, and a `storePaths` in
   one that the other's key for a system would hide.
+- The `fetched the closure` log line has a `caches` field, a JSON object with
+  the NAR bytes that each cache served for the closure, as
+  `nar_fetched_bytes_total` counts them.
 
 ### Changed
 

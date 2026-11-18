@@ -563,9 +563,11 @@ kubelet's retry counts again. `fetched` is `true` for a publish that waited
 for a fetch or retried after `Unavailable`, and `false` for one whose closure
 the node store already had. `nar_fetched_bytes_total`,
 `gc_freed_bytes_total`, `store_size_bytes` and `uncollectable_bytes` count
-uncompressed NAR sizes. `uncollectable_bytes` is what `maxStoreSize` limits,
-and `max_store_size_bytes` is the limit, missing when there is none. A
-percentage counts against the filesystem's size at the time.
+uncompressed NAR sizes. The plugin's `fetched the closure` log line has the
+same bytes for one closure in its `caches` field, a JSON object by cache that
+leaves out caches that served nothing. `uncollectable_bytes` is what
+`maxStoreSize` limits, and `max_store_size_bytes` is the limit, missing when
+there is none. A percentage counts against the filesystem's size at the time.
 `closures_in_flight` counts closures still being fetched, including those
 whose publish already returned `Unavailable`. `free_bytes` and `free_inodes`
 are free on the state dir's filesystem, and `ensure_free_bytes` and

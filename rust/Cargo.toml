@@ -65,6 +65,7 @@ pedantic = { level = "warn", priority = -1 }
 [dev-dependencies]
 harmonia-file-nar = { git = "https://github.com/nix-community/harmonia", features = ["test"] }
 tokio = { version = "1.54.1", features = ["test-util"] }
+tracing-test = "0.2.6"
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }

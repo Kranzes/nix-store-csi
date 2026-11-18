@@ -37,9 +37,17 @@ const NAR_RESTARTS: ConstantBuilder = ConstantBuilder::new().with_max_times(2);
 /// A fetch under way, which every ensure that needs its path shares.
 #[derive(Clone)]
 struct Fetch {
-    done: Shared<BoxFuture<'static, Result<(), Arc<String>>>>,
+    /// Ends with `None` if another fetch had already put the path in store/.
+    done: Shared<BoxFuture<'static, Result<Option<Served>, Arc<String>>>>,
     /// The NAR bytes it has read.
     bytes: Arc<AtomicU64>,
+}
+
+/// The cache that served a NAR, and the NAR's size.
+#[derive(Clone, Copy)]
+struct Served {
+    cache: usize,
+    nar_size: u64,
 }
 
 /// A fetch in [`Store::fetching`].
@@ -156,7 +164,7 @@ impl Store {
             _held: (held, prefetched),
         });
         // Returns at the first failure, and the other fetches carry on.
-        futures::future::try_join_all(
+        let served = futures::future::try_join_all(
             fetches
                 .into_iter()
                 .map(|fetch| async move { fetch.done.await.map_err(|e| anyhow::anyhow!("{e}")) }),
@@ -169,7 +177,12 @@ impl Store {
         }
         if logs {
             let elapsed_ms = start.elapsed().as_millis();
-            info!(%store_paths, fetched = missing.len(), nar_size = fetching, elapsed_ms, "fetched the closure");
+            let mut caches = BTreeMap::<&str, u64>::new();
+            for Served { cache, nar_size } in served.into_iter().flatten() {
+                *caches.entry(self.caches.name(cache).as_str()).or_default() += nar_size;
+            }
+            let caches = serde_json::json!(caches);
+            info!(%store_paths, fetched = missing.len(), nar_size = fetching, %caches, elapsed_ms, "fetched the closure");
         }
         Ok(paths)
     }
@@ -302,12 +315,12 @@ impl Store {
         self: &Arc<Self>,
         mut entry: Arc<Entry>,
         bytes: &Arc<AtomicU64>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<Served>> {
         let path = entry.info.path().clone();
         // Another fetch may have finished while this one waited.
         if self.present(&path) {
             bytes.store(entry.info.nar_size(), Ordering::Relaxed);
-            return Ok(());
+            return Ok(None);
         }
         self.flush().await?;
         let mut tried = Vec::new();
@@ -338,7 +351,8 @@ impl Store {
                             warn!("{e:#}");
                         }
                     });
-                    return Ok(());
+                    let nar_size = entry.info.nar_size();
+                    return Ok(Some(Served { cache, nar_size }));
                 }
                 Err(e) => e.context(format!(
                     "fetching {}",
@@ -510,7 +524,7 @@ impl Ensuring {
             let bytes = u128::from(fetched.saturating_sub(f.start_bytes));
             u64::try_from(bytes * 1000 / ms).unwrap_or(u64::MAX)
         });
-        let done = (f.fetches.iter()).filter(|fetch| matches!(fetch.done.peek(), Some(Ok(()))));
+        let done = (f.fetches.iter()).filter(|fetch| matches!(fetch.done.peek(), Some(Ok(_))));
         Progress::Fetching {
             bytes: f.present_bytes + fetched,
             total_bytes: f.total_bytes,
@@ -750,6 +764,7 @@ mod tests {
 
     use harmonia_file_nar::archive::write_nar;
     use harmonia_file_nar::{NarByteStream, NarEvent};
+    use tracing_test::traced_test;
 
     use super::*;
     use crate::metrics::tests::sample;
@@ -1238,8 +1253,10 @@ mod tests {
         assert_eq!(count(store.dir()), paths.len());
     }
 
-    /// A NAR that doesn't match its `NarHash` fails over to the next cache.
+    /// A NAR that doesn't match its `NarHash` fails over to the next cache,
+    /// and the closure's log line counts the NAR under that cache.
     #[tokio::test]
+    #[traced_test]
     async fn falls_back_after_a_corrupt_nar() {
         let Some(dir) = fixtures() else {
             return;
@@ -1277,6 +1294,12 @@ mod tests {
         );
         assert_eq!(sample(&registry, &failed), Some(1.0));
         assert_eq!(count(state.join("tmp")), 0);
+        let total: u64 = paths.iter().map(|path| store.nar_size(path)).sum();
+        let caches = serde_json::json!({
+            store.caches.name(0).as_str(): total - store.nar_size(&hello),
+            store.caches.name(1).as_str(): store.nar_size(&hello),
+        });
+        assert!(logs_contain(&format!("caches={caches}")));
     }
 
     /// An ensure that joins another ensure's fetch, started from a narinfo

@@ -69,8 +69,7 @@ enum Auth {
 }
 
 impl Http {
-    /// Whether the cache sends files as stored, as an object store does, and
-    /// never compresses them on the fly.
+    /// An object store sends files as stored.
     fn sends_as_stored(&self) -> bool {
         matches!(self.auth, Some(Auth::S3 { .. } | Auth::Gcs { .. }))
     }
@@ -612,9 +611,8 @@ impl Transport {
     }
 
     /// A reader for the NAR at `path`, which the narinfo says has
-    /// `compression` and `file_size`. Over HTTP, it [`resuming`]s, and a
-    /// compressed NAR over [`PART`], or without a `file_size`, may come
-    /// [`ranged`].
+    /// `compression` and `file_size`. Over HTTP, it [`resuming`]s, and a NAR
+    /// over [`PART`] or without a `file_size` may come [`ranged`].
     pub async fn stream(
         &self,
         path: &str,
@@ -887,7 +885,7 @@ fn resuming(
         validator,
         decode,
         span,
-        body: decoded(resp, encoding),
+        body: decoded(body(resp), encoding),
         read: 0,
         read_since_resume: 0,
     };
@@ -926,13 +924,13 @@ fn resuming(
 }
 
 fn decoded(
-    resp: reqwest::Response,
+    body: BoxStream<'static, io::Result<Bytes>>,
     encoding: Compression,
 ) -> BoxStream<'static, io::Result<Bytes>> {
     match encoding {
-        Compression::None => body(resp),
+        Compression::None => body,
         encoding => {
-            let decoder = encoding.decoder(StreamReader::new(body(resp)));
+            let decoder = encoding.decoder(StreamReader::new(body));
             ReaderStream::with_capacity(decoder, NAR_CHUNK).boxed()
         }
     }
@@ -984,9 +982,7 @@ impl Plan {
     }
 }
 
-/// With `decode`, the NAR is uncompressed, and a file stored with a
-/// `Content-Encoding` must come in one stream to decode.
-fn plan(resp: &reqwest::Response, decode: bool) -> Plan {
+fn plan(resp: &reqwest::Response) -> Plan {
     if resp.status() == StatusCode::OK {
         return Plan::Whole;
     }
@@ -995,9 +991,6 @@ fn plan(resp: &reqwest::Response, decode: bool) -> Plan {
     };
     if len <= PART {
         return Plan::Whole;
-    }
-    if decode && nar_encoding(resp) != Compression::None {
-        return Plan::Again;
     }
     let Some(validator) = validator(resp, Compression::None) else {
         return Plan::Again;
@@ -1009,8 +1002,8 @@ fn plan(resp: &reqwest::Response, decode: bool) -> Plan {
     }
 }
 
-/// Reads the file at `url` by its [`plan`], decoding its `Content-Encoding`
-/// if `decode`.
+/// Reads the file at `url` by its [`plan`], decoding the `Content-Encoding`
+/// it is stored with if `decode`.
 async fn ranged(
     http: &Http,
     url: Url,
@@ -1022,7 +1015,13 @@ async fn ranged(
     let resp = http
         .fetch(&url, IDENTITY, Some((Span::FIRST, None)))
         .await?;
-    let plan = plan(&resp, decode);
+    let plan = plan(&resp);
+    // Ranges count the bytes as stored, which may still need decoding.
+    let stored = if decode {
+        nar_encoding(&resp)
+    } else {
+        Compression::None
+    };
     tracing::debug!(
         %url,
         plan = plan.name(),
@@ -1037,11 +1036,12 @@ async fn ranged(
         Plan::Whole => return Ok(resuming(http.clone(), url, resp, decode, None)),
         Plan::Again => {
             drop((permit, resp));
-            let encodings = if decode { ENCODINGS } else { IDENTITY };
-            let resp = http.fetch(&url, encodings, None).await?;
+            let resp = http.fetch(&url, IDENTITY, None).await?;
             return Ok(resuming(http.clone(), url, resp, decode, None));
         }
-        Plan::Rest(validator) => return Ok(first_and_rest(http, url, resp, validator)),
+        Plan::Rest(validator) => {
+            return Ok(decoded(first_and_rest(http, url, resp, validator), stored));
+        }
         Plan::Ranges(len, validator) => (len, validator),
     };
     let mut ranges = Ranges {
@@ -1056,7 +1056,8 @@ async fn ranged(
         permit_wait,
     };
     ranges.push(permit, Some(resp));
-    Ok(futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed())
+    let chunks = futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed();
+    Ok(decoded(chunks, stored))
 }
 
 /// The body of `resp`, which holds [`Span::FIRST`], and then
@@ -2050,19 +2051,20 @@ pub(crate) mod tests {
         let first = format!("bytes 0-{}/{len}", PART - 1);
         let etag = Validator(ETAG, HeaderValue::from_static(r#""x""#));
         let ranged = |version, range: &str| {
-            plan(
-                &response(version, 206, &[(CONTENT_RANGE, range), (ETAG, r#""x""#)]),
-                false,
-            )
+            plan(&response(
+                version,
+                206,
+                &[(CONTENT_RANGE, range), (ETAG, r#""x""#)],
+            ))
         };
         assert_eq!(ranged(Version::HTTP_2, &first), Plan::Rest(etag.clone()));
         assert_eq!(ranged(Version::HTTP_11, &first), Plan::Ranges(len, etag));
         // A file that fits in the first range needs no other request.
         assert_eq!(ranged(Version::HTTP_11, "bytes 0-99/100"), Plan::Whole);
         let whole = response(Version::HTTP_2, 200, &[(ETAG, r#""x""#)]);
-        assert_eq!(plan(&whole, false), Plan::Whole);
+        assert_eq!(plan(&whole), Plan::Whole);
         let unvalidated = response(Version::HTTP_2, 206, &[(CONTENT_RANGE, &first)]);
-        assert_eq!(plan(&unvalidated, false), Plan::Again);
+        assert_eq!(plan(&unvalidated), Plan::Again);
     }
 
     /// The first range and the rest of the file take two requests.
@@ -2244,24 +2246,14 @@ pub(crate) mod tests {
         assert_eq!(nar.unwrap(), large());
     }
 
-    /// An object store sends files as stored, so an uncompressed NAR comes
-    /// in ranges too. Another cache may compress it on the fly, so it comes
-    /// in one stream.
     #[tokio::test]
     async fn reads_uncompressed_nars_in_ranges_from_object_stores() {
         let size = large().len() as u64;
+        let (base, hits) = server_counting(RANGES).await;
+        let nar = read_nar(&open_s3(&base), "large", Compression::None, Some(size)).await;
+        assert_eq!(nar.unwrap(), large());
         let parts = usize::try_from(size.div_ceil(PART)).unwrap();
-        for (s3, requests) in [(true, parts + 1), (false, 1)] {
-            let (base, hits) = server_counting(RANGES).await;
-            let t = if s3 {
-                open_s3(&base)
-            } else {
-                open(&base).unwrap()
-            };
-            let nar = read_nar(&t, "large", Compression::None, Some(size)).await;
-            assert_eq!(nar.unwrap(), large(), "s3: {s3}");
-            assert_eq!(hits.load(Ordering::SeqCst), requests, "s3: {s3}");
-        }
+        assert_eq!(hits.load(Ordering::SeqCst), parts + 1);
     }
 
     #[test]

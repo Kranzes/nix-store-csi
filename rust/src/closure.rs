@@ -85,7 +85,7 @@ impl Caches {
         local: Option<Narinfos>,
         netrc: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        let ranges = Arc::new(Semaphore::new(transport::IN_FLIGHT));
+        let ranges = Arc::new(Semaphore::new(transport::in_flight()));
         let list = urls
             .iter()
             .enumerate()

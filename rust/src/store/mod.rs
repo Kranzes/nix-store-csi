@@ -94,6 +94,9 @@ pub struct Store {
     /// A slot for each fetch that may run at once.
     jobs: Arc<Semaphore>,
     max_jobs: usize,
+    /// Bench only: NARs of at most this many bytes take a slot from the
+    /// second pool instead of a job.
+    small_lane: Option<(u64, Arc<Semaphore>)>,
     max_closure_size: Option<u64>,
     max_store_size: Option<Size>,
     /// Ensures checked against `max_store_size` hold it until they hold their
@@ -235,6 +238,7 @@ impl Store {
             tmp,
             jobs: Arc::new(Semaphore::new(config.jobs)),
             max_jobs: config.jobs,
+            small_lane: small_lane(),
             max_closure_size: config.max_closure_size,
             max_store_size: config.max_store_size,
             checking_size: Mutex::default(),
@@ -732,6 +736,16 @@ fn write_unsynced(dest: &Path, contents: &[u8]) -> io::Result<()> {
     file.write_all(contents)?;
     file.persist(dest)?;
     Ok(())
+}
+
+/// `NIX_STORE_CSI_BENCH_SMALL_NAR_KIB` and `NIX_STORE_CSI_BENCH_SMALL_JOBS`
+/// (64 by default). Bench builds only.
+fn small_lane() -> Option<(u64, Arc<Semaphore>)> {
+    let var = |name: &str| std::env::var(format!("NIX_STORE_CSI_BENCH_{name}")).ok();
+    let kib: u64 = var("SMALL_NAR_KIB")?.parse().ok()?;
+    let jobs = var("SMALL_JOBS").and_then(|v| v.parse().ok()).unwrap_or(64);
+    tracing::info!(kib, jobs, "using a bench lane for small NARs");
+    Some((kib << 10, Arc::new(Semaphore::new(jobs))))
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, Hash};
 use prometheus_client::metrics::counter::Counter;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -144,8 +144,17 @@ impl Store {
                 fetch
             })
             .collect();
-        if !missing.is_empty() {
-            tokio::spawn(self.clone().feed(missing.clone()));
+        let (small, large): (Vec<_>, Vec<_>) = match &self.small_lane {
+            Some((size, _)) => {
+                (missing.iter().cloned()).partition(|path| closure[path].info.nar_size() <= *size)
+            }
+            None => (Vec::new(), missing.clone()),
+        };
+        if !large.is_empty() {
+            tokio::spawn(self.clone().feed(large, self.jobs.clone()));
+        }
+        if let (false, Some((_, lane))) = (small.is_empty(), &self.small_lane) {
+            tokio::spawn(self.clone().feed(small, lane.clone()));
         }
         let fetching: u64 = missing.iter().map(|p| closure[p].info.nar_size()).sum();
         // Fetching can take a while, and each fetch holds the entry it needs.
@@ -301,9 +310,9 @@ impl Store {
     /// in the order of `paths`. Each ensure has a feed of its own, and slots
     /// go to the feeds in the order they asked, so ensures take turns. A feed
     /// can also start a fetch that another ensure created.
-    async fn feed(self: Arc<Self>, paths: Vec<StorePath>) {
+    async fn feed(self: Arc<Self>, paths: Vec<StorePath>, slots: Arc<Semaphore>) {
         let mut paths = paths.into_iter();
-        while let Ok(slot) = self.jobs.clone().acquire_owned().await {
+        while let Ok(slot) = slots.clone().acquire_owned().await {
             // Skips the paths that no longer wait, like those that another
             // ensure started meanwhile.
             let take = |path| self.fetching.lock().unwrap().get_mut(&path)?.start.take();

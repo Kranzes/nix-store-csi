@@ -181,17 +181,56 @@ const FILE_BUF: usize = 256 * 1024;
 /// unpacking.
 pub const NAR_CHUNK: usize = 256 * 1024;
 
+/// Settings for measuring ranges, from `NIX_STORE_CSI_BENCH_*`. Bench builds
+/// only; tests use the defaults.
+#[derive(Debug)]
+struct Bench {
+    /// `RANGE_MIB`, 4 by default.
+    part: u64,
+    /// `RANGES_PER_NAR`, 16 by default.
+    parts: usize,
+    /// `RANGES`, 64 by default.
+    in_flight: usize,
+    /// `WINDOW=double` doubles the ranges in flight instead of adding one.
+    double: bool,
+    /// `HEAD_PERMIT=after`: the range the reader needs next is requested at
+    /// once and takes its permit when its response starts.
+    late_head_permit: bool,
+}
+
+static BENCH: std::sync::LazyLock<Bench> = std::sync::LazyLock::new(|| {
+    let var = |name: &str| std::env::var(format!("NIX_STORE_CSI_BENCH_{name}")).ok();
+    let num = |name: &str, default: u64| var(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+    let bench = Bench {
+        part: num("RANGE_MIB", 4) << 20,
+        parts: usize::try_from(num("RANGES_PER_NAR", 16)).unwrap_or(16),
+        in_flight: usize::try_from(num("RANGES", 64)).unwrap_or(64),
+        double: var("WINDOW").as_deref() == Some("double"),
+        late_head_permit: var("HEAD_PERMIT").as_deref() == Some("after"),
+    };
+    if std::env::vars().any(|(k, _)| k.starts_with("NIX_STORE_CSI_BENCH_")) {
+        tracing::info!(?bench, "using bench settings for ranges");
+    }
+    bench
+});
+
 /// A compressed NAR bigger than this may come in ranges of this size. Small
 /// in tests, so that test files span many ranges.
-const PART: u64 = if cfg!(test) { 4 << 10 } else { 4 << 20 };
+fn part_size() -> u64 {
+    if cfg!(test) { 4 << 10 } else { BENCH.part }
+}
 
 /// The most ranges of one NAR in flight, the one being read included.
-const PARTS: usize = 16;
+fn parts() -> usize {
+    if cfg!(test) { 16 } else { BENCH.parts }
+}
 
 /// The permits for ranges that the caches share, whatever the NARs and the
 /// jobs. A range holds one from its request until the reader is done with
-/// it, so this caps the memory that ranges take at `IN_FLIGHT * PART`.
-pub const IN_FLIGHT: usize = 64;
+/// it, so this caps the memory that ranges take at `in_flight() * part_size()`.
+pub fn in_flight() -> usize {
+    if cfg!(test) { 64 } else { BENCH.in_flight }
+}
 
 /// How long a request keeps retrying. backon's total delay counts only the
 /// sleeps, so a cache that times out on every attempt would retry far longer.
@@ -612,7 +651,7 @@ impl Transport {
 
     /// A reader for the NAR at `path`, which the narinfo says has
     /// `compression` and `file_size`. Over HTTP, it [`resuming`]s, and a NAR
-    /// over [`PART`] or without a `file_size` may come [`ranged`].
+    /// over [`part_size`] or without a `file_size` may come [`ranged`].
     pub async fn stream(
         &self,
         path: &str,
@@ -640,7 +679,7 @@ impl Transport {
                 // ranges would lose, unless the cache sends files as stored.
                 // Without a `FileSize`, the first range gives the length.
                 let rangeable = !decode || http.sends_as_stored();
-                let body = if rangeable && file_size.is_none_or(|size| size > PART) {
+                let body = if rangeable && file_size.is_none_or(|size| size > part_size()) {
                     ranged(http, url, decode).await?
                 } else {
                     tracing::debug!(%url, plan = "one stream", ?compression, "chose how to fetch the NAR");
@@ -785,16 +824,20 @@ impl Span {
     };
 
     /// What [`ranged`] asks for first.
-    const FIRST: Self = Self {
-        first: 0,
-        last: Some(PART - 1),
-    };
+    fn first() -> Self {
+        Self {
+            first: 0,
+            last: Some(part_size() - 1),
+        }
+    }
 
-    /// What follows [`Span::FIRST`].
-    const REST: Self = Self {
-        first: PART,
-        last: None,
-    };
+    /// What follows [`Span::first`].
+    fn rest() -> Self {
+        Self {
+            first: part_size(),
+            last: None,
+        }
+    }
 
     fn header(self) -> String {
         match self.last {
@@ -956,7 +999,7 @@ async fn resume(
     (!decode || nar_encoding(&resp) == Compression::None).then_some(resp)
 }
 
-/// How [`ranged`] reads a file, by the response to [`Span::FIRST`].
+/// How [`ranged`] reads a file, by the response to [`Span::first`].
 #[derive(Debug, PartialEq)]
 enum Plan {
     /// The response holds the whole file, from a cache that ignored the
@@ -964,7 +1007,7 @@ enum Plan {
     Whole,
     /// Without a range or a validator, the whole file comes in one request.
     Again,
-    /// Over HTTP/2 the ranges would share one connection, so [`Span::REST`]
+    /// Over HTTP/2 the ranges would share one connection, so [`Span::rest`]
     /// comes in one request after the first range.
     Rest(Validator),
     /// The file, of this length, comes in ranges, several at once.
@@ -986,10 +1029,10 @@ fn plan(resp: &reqwest::Response) -> Plan {
     if resp.status() == StatusCode::OK {
         return Plan::Whole;
     }
-    let Some(len) = Span::FIRST.answered(resp) else {
+    let Some(len) = Span::first().answered(resp) else {
         return Plan::Again;
     };
-    if len <= PART {
+    if len <= part_size() {
         return Plan::Whole;
     }
     let Some(validator) = validator(resp, Compression::None) else {
@@ -1013,7 +1056,7 @@ async fn ranged(
     let permit = http.ranges.clone().acquire_owned().await?;
     let permit_wait = waiting.elapsed();
     let resp = http
-        .fetch(&url, IDENTITY, Some((Span::FIRST, None)))
+        .fetch(&url, IDENTITY, Some((Span::first(), None)))
         .await?;
     let plan = plan(&resp);
     // Ranges count the bytes as stored, which may still need decoding.
@@ -1055,30 +1098,30 @@ async fn ranged(
         most: 0,
         permit_wait,
     };
-    ranges.push(permit, Some(resp));
+    ranges.push(Some(permit), Some(resp));
     let chunks = futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed();
     Ok(decoded(chunks, stored))
 }
 
-/// The body of `resp`, which holds [`Span::FIRST`], and then
-/// [`Span::REST`] in one more request.
+/// The body of `resp`, which holds [`Span::first`], and then
+/// [`Span::rest`] in one more request.
 fn first_and_rest(
     http: &Http,
     url: Url,
     resp: reqwest::Response,
     validator: Validator,
 ) -> BoxStream<'static, io::Result<Bytes>> {
-    let first = Some((Span::FIRST, validator.clone()));
+    let first = Some((Span::first(), validator.clone()));
     let head = resuming(http.clone(), url.clone(), resp, false, first);
     let http = http.clone();
     let more = async move {
-        let resp = part(&http, &url, &validator, Span::REST).await?;
+        let resp = part(&http, &url, &validator, Span::rest()).await?;
         io::Result::Ok(resuming(
             http,
             url,
             resp,
             false,
-            Some((Span::REST, validator)),
+            Some((Span::rest(), validator)),
         ))
     };
     head.chain(futures::stream::once(more).try_flatten())
@@ -1107,14 +1150,15 @@ struct Ranges {
 struct Part {
     chunks: mpsc::UnboundedReceiver<io::Result<Bytes>>,
     task: AbortOnDropHandle<()>,
-    _permit: OwnedSemaphorePermit,
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Ranges {
     /// Starts reading the next range, from `resp` if the caller already
     /// requested it.
-    fn push(&mut self, permit: OwnedSemaphorePermit, resp: Option<reqwest::Response>) {
-        let last = (self.next + PART).min(self.len) - 1;
+    /// Without `permit`, the range takes one when its response starts.
+    fn push(&mut self, permit: Option<OwnedSemaphorePermit>, resp: Option<reqwest::Response>) {
+        let last = (self.next + part_size()).min(self.len) - 1;
         let span = Span {
             first: self.next,
             last: Some(last),
@@ -1123,6 +1167,7 @@ impl Ranges {
         self.most = self.most.max(self.parts.len() + 1);
         let (tx, chunks) = mpsc::unbounded_channel();
         let (http, url, validator) = (self.http.clone(), self.url.clone(), self.validator.clone());
+        let late = permit.is_none().then(|| self.http.ranges.clone());
         let task = tokio::spawn(async move {
             let resp = match resp {
                 Some(resp) => resp,
@@ -1130,6 +1175,13 @@ impl Ranges {
                     Ok(resp) => resp,
                     Err(e) => return drop(tx.send(Err(e))),
                 },
+            };
+            let _late = match late {
+                Some(permits) => match permits.acquire_owned().await {
+                    Ok(permit) => Some(permit),
+                    Err(e) => return drop(tx.send(Err(io::Error::other(e)))),
+                },
+                None => None,
             };
             let mut body = resuming(http, url, resp, false, Some((span, validator)));
             while let Some(chunk) = body.next().await {
@@ -1150,19 +1202,23 @@ impl Ranges {
             // Only the range that the reader needs next waits for a permit, so
             // a NAR that holds permits can always use them.
             if self.parts.is_empty() && self.next < self.len {
-                let (permits, waiting) = (self.http.ranges.clone(), Instant::now());
-                let permit = permits.acquire_owned().await.map_err(io::Error::other)?;
-                self.permit_wait += waiting.elapsed();
-                self.push(permit, None);
+                if !cfg!(test) && BENCH.late_head_permit {
+                    self.push(None, None);
+                } else {
+                    let (permits, waiting) = (self.http.ranges.clone(), Instant::now());
+                    let permit = permits.acquire_owned().await.map_err(io::Error::other)?;
+                    self.permit_wait += waiting.elapsed();
+                    self.push(Some(permit), None);
+                }
             }
             while self.parts.len() < self.window && self.next < self.len {
                 let Ok(permit) = self.http.ranges.clone().try_acquire_owned() else {
                     break;
                 };
-                self.push(permit, None);
+                self.push(Some(permit), None);
             }
             let Some(head) = self.parts.front_mut() else {
-                let (url, ranges, most) = (&self.url, self.len.div_ceil(PART), self.most);
+                let (url, ranges, most) = (&self.url, self.len.div_ceil(part_size()), self.most);
                 let permit_wait_ms = self.permit_wait.as_millis();
                 tracing::debug!(%url, ranges, most, permit_wait_ms, "fetched the NAR in ranges");
                 return Ok(None);
@@ -1172,7 +1228,12 @@ impl Ranges {
             }
             self.parts.pop_front();
             if (self.parts.front()).is_some_and(|next| !next.task.is_finished()) {
-                self.window = (self.window + 1).min(PARTS);
+                let grown = if !cfg!(test) && BENCH.double {
+                    self.window * 2
+                } else {
+                    self.window + 1
+                };
+                self.window = grown.min(parts());
             }
         }
     }
@@ -1277,7 +1338,7 @@ pub(crate) mod tests {
 <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message><AWSAccessKeyId>AKIAEXAMPLE</AWSAccessKeyId><StringToSign>AWS4-HMAC-SHA256</StringToSign></Error>"#;
 
     fn open(url: &str) -> anyhow::Result<Transport> {
-        open_with(url, IN_FLIGHT)
+        open_with(url, in_flight())
     }
 
     /// A transport with `n` permits for ranges of its own.
@@ -1286,7 +1347,7 @@ pub(crate) mod tests {
     }
 
     fn permits() -> Arc<Semaphore> {
-        Arc::new(Semaphore::new(IN_FLIGHT))
+        Arc::new(Semaphore::new(in_flight()))
     }
 
     #[derive(Clone, Copy)]
@@ -1963,17 +2024,17 @@ pub(crate) mod tests {
         read_nar(t, path, Compression::Zstd, file_size).await
     }
 
-    /// A compressed NAR over `PART` or without a `FileSize` comes in ranges,
+    /// A compressed NAR over `part_size()` or without a `FileSize` comes in ranges,
     /// in order, and a range that breaks off resumes. A cache without ranges
     /// or validators sends it whole.
     #[tokio::test]
     async fn http_reads_in_ranges() {
         let size = large().len() as u64;
-        let parts = usize::try_from(size.div_ceil(PART)).unwrap();
+        let parts = usize::try_from(size.div_ceil(part_size())).unwrap();
         for (mode, path, file_size, requests) in [
             (RANGES, "large", Some(size), parts + 1),
             (RANGES, "large", None, parts + 1),
-            (RANGES, "large", Some(PART), 1),
+            (RANGES, "large", Some(part_size()), 1),
             (RANGES, "dated", Some(size), parts + 1),
             (RANGES, "unvalidated", Some(size), 2),
             (Mode::Normal, "large", Some(size), 1),
@@ -2047,8 +2108,8 @@ pub(crate) mod tests {
     #[test]
     fn plans_by_the_first_range() {
         use reqwest::Version;
-        let len = 3 * PART;
-        let first = format!("bytes 0-{}/{len}", PART - 1);
+        let len = 3 * part_size();
+        let first = format!("bytes 0-{}/{len}", part_size() - 1);
         let etag = Validator(ETAG, HeaderValue::from_static(r#""x""#));
         let ranged = |version, range: &str| {
             plan(&response(
@@ -2075,7 +2136,10 @@ pub(crate) mod tests {
             unreachable!()
         };
         let url = request_url(&http.base, "large").unwrap();
-        let first = (http.fetch(&url, IDENTITY, Some((Span::FIRST, None))).await).unwrap();
+        let first = (http
+            .fetch(&url, IDENTITY, Some((Span::first(), None)))
+            .await)
+            .unwrap();
         let validator = validator(&first, Compression::None).unwrap();
         let body = first_and_rest(&http, url, first, validator);
         let mut nar = Vec::new();
@@ -2084,7 +2148,7 @@ pub(crate) mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
-    /// A NAR keeps at most `PARTS` ranges in flight, and all NARs together no
+    /// A NAR keeps at most `parts()` ranges in flight, and all NARs together no
     /// more than the transport's permits, while the reader keeps waiting.
     #[tokio::test]
     async fn caps_the_ranges_in_flight() {
@@ -2094,8 +2158,8 @@ pub(crate) mod tests {
             slow: true,
         };
         let size = large().len() as u64;
-        let permits = PARTS + 4;
-        for (nars, caps) in [(1, 2..=PARTS), (4, PARTS + 1..=permits)] {
+        let permits = parts() + 4;
+        for (nars, caps) in [(1, 2..=parts()), (4, parts() + 1..=permits)] {
             let (base, _, load) = serve(slow).await;
             let t = open_with(&base, permits).unwrap();
             let reads = (0..nars).map(|_| read_sized(&t, "large", Some(size)));
@@ -2252,7 +2316,7 @@ pub(crate) mod tests {
         let (base, hits) = server_counting(RANGES).await;
         let nar = read_nar(&open_s3(&base), "large", Compression::None, Some(size)).await;
         assert_eq!(nar.unwrap(), large());
-        let parts = usize::try_from(size.div_ceil(PART)).unwrap();
+        let parts = usize::try_from(size.div_ceil(part_size())).unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), parts + 1);
     }
 

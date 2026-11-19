@@ -22,6 +22,18 @@
   each get a thread.
 - `--max-substitution-jobs` defaults to twice the CPUs, from 8 to 64, instead
   of 16, so nodes with more CPUs fetch closures of many small NARs faster.
+- A large fetch's peak memory now scales with the node's CPUs, which set the
+  jobs and unpack threads. Measured on closures of 13.7 and 6.3 GB:
+
+  | CPUs (jobs) | Peak RSS       |
+  | ----------- | -------------- |
+  | 4 (8)       | 260 to 370 MiB |
+  | 16 (32)     | 790 to 940 MiB |
+  | 32 (64)     | 1.0 to 1.3 GiB |
+  | 88 (64)     | 1.3 to 1.7 GiB |
+
+  The chart requests 512Mi of memory instead of 256Mi. A request is not a cap,
+  and the chart sets no memory limit.
 
 ## 0.1.16 - 2026-11-19
 

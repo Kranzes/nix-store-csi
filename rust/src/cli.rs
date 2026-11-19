@@ -79,7 +79,8 @@ pub struct Cli {
     )]
     pub log_format: LogFormat,
 
-    /// NARs to fetch at once.
+    /// NARs to fetch at once. A NAR that comes in ranges over several
+    /// connections counts once.
     #[arg(
         long,
         value_name = "N",

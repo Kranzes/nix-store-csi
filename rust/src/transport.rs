@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -12,13 +13,15 @@ use object_store::signer::{Method, Signer};
 use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED,
-    RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, ETAG, HeaderName, HeaderValue, IF_RANGE,
+    LAST_MODIFIED, RANGE, RETRY_AFTER,
 };
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
+use tokio_util::task::AbortOnDropHandle;
 use url::{Position, Url};
 
 use crate::narinfo::Compression;
@@ -111,19 +114,21 @@ impl Http {
     }
 
     /// Retries the GET until a response starts. The status must be 200. With
-    /// `range`, it asks for the bytes from offset `from` on, if the file
-    /// still matches `validator`, and also accepts 206.
+    /// `range`, it asks for a span of the file, if the file still matches
+    /// the validator, and also accepts 206.
     async fn fetch(
         &self,
         url: &Url,
         encodings: &'static str,
-        range: Option<(u64, &HeaderValue)>,
+        range: Option<(Span, Option<&HeaderValue>)>,
     ) -> anyhow::Result<reqwest::Response> {
         retry(url, true, || async {
             let mut request = self.request(url).await?.header(ACCEPT_ENCODING, encodings);
-            if let Some((from, validator)) = range {
-                request =
-                    (request.header(RANGE, format!("bytes={from}-"))).header(IF_RANGE, validator);
+            if let Some((span, validator)) = range {
+                request = request.header(RANGE, span.header());
+                if let Some(validator) = validator {
+                    request = request.header(IF_RANGE, validator);
+                }
             }
             let resp = request.send().await?;
             if range.is_some() && resp.status() == StatusCode::PARTIAL_CONTENT {
@@ -166,6 +171,14 @@ const FILE_BUF: usize = 256 * 1024;
 /// The chunk size of NAR data, from decoding the cache's compression to
 /// unpacking.
 pub const NAR_CHUNK: usize = 256 * 1024;
+
+/// A compressed NAR bigger than this may come in ranges of this size. Small
+/// in tests, so that test files span many ranges.
+const PART: u64 = if cfg!(test) { 4 << 10 } else { 4 << 20 };
+
+/// The most ranges of one NAR in flight, the one being read included, which
+/// caps the memory its ranges take at `PARTS * PART`.
+const PARTS: usize = 16;
 
 /// How long a request keeps retrying. backon's total delay counts only the
 /// sleeps, so a cache that times out on every attempt would retry far longer.
@@ -446,13 +459,26 @@ pub fn redact(url: &Url) -> Url {
     url
 }
 
-/// Whether `e` is a response body that broke off. A new request may fix that.
+/// Whether `e` is a response body that broke off, or a file that changed
+/// during a download in ranges. A new request may fix that.
 pub fn broke_off(e: &anyhow::Error) -> bool {
     e.chain().any(|e| {
         let inner = e.downcast_ref::<io::Error>().and_then(io::Error::get_ref);
-        matches!(inner, Some(inner) if inner.is::<reqwest::Error>())
+        matches!(inner, Some(inner) if inner.is::<reqwest::Error>() || inner.is::<Changed>())
     })
 }
+
+/// A range that came from another version of the file than the first one.
+#[derive(Debug)]
+struct Changed;
+
+impl std::fmt::Display for Changed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("the file changed during the download")
+    }
+}
+
+impl std::error::Error for Changed {}
 
 pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
     // reqwest loads the system root certificates, so `SSL_CERT_FILE` and
@@ -570,11 +596,13 @@ impl Transport {
     }
 
     /// A reader for the NAR at `path`, which the narinfo says has
-    /// `compression`. Over HTTP, it is [`resumable`].
+    /// `compression` and `file_size`. Over HTTP, it [`resuming`]s, and a
+    /// compressed NAR over [`PART`] may come [`ranged`].
     pub async fn stream(
         &self,
         path: &str,
         compression: Compression,
+        file_size: Option<u64>,
     ) -> anyhow::Result<Box<dyn AsyncBufRead + Send + Unpin>> {
         match self {
             Self::File(base) => {
@@ -593,9 +621,16 @@ impl Transport {
                 // again would only cost the cache CPU. Its response is the
                 // file as stored, even when S3 gives it a `Content-Encoding`.
                 let decode = compression == Compression::None;
-                let encodings = if decode { ENCODINGS } else { IDENTITY };
-                let resp = http.fetch(&url, encodings, None).await?;
-                Ok(resumable(http.clone(), url, resp, decode))
+                // An uncompressed NAR may come compressed on the fly, which
+                // ranges would lose.
+                let body = if !decode && file_size.is_some_and(|size| size > PART) {
+                    ranged(http, url).await?
+                } else {
+                    let encodings = if decode { ENCODINGS } else { IDENTITY };
+                    let resp = http.fetch(&url, encodings, None).await?;
+                    resuming(http.clone(), url, resp, decode, None)
+                };
+                Ok(Box::new(StreamReader::new(body)))
             }
         }
     }
@@ -718,47 +753,108 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
     Ok(Auth::S3 { s3, unsigned })
 }
 
+/// Bytes `first` to `last` of a file, or to its end.
+#[derive(Clone, Copy)]
+struct Span {
+    first: u64,
+    last: Option<u64>,
+}
+
+impl Span {
+    const WHOLE: Self = Self {
+        first: 0,
+        last: None,
+    };
+
+    fn header(self) -> String {
+        match self.last {
+            Some(last) => format!("bytes={}-{last}", self.first),
+            None => format!("bytes={}-", self.first),
+        }
+    }
+
+    /// The file's length, if `resp` holds the span, up to the file's end.
+    fn answered(self, resp: &reqwest::Response) -> Option<u64> {
+        let range = resp.headers().get(CONTENT_RANGE)?.to_str().ok()?;
+        let (first, last, len) = content_range(range)?;
+        let end = self
+            .last
+            .map_or(len, |last| last.saturating_add(1).min(len));
+        (resp.status() == StatusCode::PARTIAL_CONTENT
+            && first == self.first
+            && last.checked_add(1) == Some(end))
+        .then_some(len)
+    }
+}
+
+/// The header and value that a range request sends as `If-Range`, so that it
+/// can't mix two versions of the file.
+#[derive(Clone)]
+struct Validator(HeaderName, HeaderValue);
+
+/// A weak `ETag` doesn't promise the same bytes. The `ETag` of a compressed
+/// body won't match the uncompressed file that a resume asks for.
+fn validator(resp: &reqwest::Response, encoding: Compression) -> Option<Validator> {
+    let headers = resp.headers();
+    let etag = (headers.get(ETAG))
+        .filter(|etag| !etag.as_bytes().starts_with(b"W/") && encoding == Compression::None);
+    match etag {
+        Some(etag) => Some(Validator(ETAG, etag.clone())),
+        None => Some(Validator(
+            LAST_MODIFIED,
+            headers.get(LAST_MODIFIED)?.clone(),
+        )),
+    }
+}
+
+/// Whether `resp` may come from the version of the file that `validator`
+/// names. A server that ignores `If-Range` sends a range of a file replaced
+/// since, and a 206 that answers `If-Range` may leave out `Last-Modified`.
+fn same_file(resp: &reqwest::Response, Validator(name, value): &Validator) -> bool {
+    resp.headers().get(name).is_none_or(|v| v == value)
+}
+
 struct Resuming {
     http: Http,
     url: Url,
-    /// Sent as `If-Range`, so a resume can't mix two versions of the file.
-    validator: Option<HeaderValue>,
+    validator: Option<Validator>,
     decode: bool,
+    /// What the first response held.
+    span: Span,
     body: BoxStream<'static, io::Result<Bytes>>,
     /// Decoded bytes, which is where a resume starts.
     read: u64,
     read_since_resume: u64,
 }
 
-/// The body of `resp`, decoded from its `Content-Encoding` if `decode`. When
-/// it breaks off, a range request picks it up where it stopped. That needs a
-/// server that supports ranges and an unchanged file, and each try must read
-/// some bytes. Otherwise reading fails with an error that [`broke_off`]
-/// matches.
-fn resumable(
+/// The body of `resp`, which holds the whole file, or a span of the version
+/// that a validator names, decoded from its `Content-Encoding` if `decode`.
+/// When it breaks off, a range request picks it up where it stopped. That
+/// needs a server that supports ranges and an unchanged file, and each try
+/// must read some bytes. Otherwise reading fails with an error that
+/// [`broke_off`] matches.
+fn resuming(
     http: Http,
     url: Url,
     resp: reqwest::Response,
     decode: bool,
-) -> Box<dyn AsyncBufRead + Send + Unpin> {
-    let headers = resp.headers();
+    range: Option<(Span, Validator)>,
+) -> BoxStream<'static, io::Result<Bytes>> {
     let encoding = if decode {
         nar_encoding(&resp)
     } else {
         Compression::None
     };
-    // A weak ETag doesn't promise the same bytes, so If-Range can't take
-    // one. The ETag of a compressed body won't match the uncompressed file
-    // that a resume asks for.
-    let validator = (headers.get(ETAG))
-        .filter(|etag| !etag.as_bytes().starts_with(b"W/") && encoding == Compression::None)
-        .or_else(|| headers.get(LAST_MODIFIED))
-        .cloned();
+    let (span, validator) = match range {
+        Some((span, validator)) => (span, Some(validator)),
+        None => (Span::WHOLE, validator(&resp, encoding)),
+    };
     let state = Resuming {
         http,
         url,
         validator,
         decode,
+        span,
         body: decoded(resp, encoding),
         read: 0,
         read_since_resume: 0,
@@ -774,9 +870,14 @@ fn resumable(
                 }
                 Some(Err(e)) => e,
             };
+            let from = s.span.first + s.read;
             let resumed = match &s.validator {
                 Some(validator) if s.read_since_resume > 0 => {
-                    resume(&s.http, &s.url, validator, s.read, s.decode).await
+                    let span = Span {
+                        first: from,
+                        ..s.span
+                    };
+                    resume(&s.http, &s.url, validator, span, s.decode).await
                 }
                 _ => None,
             };
@@ -784,12 +885,12 @@ fn resumable(
                 return Err(error);
             };
             let error = anyhow::Error::from(error);
-            tracing::warn!(url = %s.url, "{error:#}; resumed at byte {}", s.read);
+            tracing::warn!(url = %s.url, "{error:#}; resumed at byte {from}");
             s.body = body(resp);
             s.read_since_resume = 0;
         }
     });
-    Box::new(StreamReader::new(chunks.boxed()))
+    chunks.boxed()
 }
 
 fn decoded(
@@ -809,38 +910,178 @@ fn body(resp: reqwest::Response) -> BoxStream<'static, io::Result<Bytes>> {
     resp.bytes_stream().map_err(io::Error::other).boxed()
 }
 
-/// Asks for the bytes from offset `from` on, if the file still matches
-/// `validator`. With `decode`, `from` counts decoded bytes, so the rest must
-/// come without compression.
+/// Asks for `span` of the file, if the file still matches `validator`. With
+/// `decode`, the span counts decoded bytes, so it must come without
+/// compression.
 async fn resume(
     http: &Http,
     url: &Url,
-    validator: &HeaderValue,
-    from: u64,
+    validator: &Validator,
+    span: Span,
     decode: bool,
 ) -> Option<reqwest::Response> {
-    let resp = match http.fetch(url, IDENTITY, Some((from, validator))).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::debug!(%url, "resuming: {e:#}");
-            return None;
-        }
+    let resp = (part(http, url, validator, span).await)
+        .inspect_err(|e| tracing::debug!(%url, "resuming: {e}"))
+        .ok()?;
+    (!decode || nar_encoding(&resp) == Compression::None).then_some(resp)
+}
+
+/// Reads the file at `url` in ranges of [`PART`] bytes, several at once, if
+/// the cache answers the first range with a validator. Over HTTP/2 the ranges
+/// would share one connection, so the rest of the file comes in one more
+/// request. Without ranges or a validator, the file comes in one stream.
+async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::Result<Bytes>>> {
+    let first = Span {
+        first: 0,
+        last: Some(PART - 1),
     };
-    // A 200 with the whole file means the file changed or the server ignores
-    // ranges. A server may also send less than the rest of the file, and its
-    // body would then end early.
-    let range = resp
-        .headers()
-        .get(CONTENT_RANGE)
-        .and_then(|r| r.to_str().ok());
-    let resumed = resp.status() == StatusCode::PARTIAL_CONTENT
-        && (range.and_then(content_range))
-            .is_some_and(|(first, last, len)| first == from && last.checked_add(1) == Some(len))
-        && (!decode || nar_encoding(&resp) == Compression::None);
-    if !resumed {
-        tracing::debug!(%url, "resuming: got {} for {range:?}", resp.status());
+    let resp = http.fetch(&url, IDENTITY, Some((first, None))).await?;
+    let validator = validator(&resp, Compression::None);
+    let (Some(len), Some(validator)) = (first.answered(&resp), validator) else {
+        tracing::debug!(%url, status = %resp.status(), "fetching the NAR in one stream");
+        let resp = if resp.status() == StatusCode::OK {
+            resp
+        } else {
+            http.fetch(&url, IDENTITY, None).await?
+        };
+        return Ok(resuming(http.clone(), url, resp, false, None));
+    };
+    if resp.version() != reqwest::Version::HTTP_11 && len > PART {
+        let tail_span = Span {
+            first: PART,
+            last: None,
+        };
+        let head = resuming(
+            http.clone(),
+            url.clone(),
+            resp,
+            false,
+            Some((first, validator.clone())),
+        );
+        let http = http.clone();
+        let tail = async move {
+            let resp = part(&http, &url, &validator, tail_span).await?;
+            io::Result::Ok(resuming(
+                http,
+                url,
+                resp,
+                false,
+                Some((tail_span, validator)),
+            ))
+        };
+        return Ok(head
+            .chain(futures::stream::once(tail).try_flatten())
+            .boxed());
     }
-    resumed.then_some(resp)
+    let mut ranges = Ranges {
+        http: http.clone(),
+        url,
+        validator,
+        len,
+        next: 0,
+        parts: VecDeque::new(),
+        window: 2,
+    };
+    ranges.push(Some(resp));
+    Ok(futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed())
+}
+
+/// A file read in ranges, which come out in order. Each range in flight
+/// keeps what it reads in memory until the reader gets to it.
+struct Ranges {
+    http: Http,
+    url: Url,
+    validator: Validator,
+    len: u64,
+    /// Where the next range starts.
+    next: u64,
+    parts: VecDeque<Part>,
+    /// How many ranges may be in flight, which grows while the reader waits
+    /// for them.
+    window: usize,
+}
+
+struct Part {
+    chunks: mpsc::UnboundedReceiver<io::Result<Bytes>>,
+    task: AbortOnDropHandle<()>,
+}
+
+impl Ranges {
+    /// Starts reading the next range, from `resp` if the caller already
+    /// requested it.
+    fn push(&mut self, resp: Option<reqwest::Response>) {
+        let last = (self.next + PART).min(self.len) - 1;
+        let span = Span {
+            first: self.next,
+            last: Some(last),
+        };
+        self.next = last + 1;
+        let (tx, chunks) = mpsc::unbounded_channel();
+        let (http, url, validator) = (self.http.clone(), self.url.clone(), self.validator.clone());
+        let task = tokio::spawn(async move {
+            let resp = match resp {
+                Some(resp) => resp,
+                None => match part(&http, &url, &validator, span).await {
+                    Ok(resp) => resp,
+                    Err(e) => return drop(tx.send(Err(e))),
+                },
+            };
+            let mut body = resuming(http, url, resp, false, Some((span, validator)));
+            while let Some(chunk) = body.next().await {
+                if tx.send(chunk).is_err() {
+                    return;
+                }
+            }
+        });
+        self.parts.push_back(Part {
+            chunks,
+            task: AbortOnDropHandle::new(task),
+        });
+    }
+
+    async fn next_chunk(mut self) -> io::Result<Option<(Bytes, Self)>> {
+        loop {
+            while self.parts.len() < self.window && self.next < self.len {
+                self.push(None);
+            }
+            let Some(head) = self.parts.front_mut() else {
+                return Ok(None);
+            };
+            if let Some(chunk) = head.chunks.recv().await {
+                return Ok(Some((chunk?, self)));
+            }
+            self.parts.pop_front();
+            if (self.parts.front()).is_some_and(|next| !next.task.is_finished()) {
+                self.window = (self.window + 1).min(PARTS);
+            }
+        }
+    }
+}
+
+/// Requests `span` of the file that `validator` names.
+async fn part(
+    http: &Http,
+    url: &Url,
+    validator: &Validator,
+    span: Span,
+) -> io::Result<reqwest::Response> {
+    let range = span.header();
+    let resp = http
+        .fetch(url, IDENTITY, Some((span, Some(&validator.1))))
+        .await;
+    let resp = resp.map_err(|e| io::Error::other(format!("fetching {range}: {e:#}")))?;
+    // A server that honors `If-Range` sends all of a file that changed.
+    if !same_file(&resp, validator) {
+        return Err(io::Error::other(Changed));
+    }
+    // A server may also ignore ranges, or send less than the span, and the
+    // body would then end early.
+    if span.answered(&resp).is_none() {
+        let got = resp.headers().get(CONTENT_RANGE);
+        let msg = format!("got {} with {got:?} for {range}", resp.status());
+        return Err(io::Error::other(msg));
+    }
+    Ok(resp)
 }
 
 /// The first byte, last byte and length in a `Content-Range`, if the length
@@ -945,6 +1186,17 @@ pub(crate) mod tests {
         },
         /// A cache that answers only `/nix-cache-info`.
         Hangs,
+        /// Serves `/large` in any range with an `ETag`, and breaks off the
+        /// fourth response halfway. With `replaced`, `/large` is another file
+        /// with another `ETag` from the second request on, and a range whose
+        /// `If-Range` names the old one gets all of the new one, or with
+        /// `ignores_if_range` the range of the new one. Serves `/dated` with
+        /// only a `Last-Modified`, which its ranges leave out, and
+        /// `/unvalidated` without a validator.
+        Ranges {
+            replaced: bool,
+            ignores_if_range: bool,
+        },
     }
 
     const LAST_MODIFIED: &str = "Wed, 21 Oct 2015 07:28:00 GMT";
@@ -959,21 +1211,18 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn range_start(value: &str) -> Option<usize> {
-        value
-            .strip_prefix("bytes=")?
-            .strip_suffix('-')?
-            .parse()
-            .ok()
+    fn parse_range(value: &str) -> Option<(usize, Option<usize>)> {
+        let (first, last) = value.strip_prefix("bytes=")?.split_once('-')?;
+        Some((first.parse().ok()?, last.parse().ok()))
     }
 
     struct Request {
         path: String,
         authorization: String,
         accept_encoding: String,
-        /// Where the `Range` starts, if `If-Range` holds the `ETag` or
-        /// `Last-Modified` that the server sends.
-        range: Option<usize>,
+        /// The first and last byte of the `Range`.
+        range: Option<(usize, Option<usize>)>,
+        if_range: String,
     }
 
     impl Request {
@@ -988,12 +1237,12 @@ pub(crate) mod tests {
             // Serves them under `/bucket` too, to presigned path-style S3 requests.
             let path = path.strip_prefix("/bucket").unwrap_or(path);
             let path = path.split_once("?X-Amz-").map_or(path, |(p, _)| p);
-            let validated = [r#""x""#, LAST_MODIFIED].contains(&&*header(IF_RANGE));
             Self {
                 path: path.to_owned(),
                 authorization: header(AUTHORIZATION),
                 accept_encoding: header(ACCEPT_ENCODING),
-                range: range_start(&header(RANGE)).filter(|_| validated),
+                range: parse_range(&header(RANGE)),
+                if_range: header(IF_RANGE),
             }
         }
 
@@ -1033,7 +1282,7 @@ pub(crate) mod tests {
                 (StatusCode::TEMPORARY_REDIRECT, Vec::new())
             }
             ("/private" | "/obj" | "/harmonia.nar?hash=x", _) => (StatusCode::OK, BODY.to_vec()),
-            ("/large", _) => (StatusCode::OK, large()),
+            ("/large" | "/dated" | "/unvalidated", _) => (StatusCode::OK, large()),
             ("/denied", _) => (StatusCode::FORBIDDEN, SIGNATURE_ERROR.to_vec()),
             ("/hidden", _) => (
                 StatusCode::FORBIDDEN,
@@ -1070,12 +1319,37 @@ pub(crate) mod tests {
                 );
                 Some(false)
             }
+            Mode::Ranges { replaced, .. } if path == "/large" => {
+                let etag = if replaced && hit > 0 {
+                    body.reverse();
+                    r#""z""#
+                } else {
+                    r#""x""#
+                };
+                headers.insert(ETAG, etag.parse().unwrap());
+                Some(false)
+            }
+            Mode::Ranges { .. } if path == "/dated" => {
+                let date = LAST_MODIFIED.parse().unwrap();
+                headers.insert(reqwest::header::LAST_MODIFIED, date);
+                Some(false)
+            }
+            Mode::Ranges { .. } if path == "/unvalidated" => Some(false),
             _ => None,
         };
-        if let (Some(short), Some(from)) = (ranged, req.range) {
+        let current = |name| headers.get(name).is_some_and(|v| v == &*req.if_range);
+        let ignores = matches!(mode, Mode::Ranges { ignores_if_range, .. } if ignores_if_range);
+        let honored = req.if_range.is_empty()
+            || ignores
+            || current(ETAG)
+            || current(reqwest::header::LAST_MODIFIED);
+        if honored && let (Some(short), Some((from, last))) = (ranged, req.range) {
+            if path == "/dated" && !req.if_range.is_empty() {
+                headers.remove(reqwest::header::LAST_MODIFIED);
+            }
             status = StatusCode::PARTIAL_CONTENT;
             let len = body.len();
-            let last = len - 1 - usize::from(short);
+            let last = last.unwrap_or(len).min(len - 1) - usize::from(short);
             let range = format!("bytes {from}-{last}/{len}");
             headers.insert(CONTENT_RANGE, range.parse().unwrap());
             body = body[from..=last].to_vec();
@@ -1131,6 +1405,7 @@ pub(crate) mod tests {
         }
         let sent = match mode {
             Mode::BreaksOnce { .. } if hit == 0 => body.len() / 2,
+            Mode::Ranges { .. } if hit == 3 => body.len() / 2,
             Mode::Encodes { .. } if req.path == "/large" && req.range.is_none() => body.len() / 2,
             Mode::Truncated => body.len().saturating_sub(1),
             _ => body.len(),
@@ -1371,16 +1646,17 @@ pub(crate) mod tests {
     }
 
     async fn read_all(t: &Transport, path: &str) -> anyhow::Result<Vec<u8>> {
-        read_nar(t, path, Compression::None).await
+        read_nar(t, path, Compression::None, None).await
     }
 
     async fn read_nar(
         t: &Transport,
         path: &str,
         compression: Compression,
+        file_size: Option<u64>,
     ) -> anyhow::Result<Vec<u8>> {
         let mut out = Vec::new();
-        t.stream(path, compression)
+        t.stream(path, compression, file_size)
             .await?
             .read_to_end(&mut out)
             .await?;
@@ -1415,7 +1691,7 @@ pub(crate) mod tests {
         let t = open(&server(Mode::Normal).await).unwrap();
         let sent = t.get("accept-encoding").await.unwrap().unwrap();
         assert_eq!(sent, ENCODINGS.as_bytes());
-        let sent = |compression| read_nar(&t, "accept-encoding", compression);
+        let sent = |compression| read_nar(&t, "accept-encoding", compression, None);
         assert_eq!(sent(Compression::None).await.unwrap(), ENCODINGS.as_bytes());
         assert_eq!(sent(Compression::Xz).await.unwrap(), IDENTITY.as_bytes());
 
@@ -1438,7 +1714,7 @@ pub(crate) mod tests {
             stored: true,
         };
         let t = open(&server(stored).await).unwrap();
-        let nar = read_nar(&t, "obj", Compression::Xz).await.unwrap();
+        let nar = read_nar(&t, "obj", Compression::Xz, None).await.unwrap();
         assert_eq!(nar, encode(Compression::Xz, BODY).await);
     }
 
@@ -1505,6 +1781,67 @@ pub(crate) mod tests {
         let t = open(&server(encodes(true)).await).unwrap();
         let err = read_all(&t, "large").await.unwrap_err();
         assert!(broke_off(&err), "{err:#}");
+    }
+
+    const RANGES: Mode = Mode::Ranges {
+        replaced: false,
+        ignores_if_range: false,
+    };
+
+    async fn read_sized(t: &Transport, path: &str, file_size: u64) -> anyhow::Result<Vec<u8>> {
+        read_nar(t, path, Compression::Zstd, Some(file_size)).await
+    }
+
+    /// A compressed NAR over `PART` comes in ranges, in order, and a range
+    /// that breaks off resumes. A cache without ranges or validators sends
+    /// it whole.
+    #[tokio::test]
+    async fn http_reads_in_ranges() {
+        let size = large().len() as u64;
+        let parts = usize::try_from(size.div_ceil(PART)).unwrap();
+        for (mode, path, file_size, requests) in [
+            (RANGES, "large", size, parts + 1),
+            (RANGES, "large", PART, 1),
+            (RANGES, "dated", size, parts + 1),
+            (RANGES, "unvalidated", size, 2),
+            (Mode::Normal, "large", size, 1),
+        ] {
+            let (base, hits) = server_counting(mode).await;
+            let t = open(&base).unwrap();
+            let nar = read_sized(&t, path, file_size).await;
+            let nar = nar.unwrap_or_else(|e| panic!("{path} {file_size}: {e:#}"));
+            assert_eq!(nar, large(), "{path} {file_size}");
+            assert_eq!(hits.load(Ordering::SeqCst), requests, "{path} {file_size}");
+        }
+    }
+
+    /// A file replaced during a download in ranges fails it, whether the
+    /// cache honors `If-Range` or not, and the caller can start over.
+    #[tokio::test]
+    async fn http_notices_a_replaced_file() {
+        for ignores_if_range in [false, true] {
+            let mode = Mode::Ranges {
+                replaced: true,
+                ignores_if_range,
+            };
+            let t = open(&server(mode).await).unwrap();
+            let err = read_sized(&t, "large", large().len() as u64).await;
+            let err = err.unwrap_err();
+            assert!(broke_off(&err), "{err:#}");
+            assert!(format!("{err:#}").contains("changed"), "{err:#}");
+        }
+    }
+
+    /// Ranges wait for the reader while they arrive before it gets to them.
+    #[tokio::test]
+    async fn bounds_the_ranges_ahead() {
+        let (base, hits) = server_counting(RANGES).await;
+        let t = open(&base).unwrap();
+        let size = Some(large().len() as u64);
+        let mut nar = t.stream("large", Compression::Zstd, size).await.unwrap();
+        nar.read_exact(&mut [0]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     /// A path-style bucket at `endpoint`, with keys in place of the
@@ -1637,6 +1974,10 @@ pub(crate) mod tests {
         };
         let t = open_s3(&server(breaks).await);
         assert_eq!(read_all(&t, "obj").await.unwrap(), BODY);
+        // So does each range.
+        let t = open_s3(&server(RANGES).await);
+        let nar = read_sized(&t, "large", large().len() as u64).await;
+        assert_eq!(nar.unwrap(), large());
     }
 
     #[test]

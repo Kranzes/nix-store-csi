@@ -396,7 +396,7 @@ impl Store {
         let received = self.metrics.nar_received(name);
         let part = (|| async {
             let body = (self.caches)
-                .stream(cache, info.url(), info.compression)
+                .stream(cache, info.url(), info.compression, info.file_size())
                 .await?;
             let part = Scratch::new_in(&self.tmp)?;
             let dest = part.path().join(&base);

@@ -26,6 +26,26 @@ threads, since it reads credentials and may request the rest of a broken
 download. It also undoes the compression that a cache adds to the response,
 since a resume asks for the rest from an offset in the uncompressed NAR.
 
+## Ranges
+
+A closure's fetch ends about when its largest NAR's does, and a cache that
+limits each connection, like S3, sends one NAR slower than the plugin
+decompresses it. So from a cache that supports ranges, the plugin fetches a
+compressed NAR in ranges, several at once, and decompresses them in order. It
+adds a range each time decompression catches up with one that hasn't all
+arrived, so a cache that keeps up gets two at a time. Ranges that arrive early
+wait in memory, so their number has a cap. Over HTTP/2 the ranges would share
+one connection, so after the first range the rest of the NAR comes in one
+request.
+
+The NAR still counts as one of `--max-substitution-jobs`. The jobs limit the
+NARs being decompressed and unpacked, and ranges add none. The largest NARs
+also start first, so if ranges took jobs, the NAR they help most would find
+none free.
+
+A range must come from the same version of the file as the first, by its
+`ETag` or `Last-Modified`, or the NAR starts over.
+
 ## Syncing
 
 A store path has to be on disk before the plugin can trust it after a reboot.

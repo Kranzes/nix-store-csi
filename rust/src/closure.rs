@@ -127,11 +127,12 @@ impl Caches {
         cache: usize,
         path: &str,
         compression: Compression,
+        file_size: Option<u64>,
     ) -> anyhow::Result<Box<dyn AsyncBufRead + Send + Unpin>> {
         let cache = &*self.list[cache];
         cache.transport.check(path)?;
         cache
-            .request(path, cache.transport.stream(path, compression))
+            .request(path, cache.transport.stream(path, compression, file_size))
             .await
     }
 
@@ -858,7 +859,7 @@ mod tests {
     async fn keeps_a_cache_that_lacks_a_file() {
         use crate::transport::tests::{Mode, server};
         let caches = caches(&[server(Mode::Normal).await], None);
-        let stream = |path| caches.stream(0, path, Compression::None);
+        let stream = |path| caches.stream(0, path, Compression::None, None);
         assert!(stream("missing").await.is_err());
         assert!(stream("obj").await.is_ok());
         assert!(stream("private").await.is_err());
@@ -893,7 +894,7 @@ mod tests {
         let url = format!("http://{}", closed.local_addr().unwrap());
         drop(closed);
         let caches = caches(&[url], None);
-        let stream = |path| caches.stream(0, path, Compression::None);
+        let stream = |path| caches.stream(0, path, Compression::None, None);
         assert!(stream("obj").await.is_err());
         let Err(e) = stream("other").await else {
             panic!("an unreachable cache was used right after it failed");

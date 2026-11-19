@@ -11,6 +11,12 @@
 
 - A closure's largest NARs get fetch slots first instead of waiting behind
   smaller ones.
+- From a cache that answers range requests over HTTP/1.1, like S3, a
+  compressed NAR over 4 MiB comes in 4 MiB ranges over up to 16 connections,
+  so a cache that limits each connection no longer caps it at one
+  connection's speed. Ranges that arrive before decompression needs them take
+  up to 64 MiB for each NAR. The NAR still counts once towards
+  `--max-substitution-jobs`.
 
 ## 0.1.16 - 2026-11-19
 

@@ -33,9 +33,10 @@ Mounted volumes keep working while a node's plugin restarts, as in a rollout.
 
 ## Running the plugin
 
-The plugin unpacks NARs on one thread per CPU, up to `--max-substitution-jobs`
-(16 by default). A CPU limit in `resources.limits` counts as whole CPUs,
-so `2500m` gives 2 threads.
+The plugin unpacks NARs on one thread per CPU, up to three times
+`--max-substitution-jobs` (16 by default), since it decompresses, hashes and
+parses a NAR on three threads. A CPU limit in `resources.limits` counts as
+whole CPUs, so `2500m` gives 2 threads.
 
 ### Private caches
 

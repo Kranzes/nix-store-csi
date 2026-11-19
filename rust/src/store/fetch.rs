@@ -662,6 +662,11 @@ impl std::fmt::Display for StoreTooBig {
 
 impl std::error::Error for StoreTooBig {}
 
+/// How many tasks [`unpack_nar`] keeps busy on the sandbox's workers, to
+/// decompress, hash and parse a NAR. Harmonia writes the files from a blocking
+/// thread, which isn't a worker.
+pub(super) const UNPACK_TASKS: usize = 3;
+
 /// Unpacks the NAR at `dest` as it streams in, with Nix's canonical modes and
 /// modification time, and fails unless its size and hash match. The caller
 /// moves the tree into the store only after that.

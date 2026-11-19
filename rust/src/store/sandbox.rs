@@ -24,10 +24,9 @@ use tracing::error;
 pub(super) struct Sandbox(Option<Runtime>);
 
 impl Sandbox {
-    /// Starts a worker per CPU, but no more than `jobs`, since each NAR
-    /// keeps only a few tasks busy. Fails unless the kernel can enforce the
-    /// rules.
-    pub fn new(dir: &Path, jobs: usize) -> anyhow::Result<Self> {
+    /// Starts a worker per CPU, but no more than `tasks`, the tasks that can
+    /// be busy at once. Fails unless the kernel can enforce the rules.
+    pub fn new(dir: &Path, tasks: usize) -> anyhow::Result<Self> {
         let rules = Arc::new(Rules::new(dir)?);
         let probe = rules.clone();
         std::thread::spawn(move || probe.confine())
@@ -35,7 +34,7 @@ impl Sandbox {
             .expect("confining a thread does not panic")?;
         let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(cpus.min(jobs))
+            .worker_threads(cpus.min(tasks))
             .thread_name("unpack")
             .on_thread_start(move || {
                 // A thread that a confined thread spawns inherits the rules.
@@ -177,10 +176,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn starts_no_more_workers_than_jobs() {
+    async fn starts_no_more_workers_than_tasks() {
         let tmp = scratch();
-        let workers = |jobs| {
-            let sandbox = Sandbox::new(tmp.path(), jobs).unwrap();
+        let workers = |tasks| {
+            let sandbox = Sandbox::new(tmp.path(), tasks).unwrap();
             sandbox.0.as_ref().unwrap().metrics().num_workers()
         };
         assert_eq!(workers(1), 1);

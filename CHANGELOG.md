@@ -17,6 +17,9 @@
   connection's speed. Ranges that arrive before decompression needs them take
   up to 64 MiB for each NAR. The NAR still counts once towards
   `--max-substitution-jobs`.
+- The plugin unpacks NARs on up to three threads per job instead of one,
+  still at most one per CPU, so a NAR's decompression, hashing and parsing
+  each get a thread.
 
 ## 0.1.16 - 2026-11-19
 

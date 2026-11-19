@@ -25,7 +25,7 @@ use rustix::fs::{AtFlags, CWD, FlockOperation, Timespec, Timestamps, UTIME_NOW, 
 use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore};
 use tracing::{info, warn};
 
-use self::fetch::Underway;
+use self::fetch::{UNPACK_TASKS, Underway};
 use self::fs::{Scratch, remove_file, remove_tree};
 use self::gc::Space;
 use self::holds::Holds;
@@ -231,7 +231,7 @@ impl Store {
             measured: Mutex::default(),
             view_sizes: Mutex::default(),
             mountpoints: Mutex::new(Arc::new([])),
-            sandbox: Sandbox::new(&tmp, config.jobs)?,
+            sandbox: Sandbox::new(&tmp, config.jobs.saturating_mul(UNPACK_TASKS))?,
             tmp,
             jobs: Arc::new(Semaphore::new(config.jobs)),
             max_jobs: config.jobs,

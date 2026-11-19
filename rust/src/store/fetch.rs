@@ -389,7 +389,8 @@ impl Store {
         let info = &entry.info;
         let name = self.caches.name(cache);
         let url = transport::display_url(name, info.url());
-        debug!(cache = %name, %url, nar_size = info.nar_size(), "fetching NAR");
+        let (nar_size, started) = (info.nar_size(), Instant::now());
+        debug!(cache = %name, %url, nar_size, "fetching NAR");
         let failed_syncs = self.failed_syncs.load(Ordering::SeqCst);
         let base = info.path().to_string();
         let received = self.metrics.nar_received(name);
@@ -458,8 +459,10 @@ impl Store {
             }
         }
         if let Some(size) = &self.size {
-            size.fetch_add(info.nar_size(), Ordering::Relaxed);
+            size.fetch_add(nar_size, Ordering::Relaxed);
         }
+        let elapsed_ms = started.elapsed().as_millis();
+        debug!(cache = %name, %url, nar_size, elapsed_ms, "fetched NAR");
         Ok(())
     }
 }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Each fetched NAR logs `fetched NAR` at debug level, with the fields of
+  `fetching NAR` and `elapsed_ms`.
+
 ### Changed
 
 - A closure's largest NARs get fetch slots first instead of waiting behind

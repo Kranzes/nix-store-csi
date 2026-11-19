@@ -607,7 +607,8 @@ impl Transport {
 
     /// A reader for the NAR at `path`, which the narinfo says has
     /// `compression` and `file_size`. Over HTTP, it [`resuming`]s, and a
-    /// compressed NAR over [`PART`] may come [`ranged`].
+    /// compressed NAR over [`PART`], or without a `file_size`, may come
+    /// [`ranged`].
     pub async fn stream(
         &self,
         path: &str,
@@ -632,8 +633,9 @@ impl Transport {
                 // file as stored, even when S3 gives it a `Content-Encoding`.
                 let decode = compression == Compression::None;
                 // An uncompressed NAR may come compressed on the fly, which
-                // ranges would lose.
-                let body = if !decode && file_size.is_some_and(|size| size > PART) {
+                // ranges would lose. Without a `FileSize`, the first range
+                // gives the length.
+                let body = if !decode && file_size.is_none_or(|size| size > PART) {
                     ranged(http, url).await?
                 } else {
                     tracing::debug!(%url, plan = "one stream", ?compression, "chose how to fetch the NAR");
@@ -952,7 +954,8 @@ async fn resume(
 /// How [`ranged`] reads a file, by the response to [`Span::FIRST`].
 #[derive(Debug, PartialEq)]
 enum Plan {
-    /// The response holds the whole file.
+    /// The response holds the whole file, from a cache that ignored the
+    /// range or a file no bigger than it.
     Whole,
     /// Without a range or a validator, the whole file comes in one request.
     Again,
@@ -975,18 +978,23 @@ impl Plan {
 }
 
 fn plan(resp: &reqwest::Response) -> Plan {
-    let validator = validator(resp, Compression::None);
-    let (Some(len), Some(validator)) = (Span::FIRST.answered(resp), validator) else {
-        return if resp.status() == StatusCode::OK {
-            Plan::Whole
-        } else {
-            Plan::Again
-        };
-    };
-    if resp.version() != reqwest::Version::HTTP_11 && len > PART {
-        return Plan::Rest(validator);
+    if resp.status() == StatusCode::OK {
+        return Plan::Whole;
     }
-    Plan::Ranges(len, validator)
+    let Some(len) = Span::FIRST.answered(resp) else {
+        return Plan::Again;
+    };
+    if len <= PART {
+        return Plan::Whole;
+    }
+    let Some(validator) = validator(resp, Compression::None) else {
+        return Plan::Again;
+    };
+    if resp.version() == reqwest::Version::HTTP_11 {
+        Plan::Ranges(len, validator)
+    } else {
+        Plan::Rest(validator)
+    }
 }
 
 /// Reads the file at `url` by its [`plan`].
@@ -1288,12 +1296,12 @@ pub(crate) mod tests {
         },
         /// A cache that answers only `/nix-cache-info`.
         Hangs,
-        /// Serves `/large` in any range with an `ETag`, and breaks off the
-        /// fourth response halfway. With `replaced`, `/large` is another file
-        /// with another `ETag` from the second request on, and a range whose
-        /// `If-Range` names the old one gets all of the new one, or with
-        /// `ignores_if_range` the range of the new one. Serves `/dated` with
-        /// only a `Last-Modified`, which its ranges leave out, and
+        /// Serves `/large` and `/obj` in any range with an `ETag`, and breaks
+        /// off the fourth response halfway. With `replaced`, `/large` is
+        /// another file with another `ETag` from the second request on, and a
+        /// range whose `If-Range` names the old one gets all of the new one,
+        /// or with `ignores_if_range` the range of the new one. Serves `/dated`
+        /// with only a `Last-Modified`, which its ranges leave out, and
         /// `/unvalidated` without a validator. With `slow`, it answers each
         /// request after 1 ms.
         Ranges {
@@ -1426,7 +1434,7 @@ pub(crate) mod tests {
                 );
                 Some(false)
             }
-            Mode::Ranges { replaced, .. } if path == "/large" => {
+            Mode::Ranges { replaced, .. } if matches!(path, "/large" | "/obj") => {
                 let etag = if replaced && hit > 0 {
                     body.reverse();
                     r#""z""#
@@ -1928,31 +1936,51 @@ pub(crate) mod tests {
         slow: false,
     };
 
-    async fn read_sized(t: &Transport, path: &str, file_size: u64) -> anyhow::Result<Vec<u8>> {
-        read_nar(t, path, Compression::Zstd, Some(file_size)).await
+    async fn read_sized(
+        t: &Transport,
+        path: &str,
+        file_size: Option<u64>,
+    ) -> anyhow::Result<Vec<u8>> {
+        read_nar(t, path, Compression::Zstd, file_size).await
     }
 
-    /// A compressed NAR over `PART` comes in ranges, in order, and a range
-    /// that breaks off resumes. A cache without ranges or validators sends
-    /// it whole.
+    /// A compressed NAR over `PART` or without a `FileSize` comes in ranges,
+    /// in order, and a range that breaks off resumes. A cache without ranges
+    /// or validators sends it whole.
     #[tokio::test]
     async fn http_reads_in_ranges() {
         let size = large().len() as u64;
         let parts = usize::try_from(size.div_ceil(PART)).unwrap();
         for (mode, path, file_size, requests) in [
-            (RANGES, "large", size, parts + 1),
-            (RANGES, "large", PART, 1),
-            (RANGES, "dated", size, parts + 1),
-            (RANGES, "unvalidated", size, 2),
-            (Mode::Normal, "large", size, 1),
+            (RANGES, "large", Some(size), parts + 1),
+            (RANGES, "large", None, parts + 1),
+            (RANGES, "large", Some(PART), 1),
+            (RANGES, "dated", Some(size), parts + 1),
+            (RANGES, "unvalidated", Some(size), 2),
+            (Mode::Normal, "large", Some(size), 1),
+            (Mode::Normal, "large", None, 1),
         ] {
             let (base, hits) = server_counting(mode).await;
             let t = open(&base).unwrap();
             let nar = read_sized(&t, path, file_size).await;
-            let nar = nar.unwrap_or_else(|e| panic!("{path} {file_size}: {e:#}"));
-            assert_eq!(nar, large(), "{path} {file_size}");
-            assert_eq!(hits.load(Ordering::SeqCst), requests, "{path} {file_size}");
+            let nar = nar.unwrap_or_else(|e| panic!("{path} {file_size:?}: {e:#}"));
+            assert_eq!(nar, large(), "{path} {file_size:?}");
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                requests,
+                "{path} {file_size:?}"
+            );
         }
+    }
+
+    /// Without a `FileSize`, a NAR that fits in the first range takes no
+    /// other request.
+    #[tokio::test]
+    async fn http_reads_a_small_nar_without_file_size() {
+        let (base, hits) = server_counting(RANGES).await;
+        let t = open(&base).unwrap();
+        assert_eq!(read_sized(&t, "obj", None).await.unwrap(), BODY);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     /// A file replaced during a download in ranges fails it, whether the
@@ -1966,7 +1994,7 @@ pub(crate) mod tests {
                 slow: false,
             };
             let t = open(&server(mode).await).unwrap();
-            let err = read_sized(&t, "large", large().len() as u64).await;
+            let err = read_sized(&t, "large", Some(large().len() as u64)).await;
             let err = err.unwrap_err();
             assert!(broke_off(&err), "{err:#}");
             assert!(format!("{err:#}").contains("changed"), "{err:#}");
@@ -2011,15 +2039,9 @@ pub(crate) mod tests {
             ))
         };
         assert_eq!(ranged(Version::HTTP_2, &first), Plan::Rest(etag.clone()));
-        assert_eq!(
-            ranged(Version::HTTP_11, &first),
-            Plan::Ranges(len, etag.clone())
-        );
+        assert_eq!(ranged(Version::HTTP_11, &first), Plan::Ranges(len, etag));
         // A file that fits in the first range needs no other request.
-        assert_eq!(
-            ranged(Version::HTTP_2, "bytes 0-99/100"),
-            Plan::Ranges(100, etag)
-        );
+        assert_eq!(ranged(Version::HTTP_11, "bytes 0-99/100"), Plan::Whole);
         let whole = response(Version::HTTP_2, 200, &[(ETAG, r#""x""#)]);
         assert_eq!(plan(&whole), Plan::Whole);
         let unvalidated = response(Version::HTTP_2, 206, &[(CONTENT_RANGE, &first)]);
@@ -2057,7 +2079,7 @@ pub(crate) mod tests {
         for (nars, caps) in [(1, 2..=PARTS), (4, PARTS + 1..=permits)] {
             let (base, _, load) = serve(slow).await;
             let t = open_with(&base, permits).unwrap();
-            let reads = (0..nars).map(|_| read_sized(&t, "large", size));
+            let reads = (0..nars).map(|_| read_sized(&t, "large", Some(size)));
             for nar in futures::future::join_all(reads).await {
                 assert_eq!(nar.unwrap(), large());
             }
@@ -2201,7 +2223,7 @@ pub(crate) mod tests {
         assert_eq!(read_all(&t, "obj").await.unwrap(), BODY);
         // So does each range.
         let t = open_s3(&server(RANGES).await);
-        let nar = read_sized(&t, "large", large().len() as u64).await;
+        let nar = read_sized(&t, "large", Some(large().len() as u64)).await;
         assert_eq!(nar.unwrap(), large());
     }
 

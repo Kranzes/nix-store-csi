@@ -636,6 +636,7 @@ impl Transport {
                 let body = if !decode && file_size.is_some_and(|size| size > PART) {
                     ranged(http, url).await?
                 } else {
+                    tracing::debug!(%url, plan = "one stream", ?compression, "chose how to fetch the NAR");
                     let encodings = if decode { ENCODINGS } else { IDENTITY };
                     let resp = http.fetch(&url, encodings, None).await?;
                     resuming(http.clone(), url, resp, decode, None)
@@ -962,6 +963,17 @@ enum Plan {
     Ranges(u64, Validator),
 }
 
+impl Plan {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Whole => "whole file",
+            Self::Again => "whole file again",
+            Self::Rest(_) => "first range, then the rest",
+            Self::Ranges(..) => "ranges",
+        }
+    }
+}
+
 fn plan(resp: &reqwest::Response) -> Plan {
     let validator = validator(resp, Compression::None);
     let (Some(len), Some(validator)) = (Span::FIRST.answered(resp), validator) else {
@@ -979,14 +991,26 @@ fn plan(resp: &reqwest::Response) -> Plan {
 
 /// Reads the file at `url` by its [`plan`].
 async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::Result<Bytes>>> {
+    let waiting = Instant::now();
     let permit = http.ranges.clone().acquire_owned().await?;
+    let permit_wait = waiting.elapsed();
     let resp = http
         .fetch(&url, IDENTITY, Some((Span::FIRST, None)))
         .await?;
-    let (len, validator) = match plan(&resp) {
+    let plan = plan(&resp);
+    tracing::debug!(
+        %url,
+        plan = plan.name(),
+        status = resp.status().as_u16(),
+        version = ?resp.version(),
+        content_range = ?resp.headers().get(CONTENT_RANGE),
+        validator = ?validator(&resp, Compression::None).map(|Validator(name, _)| name),
+        permit_wait_ms = permit_wait.as_millis(),
+        "chose how to fetch the NAR"
+    );
+    let (len, validator) = match plan {
         Plan::Whole => return Ok(resuming(http.clone(), url, resp, false, None)),
         Plan::Again => {
-            tracing::debug!(%url, status = %resp.status(), "fetching the NAR in one stream");
             drop((permit, resp));
             let resp = http.fetch(&url, IDENTITY, None).await?;
             return Ok(resuming(http.clone(), url, resp, false, None));
@@ -1002,6 +1026,8 @@ async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::
         next: 0,
         parts: VecDeque::new(),
         window: 2,
+        most: 0,
+        permit_wait,
     };
     ranges.push(permit, Some(resp));
     Ok(futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed())
@@ -1045,6 +1071,10 @@ struct Ranges {
     /// How many ranges may be in flight, which grows while the reader waits
     /// for them.
     window: usize,
+    /// For the debug line at the end: the most ranges in flight at once, and
+    /// the time spent waiting for permits.
+    most: usize,
+    permit_wait: Duration,
 }
 
 struct Part {
@@ -1063,6 +1093,7 @@ impl Ranges {
             last: Some(last),
         };
         self.next = last + 1;
+        self.most = self.most.max(self.parts.len() + 1);
         let (tx, chunks) = mpsc::unbounded_channel();
         let (http, url, validator) = (self.http.clone(), self.url.clone(), self.validator.clone());
         let task = tokio::spawn(async move {
@@ -1092,8 +1123,9 @@ impl Ranges {
             // Only the range that the reader needs next waits for a permit, so
             // a NAR that holds permits can always use them.
             if self.parts.is_empty() && self.next < self.len {
-                let permits = self.http.ranges.clone();
+                let (permits, waiting) = (self.http.ranges.clone(), Instant::now());
                 let permit = permits.acquire_owned().await.map_err(io::Error::other)?;
+                self.permit_wait += waiting.elapsed();
                 self.push(permit, None);
             }
             while self.parts.len() < self.window && self.next < self.len {
@@ -1103,6 +1135,9 @@ impl Ranges {
                 self.push(permit, None);
             }
             let Some(head) = self.parts.front_mut() else {
+                let (url, ranges, most) = (&self.url, self.len.div_ceil(PART), self.most);
+                let permit_wait_ms = self.permit_wait.as_millis();
+                tracing::debug!(%url, ranges, most, permit_wait_ms, "fetched the NAR in ranges");
                 return Ok(None);
             };
             if let Some(chunk) = head.chunks.recv().await {

@@ -1,6 +1,7 @@
 //! The command line, which `docs/CLI.md` copies.
 
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -79,19 +80,33 @@ pub struct Cli {
     )]
     pub log_format: LogFormat,
 
-    /// NARs to fetch at once. A NAR that comes in ranges over several
-    /// connections counts once.
+    /// NARs to fetch at once, by default twice the CPUs, from 8 to 64. A NAR
+    /// that comes in ranges over several connections counts once.
     #[arg(
         long,
         value_name = "N",
         env = "NIX_STORE_CSI_MAX_SUBSTITUTION_JOBS",
-        default_value = "16",
         global = true
     )]
-    pub max_substitution_jobs: std::num::NonZeroUsize,
+    pub max_substitution_jobs: Option<NonZeroUsize>,
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// `--max-substitution-jobs`, or else [`default_jobs`] for the CPUs this
+    /// process may use.
+    pub fn jobs(&self) -> usize {
+        let cpus = || std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        (self.max_substitution_jobs).map_or_else(|| default_jobs(cpus()), NonZeroUsize::get)
+    }
+}
+
+/// A closure of many small NARs fetches faster with more jobs, up to about
+/// 64, and one whose largest NAR sets the time fetches a little slower.
+fn default_jobs(cpus: usize) -> usize {
+    cpus.saturating_mul(2).clamp(8, 64)
 }
 
 #[derive(Subcommand)]
@@ -327,6 +342,19 @@ mod tests {
             "--serve-paths",
         ];
         Cli::try_parse_from(csi).unwrap();
+    }
+
+    #[test]
+    fn defaults_jobs_to_twice_the_cpus() {
+        let jobs: Vec<_> = [1, 4, 16, 32, 192].map(default_jobs).into();
+        assert_eq!(jobs, [8, 8, 32, 64, 64]);
+        let cli = Cli::try_parse_from([
+            "nix-store-csi",
+            "--max-substitution-jobs=3",
+            "unpack",
+            "hello",
+        ]);
+        assert_eq!(cli.unwrap().jobs(), 3);
     }
 
     #[test]

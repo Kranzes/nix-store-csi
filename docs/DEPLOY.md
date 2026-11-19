@@ -33,10 +33,23 @@ Mounted volumes keep working while a node's plugin restarts, as in a rollout.
 
 ## Running the plugin
 
-The plugin unpacks NARs on one thread per CPU, up to three times
-`--max-substitution-jobs` (16 by default), since it decompresses, hashes and
-parses a NAR on three threads. A CPU limit in `resources.limits` counts as
-whole CPUs, so `2500m` gives 2 threads.
+`--max-substitution-jobs` sets how many NARs the plugin fetches at once, by
+default twice the CPUs, from 8 to 64. Set it in `extraArgs` to change it.
+How many jobs pay off depends on the closure:
+
+- With a few large NARs, the job count barely matters. The largest NAR takes
+  the first slot, and the fetch ends about when it does.
+- With many small NARs, more jobs help, up to about 64. Past that, a node
+  fetches them slower.
+
+`nix_store_csi_nar_fetches_in_flight` sitting at the limit during a fetch is
+not by itself a reason to raise it. A closure of thousands of small NARs keeps
+every slot busy at any job count.
+
+The plugin unpacks NARs on one thread per CPU, up to three for each job, since
+it decompresses, hashes and parses a NAR on three threads. A CPU limit in
+`resources.limits` counts as whole CPUs, so `2500m` gives 2 threads and 8
+jobs.
 
 ### Private caches
 

@@ -104,8 +104,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let config = Config {
         stores,
         trusted_keys: (!cli.no_require_sigs).then_some(trusted_keys),
+        jobs: cli.jobs(),
         state_dir: cli.state_dir,
-        jobs: cli.max_substitution_jobs.get(),
         netrc_file: cli.netrc_file,
         max_closure_size: None,
         max_store_size: None,

@@ -20,6 +20,8 @@
 - The plugin unpacks NARs on up to three threads per job instead of one,
   still at most one per CPU, so a NAR's decompression, hashing and parsing
   each get a thread.
+- `--max-substitution-jobs` defaults to twice the CPUs, from 8 to 64, instead
+  of 16, so nodes with more CPUs fetch closures of many small NARs faster.
 
 ## 0.1.16 - 2026-11-19
 

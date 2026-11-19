@@ -119,7 +119,8 @@
           "prefetch": { "$ref": "#/properties/prefetch" },
           "prefetchConfigMap": { "$ref": "#/properties/prefetchConfigMap" },
           "inheritPrefetch": { "type": "boolean" },
-          "maxStoreSize": { "$ref": "#/properties/maxStoreSize" }
+          "maxStoreSize": { "$ref": "#/properties/maxStoreSize" },
+          "stateDir": { "$ref": "#/properties/stateDir" }
         }
       }
     },
@@ -210,7 +211,7 @@
       }
     },
     "kubeletDir": { "type": "string", "pattern": "^/" },
-    "stateDir": { "type": "string", "pattern": "^/" },
+    "stateDir": { "type": "string", "pattern": "^(/[^/]+)+/?$" },
     "updateStrategy": {
       "type": "object",
       "additionalProperties": false,

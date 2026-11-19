@@ -48,7 +48,8 @@ pub struct Cli {
     )]
     pub netrc_file: Option<PathBuf>,
 
-    /// Directory that holds the node store in `store/`.
+    /// Directory that holds the node store in `store/`. The plugin creates it
+    /// but not its parent.
     #[arg(
         long,
         value_name = "DIR",

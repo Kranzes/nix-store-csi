@@ -268,10 +268,13 @@ nodePools:
 - A pool's `maxStoreSize` replaces the top-level one on its nodes, and an
   empty value turns the limit off for the pool. A percentage already fits
   pools with different disks.
+- A pool's `stateDir` replaces the top-level one, as in
+  [State dir](#state-dir).
 - A node that matches more than one pool goes to the first pool by name.
 - If a node's labels move it to another pool, Kubernetes replaces its plugin
-  with the other pool's. The node store stays, and mounted volumes keep
-  working.
+  with the other pool's. If the pools have the same `stateDir`, the node store
+  stays, and mounted volumes keep working. Otherwise,
+  [State dir](#state-dir) has what happens.
 
 A closure that every node needs, like a log shipper, goes in `prefetch` and in
 each pool's list, unless the pools set `inheritPrefetch`. Their nodes read the
@@ -311,6 +314,52 @@ For a top-level list, match the pools that inherit it too, as in
 
 Without the PodMonitor, copy the `nix-store-csi/pool` label of the plugin's
 pods into the metrics in your own scrape config.
+
+### State dir
+
+The node store and the views that volumes mount are in `stateDir`,
+`/var/lib/nix-store-csi` by default. Mounted volumes keep using it while the
+plugin restarts, so it has to be on a filesystem that outlives the plugin's
+pod. It may be lost with the node, like an instance store, since the node's
+volumes are lost with it too.
+
+On nodes with a small root disk, a pool's `stateDir` can put it on a bigger
+disk:
+
+```yaml
+# values.yaml
+nodePools:
+  local-nvme:
+    nodeSelector:
+      karpenter.sh/nodepool: local-nvme
+    stateDir: /mnt/instance-store/nix-store-csi
+```
+
+- Kubelet creates the dir, but its parent has to exist. Until it does, the
+  plugin's pod stays in `ContainerCreating`, and its events name the parent.
+  If the disk's mountpoint exists while the disk isn't mounted, set `stateDir`
+  one level deeper, like `/mnt/instance-store/nix-store-csi/state`, and create
+  `/mnt/instance-store/nix-store-csi` on the disk once it is mounted.
+- The dir can't be a symlink to a dir outside its parent, since kubelet mounts
+  it as a subPath of the parent. The pod's events then say `failed to prepare
+  subPath for volumeMount "state"`. Set `stateDir` to the link's target.
+  Symlinks among its parents are fine.
+- The chart refuses a `stateDir` in `kubeletDir`. Where kubelet's dir is bound
+  onto a bigger disk, like a RAID of instance stores, put `stateDir` on the
+  disk's own mountpoint.
+
+A node's plugin can start with another state dir than before, after its pool's
+`stateDir` changes or the node moves to a pool with another one. The new dir
+starts empty, so the node fetches closures again, and new volumes mount from
+it. Volumes mounted from views in the old dir keep working, and kubelet
+unpublishes them as usual. At start, the plugin logs a warning with the old
+dir, as a path in its filesystem, its device and the number of those volumes.
+The `other_state_dir_volumes` metric counts them.
+
+For those volumes, the plugin adds no [mountpoints](PODS.md#nixos-nodes) to
+their views and reports no volume stats. It never deletes the old state dir,
+which stays until you remove it or the node is replaced. Nothing uses it once
+the pods from before the change are gone.
 
 ### Scheduling by closure
 
@@ -548,6 +597,7 @@ Every metric starts with `nix_store_csi_`:
 | `unsynced_paths` | gauge | |
 | `failed_syncs_total` | counter | |
 | `views` | gauge | |
+| `other_state_dir_volumes` | gauge | |
 | `free_bytes` | gauge | |
 | `free_inodes` | gauge | |
 | `ensure_free_bytes` | gauge | |

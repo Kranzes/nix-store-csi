@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `nodePools.<pool>.stateDir` replaces `stateDir` on a pool's nodes, for nodes
+  whose bigger disk is mounted elsewhere, like an instance store.
+- When volumes on a node are mounted from views in another state dir, like
+  after a change of `stateDir`, the plugin logs a warning at start with that
+  dir, its device and the number of volumes.
+  `nix_store_csi_other_state_dir_volumes` counts them. Kubelet unpublishes
+  them as usual. The plugin adds no mountpoints to their views and never
+  deletes the old dir.
+
+### Changed
+
+- A `stateDir` that is a symlink to a dir outside its parent no longer works.
+  The chart now mounts the state dir as a subPath of its parent, and kubelet
+  refuses a subPath that resolves outside the volume. The plugin's pod then
+  fails with `failed to prepare subPath for volumeMount "state"`. Set
+  `stateDir` to the link's target. Since every DaemonSet renders differently,
+  the upgrade restarts every plugin pod, as a new image does anyway.
+- Neither the plugin nor the chart creates the state dir's parent any more.
+  The plugin's pod stays in `ContainerCreating` until the parent exists, and
+  its events name it. The chart refuses a `stateDir` in `kubeletDir`.
+
 ## 0.1.15 - 2026-11-19
 
 ### Added

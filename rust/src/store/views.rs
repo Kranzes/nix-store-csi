@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CStr, CString, OsStr, OsString};
+use std::ffi::{CStr, CString, OsString};
 use std::fmt::Write as _;
 use std::fs::Permissions;
 use std::io;
@@ -13,7 +13,8 @@ use std::sync::{Arc, PoisonError};
 use anyhow::{Context, bail, ensure};
 use foldhash::{HashSet, HashSetExt};
 use harmonia_store_path::{StoreDir, StorePath};
-use harmonia_utils_hash::{Algorithm, HashFormat};
+use harmonia_utils_hash::fmt::Base32;
+use harmonia_utils_hash::{Algorithm, Hash, HashFormat};
 use rayon::prelude::*;
 use rustix::fs::{
     AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, Timespec, Timestamps, UTIME_OMIT, fchmod,
@@ -460,8 +461,7 @@ impl Store {
 
     /// The newest generation of the views in views/.
     pub(super) fn newest_generation(&self) -> anyhow::Result<u64> {
-        let generation = |name: &OsStr| name.to_str()?.split_once('-')?.0.parse().ok();
-        let generations = list_names(&self.views, generation)?;
+        let generations = list_names(&self.views, |name| view_generation(name.to_str()?))?;
         Ok(generations.into_iter().max().unwrap_or_default())
     }
 }
@@ -497,6 +497,14 @@ fn view_key(generation: u64, links: &BTreeMap<&str, &StorePath>, paths: &[StoreP
     text.pop();
     let hash = Algorithm::SHA256.digest(text);
     format!("{generation}-{}", hash.as_base32().as_bare())
+}
+
+/// The generation of a view named `name`, if [`view_key`] could make that
+/// name.
+pub fn view_generation(name: &str) -> Option<u64> {
+    let (generation, hash) = name.split_once('-')?;
+    Base32::<Hash>::parse(Algorithm::SHA256, hash).ok()?;
+    generation.parse().ok()
 }
 
 /// Makes `dir` with a relative symlink to each root, so the links also
@@ -874,10 +882,15 @@ mod tests {
         ]
         .map(|p| StorePath::from_base_path(p).unwrap());
         let links = root_links(&paths[..2]).unwrap();
+        let key = view_key(3, &links, &paths);
         assert_eq!(
-            view_key(3, &links, &paths),
+            key,
             "3-04d1rq8d54408hyaxvaadn844xwai6hzs4j6ymnfk68x4dnqnysj"
         );
+        assert_eq!(view_generation(&key), Some(3));
+        for name in [&key[2..], &key.replace('3', "x"), &key.replace('4', "e")] {
+            assert_eq!(view_generation(name), None, "{name}");
+        }
     }
 
     /// Symlinks in store objects often point at store paths the node store

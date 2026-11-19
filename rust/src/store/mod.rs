@@ -38,7 +38,7 @@ use crate::narinfo::PublicKey;
 pub use self::fetch::{Ensuring, StoreTooBig, TooBig};
 pub use self::gc::{Excess, Size};
 pub use self::narinfos::Narinfos;
-pub use self::views::{Mountpoint, Usage, check_volume, root_links};
+pub use self::views::{Mountpoint, Usage, check_volume, root_links, view_generation};
 
 /// The kernel's id for the current boot, which a reboot changes.
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
@@ -187,7 +187,12 @@ impl Store {
     /// Call it within a Tokio runtime, since caches open in the background.
     pub fn new(config: Config) -> anyhow::Result<Self> {
         let state = &config.state_dir;
-        std::fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
+        // Not its parent, which may be missing because a disk is not mounted
+        // yet.
+        match std::fs::create_dir(state) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            result => result.with_context(|| format!("creating {}", state.display()))?,
+        }
         let lock = std::fs::File::create(state.join("lock"))
             .with_context(|| format!("creating {}", state.join("lock").display()))?;
         if flock(&lock, FlockOperation::NonBlockingLockExclusive).is_err() {
@@ -477,6 +482,10 @@ impl Store {
         &self.dir
     }
 
+    pub fn views(&self) -> &Path {
+        &self.views
+    }
+
     pub fn changes(&self) -> u64 {
         self.changes.load(Ordering::SeqCst)
     }
@@ -754,6 +763,21 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(file_names(&newer), ["lock", "version"]);
+    }
+
+    #[tokio::test]
+    async fn creates_no_parent_of_the_state_dir() {
+        let tmp = scratch();
+        let state = tmp.path().join("disk/nix-store-csi");
+        let err = Store::new(unsigned_config(tmp.path(), &state))
+            .err()
+            .unwrap();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains(&format!("creating {}: ", state.display())),
+            "{err}"
+        );
+        assert!(!tmp.path().join("disk").exists());
     }
 
     /// A sync renames the narinfos of only those marked paths that are in

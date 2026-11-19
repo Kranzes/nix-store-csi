@@ -77,13 +77,15 @@ prefetchConfigMap: ""
 # prefetchConfigMap, instead of the top-level ones. With inheritPrefetch, a
 # pool's nodes read the top-level lists too, so a closure that every node needs
 # goes in those once. A pool's maxStoreSize replaces the top-level one on its
-# nodes, and an empty one turns the limit off there. Each pool gets its own
-# DaemonSet on the nodes that match its nodeSelector and the top-level one. A
-# node that matches more than one pool goes to the first by name.
+# nodes, and an empty one turns the limit off there. A pool's stateDir replaces
+# the top-level one too. Each pool gets its own DaemonSet on the nodes that
+# match its nodeSelector and the top-level one. A node that matches more than
+# one pool goes to the first by name.
 #   gpu:
 #     nodeSelector:
 #       karpenter.sh/nodepool: gpu
 #     maxStoreSize: 2T
+#     stateDir: /mnt/instance-store/nix-store-csi
 #     inheritPrefetch: true
 #     prefetch:
 #       storePaths.x86_64-linux.trainer: /nix/store/<hash>-trainer
@@ -231,6 +233,10 @@ locality:
       memory: 128Mi
 
 kubeletDir: /var/lib/kubelet
+# The dir that holds the node store and the views of mounted volumes. It has to
+# be outside kubeletDir, and its parent has to exist, since kubelet creates only
+# the dir itself. docs/DEPLOY.md has what happens when a node's state dir
+# changes.
 stateDir: /var/lib/nix-store-csi
 
 # A number of nodes or a percentage, like 10%. maxSurge stays 0, since a second

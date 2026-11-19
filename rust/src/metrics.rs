@@ -26,6 +26,7 @@ use tokio::net::TcpListener;
 use tracing::warn;
 
 use crate::http::{self, response};
+use crate::mounts;
 use crate::store::Store;
 use crate::store_path::system;
 
@@ -375,6 +376,7 @@ impl fmt::Debug for StoreGauges {
 }
 
 impl Collector for StoreGauges {
+    #[expect(clippy::too_many_lines, reason = "one call for each gauge")]
     fn encode(&self, mut encoder: DescriptorEncoder) -> fmt::Result {
         let gauges = self.store.gauges();
         let mut gauge = |name, help, unit, value: Option<u64>| {
@@ -423,6 +425,16 @@ impl Collector for StoreGauges {
             "Views, one for each closure that volumes use",
             None,
             gauges.views.and_then(count),
+        )?;
+        let other_volumes = (mounts::other_state_dirs(self.store.views()))
+            .map(|dirs| dirs.iter().map(|dir| dir.volumes).sum())
+            .inspect_err(|e| warn!("{e:#}; leaving the other state dirs' gauge out"))
+            .ok();
+        gauge(
+            "other_state_dir_volumes",
+            "Volumes mounted from views in another state dir than --state-dir",
+            None,
+            other_volumes.and_then(count),
         )?;
         gauge(
             "free",

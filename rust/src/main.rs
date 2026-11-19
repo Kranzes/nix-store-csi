@@ -141,6 +141,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 ..config
             };
             let store = Arc::new(Store::new(config)?);
+            // Kubelet unpublishes these volumes as usual, but the plugin keeps
+            // track only of the views in its state dir.
+            match mounts::other_state_dirs(store.views()) {
+                Ok(dirs) => {
+                    for dir in dirs {
+                        warn!(
+                            state_dir = %dir.path.display(),
+                            device = %dir.source,
+                            mounted = dir.volumes,
+                            "volumes are mounted from views in another state dir; adding no mountpoints to them, and leaving that dir in place"
+                        );
+                    }
+                }
+                Err(e) => warn!("{e:#}; skipping the check for volumes from other state dirs"),
+            }
             let mountpoints =
                 Mountpoints::new(&mountpoints.unwrap_or_default(), host_root.as_deref())?;
             store.prune_views(mounts::is_bound).await?;

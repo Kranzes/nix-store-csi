@@ -1,4 +1,5 @@
 {{- $socketDir := printf "%s/plugins/nix-store-csi" .Values.kubeletDir }}
+{{- $kubeletDir := clean .Values.kubeletDir }}
 {{- /* The locality extender reads the plugins' metrics port. */}}
 {{- $servesMetrics := or .Values.metrics.enabled .Values.locality.enabled }}
 {{- $keys := .Values.trustedPublicKeys | join " " | trim }}
@@ -10,8 +11,8 @@
 {{- end }}
 {{- /*
 One DaemonSet for the nodes outside every pool, and one for each pool. A node
-that matches more than one pool goes to the first by name, since a second
-plugin on a node can't take the state dir's lock.
+that matches more than one pool goes to the first by name, since only one
+plugin can serve a node.
 */}}
 {{- $top := dict
   "name" (printf "%s-node" $.Release.Name)
@@ -21,7 +22,8 @@ plugin on a node can't take the state dir's lock.
   "prefetchConfigMap" $.Values.prefetchConfigMap
   "configMap" (printf "%s-prefetch" $.Release.Name)
   "inherits" false
-  "maxStoreSize" $.Values.maxStoreSize }}
+  "maxStoreSize" $.Values.maxStoreSize
+  "stateDir" $.Values.stateDir }}
 {{- $daemonSets := list $top }}
 {{- $earlier := list }}
 {{- range $pool, $values := $.Values.nodePools }}
@@ -34,13 +36,18 @@ plugin on a node can't take the state dir's lock.
   "configMap" (printf "%s-prefetch-%s" $.Release.Name $pool)
   "inherits" ($values.inheritPrefetch | default false)
   "maxStoreSize" (dig "maxStoreSize" $.Values.maxStoreSize $values)
+  "stateDir" (dig "stateDir" $.Values.stateDir $values)
   "outside" $earlier) }}
 {{- $earlier = append $earlier $values.nodeSelector }}
 {{- end }}
 {{- $_ := set $top "outside" $earlier }}
 {{- range $ds := $daemonSets }}
-{{- if and $ds.prefetch $ds.prefetchConfigMap }}
 {{- $values := ternary "" (printf "nodePools.%s." $ds.pool) (empty $ds.pool) }}
+{{- $stateDir := clean $ds.stateDir }}
+{{- if hasPrefix (printf "%s/" $kubeletDir) (printf "%s/" $stateDir) }}
+{{- fail (printf "%sstateDir %s is in kubeletDir %s, so every start of the plugin would leave a mount of it on the node. Choose a dir outside kubeletDir." $values $stateDir $kubeletDir) }}
+{{- end }}
+{{- if and $ds.prefetch $ds.prefetchConfigMap }}
 {{- fail (printf "%sprefetch and %sprefetchConfigMap are both set. Set only one." $values $values) }}
 {{- end }}
 {{- /*
@@ -130,6 +137,7 @@ spec:
           {{- include "nix-store-csi.image" $ | nindent 10 }}
           args:
             - --endpoint=/csi/csi.sock
+            - --state-dir={{ $stateDir }}
             {{- with $.Values.maxClosureSize }}
             - --max-closure-size={{ . }}
             {{- end }}
@@ -200,7 +208,8 @@ spec:
               mountPath: {{ $.Values.kubeletDir }}
               mountPropagation: Bidirectional
             - name: state
-              mountPath: /var/lib/nix-store-csi
+              mountPath: {{ $stateDir }}
+              subPath: {{ base $stateDir }}
             {{- with include "nix-store-csi.credentialsMount" $ }}
             {{- . | nindent 12 }}
             {{- end }}
@@ -261,10 +270,13 @@ spec:
           hostPath:
             path: {{ $.Values.kubeletDir }}
             type: Directory
+        # The state dir's parent, which has to exist. Kubelet creates the state
+        # dir in it as the subPath. For a hostPath of the state dir itself, it
+        # would create missing parents too, on whatever disk holds them.
         - name: state
           hostPath:
-            path: {{ $.Values.stateDir }}
-            type: DirectoryOrCreate
+            path: {{ dir $stateDir }}
+            type: Directory
         {{- if $.Values.mountpoints.cdi }}
         - name: host
           hostPath:

@@ -324,8 +324,8 @@ testers.runNixOSTest {
             "storePaths.${stdenv.hostPlatform.system}" = "${busybox}";
             storePaths = "/nix/store/00000000000000000000000000000000-missing";
           };
-          # The test moves the node into these at the end. owned's ConfigMap
-          # doesn't exist until then.
+          # The test moves the node into these near the end. owned's
+          # ConfigMap doesn't exist until then, and neither does /mnt/disk.
           nodePools.warm = {
             nodeSelector.pool = "warm";
             inheritPrefetch = true;
@@ -334,6 +334,10 @@ testers.runNixOSTest {
           nodePools.owned = {
             nodeSelector.pool = "owned";
             prefetchConfigMap = "owned-prefetch";
+          };
+          nodePools.disk = {
+            nodeSelector.pool = "disk";
+            stateDir = "/mnt/disk/nix-store-csi";
           };
         };
       };
@@ -423,11 +427,13 @@ testers.runNixOSTest {
         return int(machine.succeed(f"sed -n 's/^NarSize: //p' ${fixtures}/cache-zstd/{name[:32]}.narinfo"))
 
     def join_pool(pool):
-        """Moves the node into `pool`, and waits until only that pool's plugin runs and serves."""
-        machine.succeed(f"kubectl label node machine pool={pool} --overwrite")
-        pods = "kubectl -n kube-system get pod -o name -l"
-        only = f'[ "$({pods} app.kubernetes.io/name=nix-store-csi)" = "$({pods} nix-store-csi/pool={pool})" ]'
-        machine.wait_until_succeeds(f'{only} && [ -n "$({pods} nix-store-csi/pool={pool})" ]', timeout=300)
+        """Moves the node into `pool`, or out of every pool if it is None, and
+        waits until only that pool's plugin runs and serves."""
+        machine.succeed(f"kubectl label node machine pool={pool} --overwrite" if pool else "kubectl label node machine pool-")
+        pods = "kubectl -n kube-system get pod -o name -l app.kubernetes.io/name=nix-store-csi"
+        selector = f"nix-store-csi/pool={pool}" if pool else "'!nix-store-csi/pool'"
+        only = f'[ "$({pods})" = "$({pods},{selector})" ]'
+        machine.wait_until_succeeds(f'{only} && [ -n "$({pods},{selector})" ]', timeout=300)
         # The probe that the startup probe makes, without its 10 second period.
         machine.wait_until_succeeds("${curl}/bin/curl -sf http://127.0.0.1:9808/healthz", timeout=300)
 
@@ -668,8 +674,44 @@ testers.runNixOSTest {
         phase("warm", "Succeeded")
         t.assertEqual(machine.succeed("kubectl logs warm").strip(), "warm")
 
+    with subtest("a pool's plugin waits for its state dir's parent, mounts new volumes from it, and unpublishes those from the old one"):
+        machine.succeed("kubectl label node machine pool=disk")
+        events = "kubectl -n kube-system get events --field-selector involvedObject.kind=Pod -o jsonpath='{.items[*].message}'"
+        machine.wait_until_succeeds(f"{events} | grep -qF 'hostPath type check failed: /mnt/disk is not a directory'", timeout=120)
+        # Kubelet refuses a subPath that links out of the hostPath. The dir
+        # appears with the link in it, or kubelet could make the subPath first.
+        machine.succeed("mkdir -p /mnt/new /var/lib/elsewhere && ln -s /var/lib/elsewhere /mnt/new/nix-store-csi && mv -T /mnt/new /mnt/disk")
+        machine.wait_until_succeeds(f"{events} | grep -qF 'failed to prepare subPath for volumeMount \"state\"'", timeout=120)
+        machine.succeed("rm /mnt/disk/nix-store-csi")
+        join_pool("disk")
+        old = int(machine.succeed(f"{volumes} | wc -l"))
+        logs = "kubectl -n kube-system logs -l nix-store-csi/pool=disk -c nix-store-csi --tail=-1"
+        warning = f"mounted from views in another state dir; .* state_dir=/var/lib/nix-store-csi device=[^ ]+ mounted={old}$"
+        try:
+            machine.succeed(f"{logs} | grep -qE '{warning}'")
+            t.assertEqual(metric("nix_store_csi_other_state_dir_volumes"), old)
+        except Exception:
+            print(machine.execute(logs)[1])
+            raise
+
+        machine.succeed("systemctl start nginx")
+        machine.succeed("kubectl apply -f ${other}")
+        phase("other", "Running")
+        machine.succeed("systemctl stop nginx")
+        uid = machine.succeed("kubectl get pod other -o jsonpath='{.metadata.uid}'").strip()
+        root = machine.succeed(f"findmnt -no FSROOT /var/lib/kubelet/pods/{uid}/volumes/kubernetes.io~csi/nix/mount")
+        t.assertTrue(root.startswith("/mnt/disk/nix-store-csi/views/"), root)
+        machine.succeed("kubectl exec sleep -- ${busybox}/bin/ls /nix/store/.roots")
+
+        machine.wait_until_succeeds("kubectl delete pod sleep offline --wait", timeout=120)
+        machine.wait_until_succeeds(f"[ $({volumes} | wc -l) = 1 ]", timeout=60)
+        t.assertEqual(metric("nix_store_csi_other_state_dir_volumes"), 0)
+        # The views stay in the old dir.
+        machine.succeed(f"[ -n \"$({views})\" ]")
+        join_pool(None)
+
     with subtest("deleting the pods unpublishes their volumes"):
-        machine.wait_until_succeeds("kubectl delete pod sleep offline warm --wait --ignore-not-found", timeout=120)
+        machine.wait_until_succeeds("kubectl delete pod sleep offline warm other --wait --ignore-not-found", timeout=120)
         machine.wait_until_fails(volumes)
         machine.wait_until_succeeds(f"[ -z \"$({views})\" ]", timeout=60)
 

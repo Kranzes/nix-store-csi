@@ -246,6 +246,19 @@ rec {
             --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"maxStoreSize":"80%"},"web":{"nodeSelector":{"pool":"web"},"maxStoreSize":""}}' \
             | yq -N 'select(.kind == "DaemonSet") | .metadata.name as $name | .spec.template.spec.containers[0].args[] | select(test("^--max-store-size")) | $name + " " + .')
           test "$limits" = "$(printf '%s\n' 'release-name-node --max-store-size=200G' 'release-name-node-gpu --max-store-size=80%')"
+          # A pool's stateDir replaces the top-level one in the plugin's flag
+          # and its mount, which kubelet makes in the parent's hostPath.
+          dirs=$(helm template ${chartSrc} --set stateDir=/srv/nix-store-csi/ \
+            --set-json 'nodePools={"disk":{"nodeSelector":{"pool":"disk"},"stateDir":"/mnt/instance-store/nsc"},"web":{"nodeSelector":{"pool":"web"}}}' \
+            | yq -N 'select(.kind == "DaemonSet") | .metadata.name as $name | .spec.template.spec as $spec
+              | ($spec.volumes[] | select(.name == "state") | .hostPath) as $host
+              | ($spec.containers[0].volumeMounts[] | select(.name == "state")) as $mount
+              | $name + " " + ($spec.containers[0].args[] | select(test("^--state-dir")))
+                + " " + $host.path + " " + $host.type + " " + $mount.subPath + " " + $mount.mountPath')
+          test "$dirs" = "$(printf '%s\n' \
+            'release-name-node --state-dir=/srv/nix-store-csi /srv Directory nix-store-csi /srv/nix-store-csi' \
+            'release-name-node-disk --state-dir=/mnt/instance-store/nsc /mnt/instance-store Directory nsc /mnt/instance-store/nsc' \
+            'release-name-node-web --state-dir=/srv/nix-store-csi /srv Directory nix-store-csi /srv/nix-store-csi')"
           # helm lint ignores fail, so these use helm template.
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--no-require-sigs"]' > /dev/null
           helm template ${chartSrc} --set-json 'trustedPublicKeys=[]' --set-json 'extraArgs=["--trusted-public-keys=cache-1:key"]' > /dev/null
@@ -270,6 +283,9 @@ rec {
             --set 'prefetch.storePaths=/nix/store/00000000000000000000000000000000-hello' \
             --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"inheritPrefetch":true,"prefetch":{"storePaths.x86_64-linux.trainer":"/nix/store/00000000000000000000000000000000-hello"}}}'
           refuses "at '/maxStoreSize'" --set maxStoreSize=150%
+          refuses "nodePools.disk.stateDir /var/lib/kubelet/plugins/nix-store-csi is in kubeletDir /var/lib/kubelet" \
+            --set-json 'nodePools={"disk":{"nodeSelector":{"pool":"disk"},"stateDir":"/var/lib/kubelet/plugins/nix-store-csi"}}'
+          refuses "at '/stateDir'" --set stateDir=/
           for field in version appVersion; do
             grep -qx "$field: ${package.version}" ${chartSrc}/Chart.yaml || {
               echo "Chart.yaml's $field isn't Cargo.toml's ${package.version}" >&2

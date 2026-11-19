@@ -764,7 +764,7 @@ fn s3(url: &Url, mut builder: AmazonS3Builder) -> anyhow::Result<Auth> {
 }
 
 /// Bytes `first` to `last` of a file, or to its end.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Span {
     first: u64,
     last: Option<u64>,
@@ -773,6 +773,18 @@ struct Span {
 impl Span {
     const WHOLE: Self = Self {
         first: 0,
+        last: None,
+    };
+
+    /// What [`ranged`] asks for first.
+    const FIRST: Self = Self {
+        first: 0,
+        last: Some(PART - 1),
+    };
+
+    /// What follows [`Span::FIRST`].
+    const REST: Self = Self {
+        first: PART,
         last: None,
     };
 
@@ -799,7 +811,7 @@ impl Span {
 
 /// The header and value that a range request sends as `If-Range`, so that it
 /// can't mix two versions of the file.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct Validator(HeaderName, HeaderValue);
 
 /// A weak `ETag` doesn't promise the same bytes. The `ETag` of a compressed
@@ -936,55 +948,52 @@ async fn resume(
     (!decode || nar_encoding(&resp) == Compression::None).then_some(resp)
 }
 
-/// Reads the file at `url` in ranges of [`PART`] bytes, several at once, if
-/// the cache answers the first range with a validator. Over HTTP/2 the ranges
-/// would share one connection, so the rest of the file comes in one more
-/// request. Without ranges or a validator, the file comes in one stream.
-async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::Result<Bytes>>> {
-    let first = Span {
-        first: 0,
-        last: Some(PART - 1),
-    };
-    let permit = http.ranges.clone().acquire_owned().await?;
-    let resp = http.fetch(&url, IDENTITY, Some((first, None))).await?;
-    let validator = validator(&resp, Compression::None);
-    let (Some(len), Some(validator)) = (first.answered(&resp), validator) else {
-        tracing::debug!(%url, status = %resp.status(), "fetching the NAR in one stream");
-        let resp = if resp.status() == StatusCode::OK {
-            resp
+/// How [`ranged`] reads a file, by the response to [`Span::FIRST`].
+#[derive(Debug, PartialEq)]
+enum Plan {
+    /// The response holds the whole file.
+    Whole,
+    /// Without a range or a validator, the whole file comes in one request.
+    Again,
+    /// Over HTTP/2 the ranges would share one connection, so [`Span::REST`]
+    /// comes in one request after the first range.
+    Rest(Validator),
+    /// The file, of this length, comes in ranges, several at once.
+    Ranges(u64, Validator),
+}
+
+fn plan(resp: &reqwest::Response) -> Plan {
+    let validator = validator(resp, Compression::None);
+    let (Some(len), Some(validator)) = (Span::FIRST.answered(resp), validator) else {
+        return if resp.status() == StatusCode::OK {
+            Plan::Whole
         } else {
-            drop((permit, resp));
-            http.fetch(&url, IDENTITY, None).await?
+            Plan::Again
         };
-        return Ok(resuming(http.clone(), url, resp, false, None));
     };
     if resp.version() != reqwest::Version::HTTP_11 && len > PART {
-        let tail_span = Span {
-            first: PART,
-            last: None,
-        };
-        let head = resuming(
-            http.clone(),
-            url.clone(),
-            resp,
-            false,
-            Some((first, validator.clone())),
-        );
-        let http = http.clone();
-        let tail = async move {
-            let resp = part(&http, &url, &validator, tail_span).await?;
-            io::Result::Ok(resuming(
-                http,
-                url,
-                resp,
-                false,
-                Some((tail_span, validator)),
-            ))
-        };
-        return Ok(head
-            .chain(futures::stream::once(tail).try_flatten())
-            .boxed());
+        return Plan::Rest(validator);
     }
+    Plan::Ranges(len, validator)
+}
+
+/// Reads the file at `url` by its [`plan`].
+async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::Result<Bytes>>> {
+    let permit = http.ranges.clone().acquire_owned().await?;
+    let resp = http
+        .fetch(&url, IDENTITY, Some((Span::FIRST, None)))
+        .await?;
+    let (len, validator) = match plan(&resp) {
+        Plan::Whole => return Ok(resuming(http.clone(), url, resp, false, None)),
+        Plan::Again => {
+            tracing::debug!(%url, status = %resp.status(), "fetching the NAR in one stream");
+            drop((permit, resp));
+            let resp = http.fetch(&url, IDENTITY, None).await?;
+            return Ok(resuming(http.clone(), url, resp, false, None));
+        }
+        Plan::Rest(validator) => return Ok(first_and_rest(http, url, resp, validator)),
+        Plan::Ranges(len, validator) => (len, validator),
+    };
     let mut ranges = Ranges {
         http: http.clone(),
         url,
@@ -996,6 +1005,31 @@ async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::
     };
     ranges.push(permit, Some(resp));
     Ok(futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed())
+}
+
+/// The body of `resp`, which holds [`Span::FIRST`], and then
+/// [`Span::REST`] in one more request.
+fn first_and_rest(
+    http: &Http,
+    url: Url,
+    resp: reqwest::Response,
+    validator: Validator,
+) -> BoxStream<'static, io::Result<Bytes>> {
+    let first = Some((Span::FIRST, validator.clone()));
+    let head = resuming(http.clone(), url.clone(), resp, false, first);
+    let http = http.clone();
+    let more = async move {
+        let resp = part(&http, &url, &validator, Span::REST).await?;
+        io::Result::Ok(resuming(
+            http,
+            url,
+            resp,
+            false,
+            Some((Span::REST, validator)),
+        ))
+    };
+    head.chain(futures::stream::once(more).try_flatten())
+        .boxed()
 }
 
 /// A file read in ranges, which come out in order. Each range in flight
@@ -1916,8 +1950,66 @@ pub(crate) mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
-    /// A NAR keeps at most `PARTS` ranges in flight, and all NARs together at
-    /// most `IN_FLIGHT`, while the reader keeps waiting for them.
+    fn response(
+        version: reqwest::Version,
+        status: u16,
+        headers: &[(HeaderName, &str)],
+    ) -> reqwest::Response {
+        let mut resp = hyper::Response::builder().status(status).version(version);
+        for (name, value) in headers {
+            resp = resp.header(name, *value);
+        }
+        resp.body(Vec::new()).unwrap().into()
+    }
+
+    #[test]
+    fn plans_by_the_first_range() {
+        use reqwest::Version;
+        let len = 3 * PART;
+        let first = format!("bytes 0-{}/{len}", PART - 1);
+        let etag = Validator(ETAG, HeaderValue::from_static(r#""x""#));
+        let ranged = |version, range: &str| {
+            plan(&response(
+                version,
+                206,
+                &[(CONTENT_RANGE, range), (ETAG, r#""x""#)],
+            ))
+        };
+        assert_eq!(ranged(Version::HTTP_2, &first), Plan::Rest(etag.clone()));
+        assert_eq!(
+            ranged(Version::HTTP_11, &first),
+            Plan::Ranges(len, etag.clone())
+        );
+        // A file that fits in the first range needs no other request.
+        assert_eq!(
+            ranged(Version::HTTP_2, "bytes 0-99/100"),
+            Plan::Ranges(100, etag)
+        );
+        let whole = response(Version::HTTP_2, 200, &[(ETAG, r#""x""#)]);
+        assert_eq!(plan(&whole), Plan::Whole);
+        let unvalidated = response(Version::HTTP_2, 206, &[(CONTENT_RANGE, &first)]);
+        assert_eq!(plan(&unvalidated), Plan::Again);
+    }
+
+    /// The first range and the rest of the file take two requests.
+    #[tokio::test]
+    async fn reads_the_first_range_and_the_rest() {
+        let (base, hits) = server_counting(RANGES).await;
+        let Transport::Http(http) = open(&base).unwrap() else {
+            unreachable!()
+        };
+        let url = request_url(&http.base, "large").unwrap();
+        let first = (http.fetch(&url, IDENTITY, Some((Span::FIRST, None))).await).unwrap();
+        let validator = validator(&first, Compression::None).unwrap();
+        let body = first_and_rest(&http, url, first, validator);
+        let mut nar = Vec::new();
+        StreamReader::new(body).read_to_end(&mut nar).await.unwrap();
+        assert_eq!(nar, large());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A NAR keeps at most `PARTS` ranges in flight, and all NARs together no
+    /// more than the transport's permits, while the reader keeps waiting.
     #[tokio::test]
     async fn caps_the_ranges_in_flight() {
         let slow = Mode::Ranges {

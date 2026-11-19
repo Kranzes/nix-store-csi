@@ -56,4 +56,5 @@ image layers. nix-store-csi mounts them as a volume instead:
 - [Using the driver in pods](docs/PODS.md)
 - [Command line](docs/CLI.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Performance notes](docs/PERFORMANCE.md)
 - [Changelog](CHANGELOG.md)

@@ -32,8 +32,11 @@
   | 32 (64)     | 1.0 to 1.3 GiB |
   | 88 (64)     | 1.3 to 1.7 GiB |
 
-  The chart requests 512Mi of memory instead of 256Mi. A request is not a cap,
-  and the chart sets no memory limit.
+  A request is not a cap, and the chart sets no memory limit.
+- The chart's memory request rises from 256Mi to 512Mi, so on a node without
+  that much unreserved memory the plugin's pod stays Pending after the
+  upgrade. Mounted volumes keep working, but no new volume can be published
+  there until the pod fits or the request is lowered.
 
 ## 0.1.16 - 2026-11-19
 

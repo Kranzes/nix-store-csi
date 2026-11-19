@@ -258,5 +258,9 @@ tolerations:
 # No memory limit, since an OOM kill during a fetch is worse than overcommit.
 resources:
   requests:
+    # The CPU request sets the plugin's cgroup CPU weight, its share of CPU
+    # time when every CPU on the node is busy. On such a node, a 12.8 GiB
+    # closure fetched 4 to 6 times slower with 10m than with 100m, at 22 to 33
+    # MiB/s against 126 to 137 MiB/s.
     cpu: 100m
     memory: 256Mi

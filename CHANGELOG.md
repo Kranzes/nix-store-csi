@@ -14,9 +14,9 @@
 - From a cache that answers range requests over HTTP/1.1, like S3, a
   compressed NAR over 4 MiB comes in 4 MiB ranges over up to 16 connections,
   so a cache that limits each connection no longer caps it at one
-  connection's speed. Ranges that arrive before decompression needs them take
-  up to 64 MiB for each NAR. The NAR still counts once towards
-  `--max-substitution-jobs`.
+  connection's speed. At most 64 ranges are in flight on a node, so ranges that
+  arrive before decompression needs them take at most 256 MiB. The NAR still
+  counts once towards `--max-substitution-jobs`.
 - The plugin unpacks NARs on up to three threads per job instead of one,
   still at most one per CPU, so a NAR's decompression, hashing and parsing
   each get a thread.

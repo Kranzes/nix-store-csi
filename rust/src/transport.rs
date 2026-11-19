@@ -16,8 +16,10 @@ use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, ETAG, HeaderName, HeaderValue, IF_RANGE,
     LAST_MODIFIED, RANGE, RETRY_AFTER,
 };
+use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
-use tokio::sync::mpsc;
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -36,6 +38,8 @@ pub struct Http {
     base: Url,
     client: reqwest::Client,
     auth: Option<Auth>,
+    /// Permits for ranges in flight, which the caches share.
+    ranges: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -176,9 +180,13 @@ pub const NAR_CHUNK: usize = 256 * 1024;
 /// in tests, so that test files span many ranges.
 const PART: u64 = if cfg!(test) { 4 << 10 } else { 4 << 20 };
 
-/// The most ranges of one NAR in flight, the one being read included, which
-/// caps the memory its ranges take at `PARTS * PART`.
+/// The most ranges of one NAR in flight, the one being read included.
 const PARTS: usize = 16;
+
+/// The permits for ranges that the caches share, whatever the NARs and the
+/// jobs. A range holds one from its request until the reader is done with
+/// it, so this caps the memory that ranges take at `IN_FLIGHT * PART`.
+pub const IN_FLIGHT: usize = 64;
 
 /// How long a request keeps retrying. backon's total delay counts only the
 /// sleeps, so a cache that times out on every attempt would retry far longer.
@@ -500,8 +508,8 @@ pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
 
 impl Transport {
     /// `netrc` supplies credentials when `url` has neither user info nor a
-    /// `bearer-token-file`.
-    pub fn new(url: &Url, netrc: Option<&Path>) -> anyhow::Result<Self> {
+    /// `bearer-token-file`. Ranges take permits from `ranges`.
+    pub fn new(url: &Url, netrc: Option<&Path>, ranges: Arc<Semaphore>) -> anyhow::Result<Self> {
         let token_file = (url.query_pairs())
             .find(|(k, _)| k == "bearer-token-file")
             .map(|(_, v)| PathBuf::from(v.into_owned()));
@@ -533,12 +541,14 @@ impl Transport {
                     base: redact(&base),
                     client: client()?,
                     auth,
+                    ranges,
                 })
             }
             "s3" => Self::Http(Http {
                 auth: Some(s3(url, s3_env())?),
                 base,
                 client: client()?,
+                ranges,
             }),
             scheme => bail!("unsupported scheme {scheme}: expected http(s)://, s3:// or file://"),
         })
@@ -935,6 +945,7 @@ async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::
         first: 0,
         last: Some(PART - 1),
     };
+    let permit = http.ranges.clone().acquire_owned().await?;
     let resp = http.fetch(&url, IDENTITY, Some((first, None))).await?;
     let validator = validator(&resp, Compression::None);
     let (Some(len), Some(validator)) = (first.answered(&resp), validator) else {
@@ -942,6 +953,7 @@ async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::
         let resp = if resp.status() == StatusCode::OK {
             resp
         } else {
+            drop((permit, resp));
             http.fetch(&url, IDENTITY, None).await?
         };
         return Ok(resuming(http.clone(), url, resp, false, None));
@@ -982,7 +994,7 @@ async fn ranged(http: &Http, url: Url) -> anyhow::Result<BoxStream<'static, io::
         parts: VecDeque::new(),
         window: 2,
     };
-    ranges.push(Some(resp));
+    ranges.push(permit, Some(resp));
     Ok(futures::stream::try_unfold(ranges, Ranges::next_chunk).boxed())
 }
 
@@ -1004,12 +1016,13 @@ struct Ranges {
 struct Part {
     chunks: mpsc::UnboundedReceiver<io::Result<Bytes>>,
     task: AbortOnDropHandle<()>,
+    _permit: OwnedSemaphorePermit,
 }
 
 impl Ranges {
     /// Starts reading the next range, from `resp` if the caller already
     /// requested it.
-    fn push(&mut self, resp: Option<reqwest::Response>) {
+    fn push(&mut self, permit: OwnedSemaphorePermit, resp: Option<reqwest::Response>) {
         let last = (self.next + PART).min(self.len) - 1;
         let span = Span {
             first: self.next,
@@ -1036,13 +1049,24 @@ impl Ranges {
         self.parts.push_back(Part {
             chunks,
             task: AbortOnDropHandle::new(task),
+            _permit: permit,
         });
     }
 
     async fn next_chunk(mut self) -> io::Result<Option<(Bytes, Self)>> {
         loop {
+            // Only the range that the reader needs next waits for a permit, so
+            // a NAR that holds permits can always use them.
+            if self.parts.is_empty() && self.next < self.len {
+                let permits = self.http.ranges.clone();
+                let permit = permits.acquire_owned().await.map_err(io::Error::other)?;
+                self.push(permit, None);
+            }
             while self.parts.len() < self.window && self.next < self.len {
-                self.push(None);
+                let Ok(permit) = self.http.ranges.clone().try_acquire_owned() else {
+                    break;
+                };
+                self.push(permit, None);
             }
             let Some(head) = self.parts.front_mut() else {
                 return Ok(None);
@@ -1157,7 +1181,16 @@ pub(crate) mod tests {
 <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message><AWSAccessKeyId>AKIAEXAMPLE</AWSAccessKeyId><StringToSign>AWS4-HMAC-SHA256</StringToSign></Error>"#;
 
     fn open(url: &str) -> anyhow::Result<Transport> {
-        Transport::new(&url.parse()?, None)
+        open_with(url, IN_FLIGHT)
+    }
+
+    /// A transport with `n` permits for ranges of its own.
+    fn open_with(url: &str, n: usize) -> anyhow::Result<Transport> {
+        Transport::new(&url.parse()?, None, Arc::new(Semaphore::new(n)))
+    }
+
+    fn permits() -> Arc<Semaphore> {
+        Arc::new(Semaphore::new(IN_FLIGHT))
     }
 
     #[derive(Clone, Copy)]
@@ -1192,10 +1225,12 @@ pub(crate) mod tests {
         /// `If-Range` names the old one gets all of the new one, or with
         /// `ignores_if_range` the range of the new one. Serves `/dated` with
         /// only a `Last-Modified`, which its ranges leave out, and
-        /// `/unvalidated` without a validator.
+        /// `/unvalidated` without a validator. With `slow`, it answers each
+        /// request after 1 ms.
         Ranges {
             replaced: bool,
             ignores_if_range: bool,
+            slow: bool,
         },
     }
 
@@ -1204,11 +1239,14 @@ pub(crate) mod tests {
     /// Bytes that don't compress, so that half of a compressed body decodes
     /// to some of them.
     fn large() -> Vec<u8> {
-        use std::hash::BuildHasher;
-        let state = foldhash::quality::FixedState::default();
-        (0..64 * 1024u64)
-            .flat_map(|i| state.hash_one(i).to_le_bytes())
-            .collect()
+        static LARGE: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+            use std::hash::BuildHasher;
+            let state = foldhash::quality::FixedState::default();
+            (0..64 * 1024u64)
+                .flat_map(|i| state.hash_one(i).to_le_bytes())
+                .collect()
+        });
+        LARGE.clone()
     }
 
     fn parse_range(value: &str) -> Option<(usize, Option<usize>)> {
@@ -1363,32 +1401,64 @@ pub(crate) mod tests {
 
     /// Like [`server`], and also counts the requests it gets.
     pub(crate) async fn server_counting(mode: Mode) -> (String, Arc<AtomicUsize>) {
+        let (url, hits, _) = serve(mode).await;
+        (url, hits)
+    }
+
+    /// How many requests a server is answering, and the most at once.
+    #[derive(Default)]
+    struct Load {
+        busy: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    /// One request that [`Load`] counts while it lives.
+    struct Busy(Arc<Load>);
+
+    impl Busy {
+        fn new(load: &Arc<Load>) -> Self {
+            let busy = load.busy.fetch_add(1, Ordering::SeqCst) + 1;
+            load.peak.fetch_max(busy, Ordering::SeqCst);
+            Self(load.clone())
+        }
+    }
+
+    impl Drop for Busy {
+        fn drop(&mut self) {
+            self.0.busy.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Like [`server_counting`], and also measures the load.
+    async fn serve(mode: Mode) -> (String, Arc<AtomicUsize>, Arc<Load>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let counted = hits.clone();
+        let (hits, load) = (Arc::new(AtomicUsize::new(0)), Arc::<Load>::default());
+        let (counted, measured) = (hits.clone(), load.clone());
         tokio::spawn(async move {
             loop {
                 let (sock, _) = listener.accept().await.unwrap();
-                let hits = hits.clone();
+                let (hits, load) = (hits.clone(), load.clone());
                 let service = service_fn(move |req| {
-                    respond(
-                        mode,
-                        Request::new(&req),
-                        hits.fetch_add(1, Ordering::SeqCst),
-                    )
+                    let busy = Busy::new(&load);
+                    let hit = hits.fetch_add(1, Ordering::SeqCst);
+                    respond(mode, Request::new(&req), hit, busy)
                 });
                 tokio::spawn(http1::Builder::new().serve_connection(TokioIo::new(sock), service));
             }
         });
-        (format!("http://{addr}"), counted)
+        (format!("http://{addr}"), counted, measured)
     }
 
     async fn respond(
         mode: Mode,
         req: Request,
         hit: usize,
+        _busy: Busy,
     ) -> Result<Response<impl Body<Data = Bytes, Error = Infallible>>, Infallible> {
+        if let Mode::Ranges { slow: true, .. } = mode {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         let (status, mut headers, mut body) = answer(mode, &req, hit).await;
         let coding = match mode {
             Mode::Encodes { coding, stored } if stored || req.accepts(coding) => Some(coding),
@@ -1625,7 +1695,7 @@ pub(crate) mod tests {
         let file = dir.path().join("netrc");
         let open_with = |netrc: &str| {
             std::fs::write(&file, netrc).unwrap();
-            Transport::new(&base.parse().unwrap(), Some(&file)).unwrap()
+            Transport::new(&base.parse().unwrap(), Some(&file), permits()).unwrap()
         };
         let t = open_with("machine 127.0.0.1 login user password secret");
         assert_eq!(t.get("private").await.unwrap().unwrap(), BODY);
@@ -1641,7 +1711,7 @@ pub(crate) mod tests {
         // User info in the URL overrides the netrc file.
         let url = base.replace("://", "://user:secret@").parse().unwrap();
         std::fs::write(&file, "default login user password wrong").unwrap();
-        let t = Transport::new(&url, Some(&file)).unwrap();
+        let t = Transport::new(&url, Some(&file), permits()).unwrap();
         assert_eq!(t.get("private").await.unwrap().unwrap(), BODY);
     }
 
@@ -1786,6 +1856,7 @@ pub(crate) mod tests {
     const RANGES: Mode = Mode::Ranges {
         replaced: false,
         ignores_if_range: false,
+        slow: false,
     };
 
     async fn read_sized(t: &Transport, path: &str, file_size: u64) -> anyhow::Result<Vec<u8>> {
@@ -1823,6 +1894,7 @@ pub(crate) mod tests {
             let mode = Mode::Ranges {
                 replaced: true,
                 ignores_if_range,
+                slow: false,
             };
             let t = open(&server(mode).await).unwrap();
             let err = read_sized(&t, "large", large().len() as u64).await;
@@ -1844,6 +1916,29 @@ pub(crate) mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
+    /// A NAR keeps at most `PARTS` ranges in flight, and all NARs together at
+    /// most `IN_FLIGHT`, while the reader keeps waiting for them.
+    #[tokio::test]
+    async fn caps_the_ranges_in_flight() {
+        let slow = Mode::Ranges {
+            replaced: false,
+            ignores_if_range: false,
+            slow: true,
+        };
+        let size = large().len() as u64;
+        let permits = PARTS + 4;
+        for (nars, caps) in [(1, 2..=PARTS), (4, PARTS + 1..=permits)] {
+            let (base, _, load) = serve(slow).await;
+            let t = open_with(&base, permits).unwrap();
+            let reads = (0..nars).map(|_| read_sized(&t, "large", size));
+            for nar in futures::future::join_all(reads).await {
+                assert_eq!(nar.unwrap(), large());
+            }
+            let peak = load.peak.load(Ordering::SeqCst);
+            assert!(caps.contains(&peak), "{nars} NARs: {peak} ranges at once");
+        }
+    }
+
     /// A path-style bucket at `endpoint`, with keys in place of the
     /// environment's credentials.
     fn open_s3(endpoint: &str) -> Transport {
@@ -1852,6 +1947,7 @@ pub(crate) mod tests {
             base: "s3://bucket".parse().unwrap(),
             client: client().unwrap(),
             auth: Some(s3(&url.parse().unwrap(), keys()).unwrap()),
+            ranges: permits(),
         })
     }
 
@@ -1868,6 +1964,7 @@ pub(crate) mod tests {
                 token: Arc::new(token),
                 objects: format!("{base}/prefix/").parse().unwrap(),
             }),
+            ranges: permits(),
         });
         assert_eq!(t.get("whoami").await.unwrap().unwrap(), b"Bearer token");
         // The server is http, so https changes the scheme.
@@ -1952,6 +2049,7 @@ pub(crate) mod tests {
             base: "s3://bucket".parse().unwrap(),
             client: client().unwrap(),
             auth: Some(s3(&url.parse().unwrap(), builder).unwrap()),
+            ranges: permits(),
         };
         let request = (http.request(&"s3://bucket/obj".parse().unwrap()).await)
             .unwrap()

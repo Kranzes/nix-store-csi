@@ -33,10 +33,14 @@ limits each connection, like S3, sends one NAR slower than the plugin
 decompresses it. So from a cache that supports ranges, the plugin fetches a
 compressed NAR in ranges, several at once, and decompresses them in order. It
 adds a range each time decompression catches up with one that hasn't all
-arrived, so a cache that keeps up gets two at a time. Ranges that arrive early
-wait in memory, so their number has a cap. Over HTTP/2 the ranges would share
-one connection, so after the first range the rest of the NAR comes in one
-request.
+arrived, so a cache that keeps up gets two at a time. Over HTTP/2 the ranges
+would share one connection, so after the first range the rest of the NAR comes
+in one request.
+
+Ranges that arrive early wait in memory. A NAR has at most 16 ranges in flight,
+and the plugin at most 64 whatever `--max-substitution-jobs` is. A range counts
+from its request until decompression has read it, so 4 MiB ranges take at most
+256 MiB and 64 connections.
 
 The NAR still counts as one of `--max-substitution-jobs`. The jobs limit the
 NARs being decompressed and unpacked, and ranges add none. The largest NARs

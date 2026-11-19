@@ -85,6 +85,7 @@ impl Caches {
         local: Option<Narinfos>,
         netrc: Option<&Path>,
     ) -> anyhow::Result<Self> {
+        let ranges = Arc::new(Semaphore::new(transport::IN_FLIGHT));
         let list = urls
             .iter()
             .enumerate()
@@ -94,7 +95,8 @@ impl Caches {
                 let name = transport::redact(&url);
                 let context = || format!("substituter {name}");
                 let priority = url_priority(&url).with_context(context)?;
-                let transport = Transport::new(&url, netrc).with_context(context)?;
+                let transport =
+                    Transport::new(&url, netrc, ranges.clone()).with_context(context)?;
                 Ok(Arc::new(Cache {
                     name,
                     priority,

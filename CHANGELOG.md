@@ -13,6 +13,10 @@
 
 - From S3 and GCS, an uncompressed NAR comes in ranges too, since object
   stores send files as stored.
+- Ranges are 8 MiB instead of 4 MiB, since each waits for the cache's first
+  byte, which S3 can take 100 ms to send. Ranges that arrive before
+  decompression needs them take at most 512 MiB instead of 256 MiB, and a NAR
+  whose narinfo gives a `FileSize` of 8 MiB or less comes in one request.
 
 ### Fixed
 

@@ -181,9 +181,11 @@ const FILE_BUF: usize = 256 * 1024;
 /// unpacking.
 pub const NAR_CHUNK: usize = 256 * 1024;
 
-/// A compressed NAR bigger than this may come in ranges of this size. Small
-/// in tests, so that test files span many ranges.
-const PART: u64 = if cfg!(test) { 4 << 10 } else { 4 << 20 };
+/// A NAR bigger than this may come in ranges of this size. Each range waits
+/// for the cache's first byte, which S3 can take 100 ms to send, so smaller
+/// ranges spend more of their time waiting. Small in tests, so that test
+/// files span many ranges.
+const PART: u64 = if cfg!(test) { 4 << 10 } else { 8 << 20 };
 
 /// The most ranges of one NAR in flight, the one being read included.
 const PARTS: usize = 16;

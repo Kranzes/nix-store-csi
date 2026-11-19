@@ -41,9 +41,11 @@ lose.
 
 Ranges that arrive early wait in memory. A NAR has at most 16 ranges in flight,
 and the plugin at most 64 whatever `--max-substitution-jobs` is. A range counts
-from its request until decompression has read it, so 4 MiB ranges take at most
-256 MiB and 64 connections. A NAR whose narinfo gives a `FileSize` of 4 MiB or
-less comes in one request outside the 64, so it never waits while large ones
+from its request until decompression has read it, so 8 MiB ranges take at most
+512 MiB and 64 connections. Each range waits for the cache's first byte, which
+S3 can take 100 ms to send, and smaller ranges spend more of their time
+waiting. A NAR whose narinfo gives a `FileSize` of 8 MiB or less comes in one
+request outside the 64, so it never waits while large ones
 hold them all. Without a `FileSize`, the first range gives the size, so even a
 small NAR takes one of the 64 for that first request.
 

@@ -40,8 +40,10 @@ in one request.
 Ranges that arrive early wait in memory. A NAR has at most 16 ranges in flight,
 and the plugin at most 64 whatever `--max-substitution-jobs` is. A range counts
 from its request until decompression has read it, so 4 MiB ranges take at most
-256 MiB and 64 connections. A compressed NAR of 4 MiB or less comes in one
-request outside the 64, so small NARs never wait while large ones hold them all.
+256 MiB and 64 connections. A compressed NAR whose narinfo gives a `FileSize`
+of 4 MiB or less comes in one request outside the 64, so it never waits while
+large ones hold them all. Without a `FileSize`, the first range gives the
+size, so even a small NAR takes one of the 64 for that first request.
 
 The NAR still counts as one of `--max-substitution-jobs`. The jobs limit the
 NARs being decompressed and unpacked, and ranges add none. The largest NARs

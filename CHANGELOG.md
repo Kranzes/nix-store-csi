@@ -9,6 +9,13 @@
   ranges it took and how long it waited for the cap on them. `fetching NAR`
   and `fetched NAR` give the narinfo's `FileSize`.
 
+### Fixed
+
+- A compressed NAR whose narinfo has no `FileSize` comes in ranges too, with
+  its size from the first range. 0.1.17 fetched it in one request. Without a
+  `FileSize`, even a small NAR's first request counts towards the 64 ranges
+  in flight.
+
 ## 0.1.17 - 2026-11-19
 
 ### Added

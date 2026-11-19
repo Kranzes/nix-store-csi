@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- At debug level, `chose how to fetch the NAR` says whether each NAR comes in
+  ranges or in one stream, and why, and `fetched the NAR in ranges` how many
+  ranges it took and how long it waited for the cap on them. `fetching NAR`
+  and `fetched NAR` give the narinfo's `FileSize`.
+
 ## 0.1.17 - 2026-11-19
 
 ### Added

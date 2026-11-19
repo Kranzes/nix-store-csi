@@ -27,3 +27,9 @@ them apart. The plugin itself streams it in 2.40 to 2.54 s in the same fetch.
 The slowdown needs several NARs in one process. With two jobs the NAR streams
 as fast as alone, and another plugin process fetching the whole closure next
 to it does not slow it down. CPUs with one shared L3 do not pay this cost.
+
+On 192-CPU nodes running 0.1.17, fetching a closure of 14.2 GB and 348 NARs
+from an in-cluster cache, an AMD EPYC was slowest at 64 jobs in each of three
+rounds, with medians of 4.2 s at 16 jobs, 4.1 s at 32 and 4.7 s at 64. On an
+Intel Xeon with one shared L3 per socket, the job count made no difference
+beyond the spread between rounds.

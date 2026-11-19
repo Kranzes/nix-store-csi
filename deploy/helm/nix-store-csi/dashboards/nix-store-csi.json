@@ -1243,7 +1243,7 @@
     {
       "type": "timeseries",
       "title": "Prefetch rollout",
-      "description": "Node plugins that fetched the closure of each prefetch list, by its name and hash. A list's rollout is done once its new hash reaches the dashed line of its system, the node plugins of that system that Prometheus scrapes. With node pools, a pool's lists reach only the node plugins in that pool, and the top-level lists those outside every pool and in the pools that inherit them.",
+      "description": "Node plugins that read a prefetch list but don't hold its closure yet, by its name. Bars show a rollout, from when node plugins read a new hash of the list until they all hold its closure. Node plugins that haven't read the new hash yet don't count, and the Prefetch lists table shows each hash. storePaths stands for the lists without a name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1255,17 +1255,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"})",
-          "legendFormat": "{{list}} {{hash}}"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "count by (system) (nix_store_csi_build_info{instance=~\"$instance\"})",
-          "legendFormat": "{{system}} node plugins"
+          "expr": "label_replace(sum by (list) (1 - nix_store_csi_prefetched{instance=~\"$instance\"}) > 0, \"list\", \"storePaths\", \"list\", \"\")",
+          "legendFormat": "{{list}}"
         }
       ],
       "fieldConfig": {
@@ -1274,45 +1265,17 @@
           "min": 0,
           "decimals": 0,
           "custom": {
-            "fillOpacity": 10,
+            "fillOpacity": 80,
             "showPoints": "never",
             "stacking": {
-              "mode": "none"
+              "mode": "normal"
             },
+            "drawStyle": "bars",
+            "lineWidth": 1,
             "axisSoftMax": 1
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "text"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -1326,7 +1289,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 16,
+        "w": 12,
         "x": 0,
         "y": 41
       },
@@ -1335,7 +1298,7 @@
     {
       "type": "table",
       "title": "Prefetch lists",
-      "description": "For each prefetch list by name and hash, the node plugins that fetched its closure, out of those that have seen it. During a rollout, the old hash's row goes away once kubelet updates the ConfigMap on every node.",
+      "description": "Each prefetch list by name and hash, with the system it is for, and its pool with node pools. Nodes counts the node plugins that read this hash of the list, Fetched those of them that hold its closure, and Progress the share. During a rollout a list has a row for each hash, and the old hash's row goes away once kubelet updates the ConfigMap on every node. storePaths stands for the lists without a name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1347,7 +1310,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "expr": "label_replace(count by (pool, system, list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"} * on (instance) group_left (system) max by (instance, system) (nix_store_csi_build_info{instance=~\"$instance\"})), \"list\", \"storePaths\", \"list\", \"\")",
           "format": "table",
           "instant": true
         },
@@ -1357,7 +1320,17 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"})",
+          "expr": "label_replace(sum by (pool, system, list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"} * on (instance) group_left (system) max by (instance, system) (nix_store_csi_build_info{instance=~\"$instance\"})), \"list\", \"storePaths\", \"list\", \"\")",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "label_replace(avg by (pool, system, list, hash) (nix_store_csi_prefetched{instance=~\"$instance\"} * on (instance) group_left (system) max by (instance, system) (nix_store_csi_build_info{instance=~\"$instance\"})), \"list\", \"storePaths\", \"list\", \"\")",
           "format": "table",
           "instant": true
         }
@@ -1373,11 +1346,23 @@
             "excludeByName": {
               "Time": true
             },
+            "indexByName": {
+              "list": 0,
+              "pool": 1,
+              "system": 2,
+              "hash": 3,
+              "Value #A": 4,
+              "Value #B": 5,
+              "Value #C": 6
+            },
             "renameByName": {
               "list": "List",
+              "pool": "Pool",
+              "system": "System",
               "hash": "Hash",
-              "Value #A": "Fetched",
-              "Value #B": "Seen"
+              "Value #A": "Nodes",
+              "Value #B": "Fetched",
+              "Value #C": "Progress"
             }
           }
         }
@@ -1386,15 +1371,96 @@
         "defaults": {
           "decimals": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Nodes"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fetched"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Progress"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "orange",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic",
+                  "valueDisplayMode": "text"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
-        "showHeader": true
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "List",
+            "desc": false
+          }
+        ]
       },
       "gridPos": {
         "h": 16,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 41
       },
       "id": 28
@@ -1445,7 +1511,7 @@
       "gridPos": {
         "x": 0,
         "y": 49,
-        "w": 16,
+        "w": 12,
         "h": 8
       },
       "id": 31

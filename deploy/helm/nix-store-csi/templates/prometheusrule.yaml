@@ -104,14 +104,14 @@
   "expr" (printf "nix_store_csi_build_info%s unless on (instance) nix_store_csi_prefetched{list=%q, hash=%q}" $selector $name $hash)
   "labels" (merge $labels (dict "list" $name "hash" $hash))
   "summary" (printf "{{ $labels.instance }} hasn't read the prefetch list %s at hash %s." $key $hash)
-  "description" "Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.") }}
+  "description" "Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch lists table of the dashboard shows how many node plugins read each hash of the list and hold its closure.") }}
 {{- end }}
 {{- end }}
 {{- $rules = append $rules (dict
   "alert" "NixStoreCsiPrefetchBehind"
   "expr" "nix_store_csi_prefetched == 0"
   "summary" "{{ $labels.instance }} doesn't hold its prefetch list{{ with $labels.list }} {{ . }}{{ end }} at hash {{ $labels.hash }}."
-  "description" "The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.") }}
+  "description" "The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch lists table of the dashboard shows how many node plugins read each hash of the list and hold its closure.") }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

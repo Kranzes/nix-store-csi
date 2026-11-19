@@ -277,7 +277,7 @@ tests:
               hash: "@hash@"
             exp_annotations:
               summary: node-a doesn't hold its prefetch list at hash @hash@.
-              description: The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+              description: The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch lists table of the dashboard shows how many node plugins read each hash of the list and hold its closure.
           - exp_labels:
               severity: warning
               instance: node-b
@@ -285,7 +285,7 @@ tests:
               hash: "0123456789ab"
             exp_annotations:
               summary: node-b doesn't hold its prefetch list web at hash 0123456789ab.
-              description: The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+              description: The node read the list, but its fetch fails or takes longer than the alert waits. The plugin's log has the errors, and the Prefetch lists table of the dashboard shows how many node plugins read each hash of the list and hold its closure.
           - exp_labels:
               severity: warning
               hash: "@hash@"
@@ -293,7 +293,7 @@ tests:
               version: 0.1.3
             exp_annotations:
               summary: node-c hasn't read the prefetch list storePaths at hash @hash@.
-              description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+              description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch lists table of the dashboard shows how many node plugins read each hash of the list and hold its closure.
           - exp_labels:
               severity: warning
               hash: "@hash@"
@@ -302,7 +302,7 @@ tests:
               version: 0.1.3
             exp_annotations:
               summary: node-d hasn't read the prefetch list storePaths at hash @hash@.
-              description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch rollout panel of the dashboard shows which node plugins hold each list.
+              description: Kubelet may not have updated the ConfigMap on the node yet, or the plugin can't read it. The plugin's log has the errors, and the Prefetch lists table of the dashboard shows how many node plugins read each hash of the list and hold its closure.
 
   - interval: 1m
     input_series:

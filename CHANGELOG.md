@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The dashboard's Prefetch rollout panel shows the node plugins still
+  fetching each prefetch list, so only lists that are rolling out show up.
+  The Prefetch lists table is wider and gives each hash of a list its system,
+  its pool with node pools, and the share of node plugins that fetched it.
+  The prefetch alerts point to the table.
+
 ## 0.1.18 - 2026-11-19
 
 ### Added

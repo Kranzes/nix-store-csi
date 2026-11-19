@@ -9,6 +9,12 @@
   ranges it took and how long it waited for the cap on them. `fetching NAR`
   and `fetched NAR` give the narinfo's `FileSize`.
 
+### Changed
+
+- From S3 and GCS, an uncompressed NAR comes in ranges too, since object
+  stores send files as stored. From other caches it still comes in one
+  stream, which they may compress on the fly.
+
 ### Fixed
 
 - A compressed NAR whose narinfo has no `FileSize` comes in ranges too, with

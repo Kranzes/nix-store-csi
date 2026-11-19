@@ -31,7 +31,9 @@ since a resume asks for the rest from an offset in the uncompressed NAR.
 A closure's fetch ends about when its largest NAR's does, and a cache that
 limits each connection, like S3, sends one NAR slower than the plugin
 decompresses it. So from a cache that supports ranges, the plugin fetches a
-compressed NAR in ranges, several at once, and decompresses them in order. It
+compressed NAR in ranges, several at once, and decompresses them in order. An
+uncompressed NAR comes in ranges only from an object store, like S3, since
+another cache may compress it on the fly, which ranges would lose. It
 adds a range each time decompression catches up with one that hasn't all
 arrived, so a cache that keeps up gets two at a time. Over HTTP/2 the ranges
 would share one connection, so after the first range the rest of the NAR comes

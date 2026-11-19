@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::Permissions;
 use std::io;
@@ -113,7 +114,7 @@ impl Store {
         let paths: Arc<[StorePath]> = closure.keys().cloned().collect();
         // Under the guard, a collection either sees the hold or finishes
         // before this checks the limits and the store for the paths.
-        let (held, prefetched, missing) = {
+        let (held, prefetched, mut missing) = {
             let _gc = self.gc_guard().await;
             if let Some(limit) = self.max_closure_size.filter(|_| !prefetch) {
                 let counted = (closure.iter())
@@ -132,6 +133,9 @@ impl Store {
             let (this, closure, paths) = (self.clone(), closure.clone(), paths.clone());
             tokio::task::spawn_blocking(move || this.hold(&closure, &paths, prefetch)).await??
         };
+        // The fetch of a closure ends about when its largest NAR's does, so
+        // the largest NARs get slots first.
+        missing.sort_by_key(|path| Reverse(closure[path].info.nar_size()));
         let mut started = 0;
         let fetches: Vec<_> = (missing.iter())
             .map(|path| {
@@ -293,10 +297,10 @@ impl Store {
         (underway.fetch.clone(), started)
     }
 
-    /// Starts the fetches of `paths` that wait for a slot, one slot at a time.
-    /// Each ensure has a feed of its own, and slots go to the feeds in the
-    /// order they asked, so ensures take turns. A feed can also start a fetch
-    /// that another ensure created.
+    /// Starts the fetches of `paths` that wait for a slot, one slot at a time,
+    /// in the order of `paths`. Each ensure has a feed of its own, and slots
+    /// go to the feeds in the order they asked, so ensures take turns. A feed
+    /// can also start a fetch that another ensure created.
     async fn feed(self: Arc<Self>, paths: Vec<StorePath>) {
         let mut paths = paths.into_iter();
         while let Ok(slot) = self.jobs.clone().acquire_owned().await {
@@ -1207,6 +1211,34 @@ mod tests {
         drop(slot);
         a.done().await.unwrap();
         b.done().await.unwrap();
+    }
+
+    /// The largest NAR of a closure gets the first slot.
+    #[tokio::test]
+    async fn fetches_the_largest_nar_first() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let config = crate::store::Config {
+            jobs: 1,
+            ..zstd_config(&dir, tmp.path())
+        };
+        let store = Arc::new(Store::new(config).unwrap());
+        let slot = store.jobs.acquire().await.unwrap();
+        let mut ensuring = store.ensure(&[fixture_root(&dir, "hello.path")]);
+        resolved(&ensuring).await;
+        // The test queues for a slot behind the feed, so it gets one when the
+        // first fetch ends.
+        let mut next = std::pin::pin!(store.jobs.acquire());
+        assert!(next.as_mut().now_or_never().is_none());
+        drop(slot);
+        let slot = next.await.unwrap();
+        let glibc = fixture_path(&dir, "glibc");
+        assert_eq!(file_names(store.dir()), [glibc.to_string()]);
+
+        drop(slot);
+        ensuring.done().await.unwrap();
     }
 
     /// An ensure carries on after its caller stops waiting. When kubelet gives

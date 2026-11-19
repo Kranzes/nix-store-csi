@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A closure's largest NARs get fetch slots first instead of waiting behind
+  smaller ones.
+
 ## 0.1.16 - 2026-11-19
 
 ### Added

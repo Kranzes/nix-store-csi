@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +85,15 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     raise_open_files_limit();
+    let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    // View builds wait on disk reads more than on CPUs, so a node with few
+    // CPUs gets more threads. A thread that waits for a subdirectory links
+    // other subdirectories on its own stack, so deep trees need more than
+    // 2 MiB.
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(cpus.max(16))
+        .stack_size(16 << 20)
+        .build_global()?;
     // Restore creates files with their canonical modes, and a stricter umask
     // would take bits off them. Nix sets the same one.
     umask(Mode::from_raw_mode(0o022));

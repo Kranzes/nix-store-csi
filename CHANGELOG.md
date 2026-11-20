@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A publish links the subdirectories of each store path into the view on
+  several threads, and uses at least 16 threads on nodes with fewer CPUs.
+  With cold caches every directory waits for a disk read, so on one thread
+  a store path with tens of thousands of files, like a Python environment,
+  took seconds to link.
+
 ## 0.1.20 - 2026-11-20
 
 ### Added

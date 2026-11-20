@@ -324,7 +324,6 @@ impl Store {
         std::fs::create_dir(&view)?;
         std::fs::set_permissions(&view, Permissions::from_mode(0o755))?;
         let view_dir = std::fs::File::open(&view)?;
-        // Uses all cores, since a big closure has tens of thousands of files.
         paths.par_iter().try_for_each(|path| {
             let name = CString::new(path.to_string())?;
             let kind = statat(&self.dir_fd, &name, AtFlags::SYMLINK_NOFOLLOW)
@@ -595,6 +594,8 @@ pub fn check_volume(volume: &str) -> anyhow::Result<&str> {
 /// Copies the tree `name` in `src_dir` to `dst_dir` with hard links for files
 /// and symlinks, so the view shares inodes and page cache with the node store.
 /// Working in directory fds, each call looks up one name, not a whole path.
+/// Subdirectories go to other threads, since with cold caches each one waits
+/// for disk reads, and one store path can hold most of a closure's files.
 fn link_tree(
     src_dir: impl AsFd,
     dst_dir: impl AsFd,
@@ -608,14 +609,21 @@ fn link_tree(
     mkdirat(&dst_dir, name, Mode::RWXU)?;
     let mut entries = Dir::new(openat(&src_dir, name, DIR_FLAGS, Mode::empty())?)?;
     let dst = openat(&dst_dir, name, DIR_FLAGS, Mode::empty())?;
+    let mut dirs = Vec::new();
     while let Some(entry) = entries.read() {
         let entry = entry?;
         let child = entry.file_name();
         if child == c"." || child == c".." {
             continue;
         }
-        link_tree(entries.fd()?, &dst, child, entry.file_type())?;
+        if entry.file_type() == FileType::Directory {
+            dirs.push(child.to_owned());
+        } else {
+            link_tree(entries.fd()?, &dst, child, entry.file_type())?;
+        }
     }
+    let src = entries.fd()?;
+    (dirs.par_iter()).try_for_each(|child| link_tree(src, &dst, child, FileType::Directory))?;
     // The mode of every directory in the node store.
     fchmod(&dst, Mode::from_raw_mode(0o555))?;
     Ok(futimens(&dst, &CANONICAL_TIME)?)

@@ -18,7 +18,7 @@ use harmonia_store_path::StorePath;
 use harmonia_utils_hash::{Algorithm, Hash};
 use prometheus_client::metrics::counter::Counter;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -145,8 +145,9 @@ impl Store {
                 fetch
             })
             .collect();
+        let ahead = (!prefetch && !missing.is_empty()).then(|| Ahead::new(self.clone()));
         if !missing.is_empty() {
-            tokio::spawn(self.clone().feed(missing.clone()));
+            tokio::spawn(self.clone().feed(missing.clone(), prefetch));
         }
         let fetching: u64 = missing.iter().map(|p| closure[p].info.nar_size()).sum();
         // Fetching can take a while, and each fetch holds the entry it needs.
@@ -177,6 +178,7 @@ impl Store {
                 .map(|fetch| async move { fetch.done.await.map_err(|e| anyhow::anyhow!("{e}")) }),
         )
         .await?;
+        drop(ahead);
         // Only fetches change the node store's narinfos.
         if self.installs.load(Ordering::SeqCst) != installs {
             let (this, all) = (self.clone(), paths.clone());
@@ -302,10 +304,12 @@ impl Store {
     /// Starts the fetches of `paths` that wait for a slot, one slot at a time,
     /// in the order of `paths`. Each ensure has a feed of its own, and slots
     /// go to the feeds in the order they asked, so ensures take turns. A feed
-    /// can also start a fetch that another ensure created.
-    async fn feed(self: Arc<Self>, paths: Vec<StorePath>) {
+    /// can also start a fetch that another ensure created. A pod waits for a
+    /// publish, so a prefetch's feed asks for slots only while no publish
+    /// waits for fetches. The fetches that it has started keep their slots.
+    async fn feed(self: Arc<Self>, paths: Vec<StorePath>, prefetch: bool) {
         let mut paths = paths.into_iter();
-        while let Ok(slot) = self.jobs.clone().acquire_owned().await {
+        while let Ok(slot) = self.slot(prefetch).await {
             // Skips the paths that no longer wait, like those that another
             // ensure started meanwhile.
             let take = |path| self.fetching.lock().unwrap().get_mut(&path)?.start.take();
@@ -313,6 +317,26 @@ impl Store {
                 return;
             };
             drop(start.send(slot));
+        }
+    }
+
+    /// Waits for a slot. A prefetch leaves the queue while a publish waits
+    /// for fetches.
+    async fn slot(&self, prefetch: bool) -> Result<OwnedSemaphorePermit, AcquireError> {
+        let slot = || self.jobs.clone().acquire_owned();
+        if !prefetch {
+            return slot().await;
+        }
+        let mut ahead = self.ahead.subscribe();
+        loop {
+            drop(ahead.wait_for(|publishes| *publishes == 0).await);
+            tokio::select! {
+                // If a slot and a publish arrive together, the prefetch gives
+                // the slot up.
+                biased;
+                _ = ahead.changed() => {}
+                slot = slot() => return slot,
+            }
         }
     }
 
@@ -511,6 +535,22 @@ impl Ensuring {
             let failed = |done: &Shared<_>| matches!(done.peek(), Some(Err(_)));
             fetches.iter().any(failed) || fetches.iter().all(|done| done.peek().is_some())
         }
+    }
+}
+
+/// Counts a publish that waits for fetches in [`Store::ahead`].
+struct Ahead(Arc<Store>);
+
+impl Ahead {
+    fn new(store: Arc<Store>) -> Self {
+        store.ahead.send_modify(|publishes| *publishes += 1);
+        Self(store)
+    }
+}
+
+impl Drop for Ahead {
+    fn drop(&mut self) {
+        self.0.ahead.send_modify(|publishes| *publishes -= 1);
     }
 }
 
@@ -1263,6 +1303,45 @@ mod tests {
         drop(slot);
         a.done().await.unwrap();
         b.done().await.unwrap();
+    }
+
+    /// A publish's fetches get the slots before those of a prefetch that
+    /// asked first, and the prefetch gets them afterwards.
+    #[tokio::test]
+    async fn starts_publishes_before_prefetches() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let config = crate::store::Config {
+            jobs: 1,
+            ..zstd_config(&dir, tmp.path())
+        };
+        let store = Arc::new(Store::new(config).unwrap());
+        let hello = fixture_root(&dir, "hello.path");
+        // With glibc's closure present, warm's prefetch fetches warm and
+        // busybox, and hello's publish fetches hello.
+        (store.ensure(&[fixture_path(&dir, "glibc")]).done().await).unwrap();
+        let glibc = count(store.dir());
+        // The slot that the test holds stands for a NAR that the prefetch is
+        // fetching.
+        let slot = store.jobs.acquire().await.unwrap();
+        let mut prefetch = store.prefetch(&[fixture_path(&dir, "warm")]);
+        resolved(&prefetch).await;
+        let mut publish = store.ensure(std::slice::from_ref(&hello));
+        resolved(&publish).await;
+        // The test queues for a slot behind the feeds.
+        let mut next = std::pin::pin!(store.jobs.acquire());
+        assert!(next.as_mut().now_or_never().is_none());
+        drop(slot);
+        let slot = next.await.unwrap();
+        assert!(store.present(&hello));
+        assert_eq!(count(store.dir()), glibc + 1);
+
+        drop(slot);
+        publish.done().await.unwrap();
+        prefetch.done().await.unwrap();
+        assert_eq!(count(store.dir()), glibc + 3);
     }
 
     /// The largest NAR of a closure gets the first slot.

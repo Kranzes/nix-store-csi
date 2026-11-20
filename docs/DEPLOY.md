@@ -210,6 +210,8 @@ the alert rule for lists that a node has read but doesn't hold covers them.
 - If the plugin can't read or fetch a list, it logs a warning that names the
   list's file and tries again a minute later. Until then it keeps the closures
   it last fetched for that list.
+- While a publish's fetches are in flight, the plugin starts no new fetch for
+  the prefetch lists. The NARs that it is already fetching for them finish.
 
 For a rollout:
 

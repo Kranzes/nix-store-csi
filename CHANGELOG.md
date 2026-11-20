@@ -9,6 +9,10 @@
   The Prefetch lists table is wider and gives each hash of a list its system,
   its pool with node pools, and the share of node plugins that fetched it.
   The prefetch alerts point to the table.
+- While a publish's fetches are in flight, the plugin starts no new fetch for
+  the prefetch lists. The NARs that it is already fetching for them finish.
+  Before, the publish took turns with each list, so a pod that started during
+  a large prefetch waited for most of it.
 
 ### Fixed
 

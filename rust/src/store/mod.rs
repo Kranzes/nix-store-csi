@@ -24,7 +24,7 @@ use anyhow::{Context, bail, ensure};
 use foldhash::{HashMap, HashSet, HashSetExt};
 use harmonia_store_path::StorePath;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Timespec, Timestamps, UTIME_NOW, flock, utimensat};
-use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore, watch};
 use tracing::{info, warn};
 
 use self::fetch::{UNPACK_TASKS, Underway};
@@ -103,6 +103,8 @@ pub struct Store {
     /// A slot for each fetch that may run at once.
     jobs: Arc<Semaphore>,
     max_jobs: usize,
+    /// How many publishes wait for fetches.
+    ahead: watch::Sender<usize>,
     max_closure_size: Option<u64>,
     max_store_size: Option<Size>,
     /// Ensures checked against `max_store_size` hold it until they hold their
@@ -247,6 +249,7 @@ impl Store {
             tmp,
             jobs: Arc::new(Semaphore::new(config.jobs)),
             max_jobs: config.jobs,
+            ahead: watch::Sender::default(),
             max_closure_size: config.max_closure_size,
             max_store_size: config.max_store_size,
             checking_size: Mutex::default(),

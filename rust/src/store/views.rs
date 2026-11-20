@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use super::fetch::Closure;
 use super::fs::{Scratch, count_inodes, remove_file};
-use super::{GcGuard, Store, list_names, write_synced};
+use super::{GcGuard, Store, list_names, write_unsynced};
 use crate::store_path::Names;
 
 /// The directory in a view that links each root under its name without the
@@ -561,7 +561,8 @@ impl Volume {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("reading {}", record.display())),
         };
-        // Only a temporary file that a kill cut short has no newline.
+        // Only a temporary file that a kill cut short, or a record that a
+        // power loss emptied, has no newline.
         let Some(newline) = bytes.iter().position(|&b| b == b'\n') else {
             return Ok(None);
         };
@@ -571,9 +572,15 @@ impl Volume {
         }))
     }
 
+    /// Writes `record` without syncing it to disk. A sync would wait for the
+    /// journal, behind the data that fetches write, for seconds on a slow
+    /// disk and with views/ locked. A record only matters while its volume
+    /// is mounted. Only a power loss can lose it, and that takes the mount
+    /// too.
     fn write(&self, record: &Path) -> anyhow::Result<()> {
         let target = self.target.as_os_str().as_encoded_bytes();
-        write_synced(record, &[self.key.as_bytes(), b"\n", target].concat())
+        write_unsynced(record, &[self.key.as_bytes(), b"\n", target].concat())
+            .with_context(|| format!("writing {}", record.display()))
     }
 }
 

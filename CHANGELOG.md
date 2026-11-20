@@ -11,6 +11,13 @@
   the wait for other volumes that do the same, and `mount_ms`. They add up to
   `elapsed_ms`.
 
+### Fixed
+
+- A publish no longer syncs the volume's record to disk. On a disk that was
+  still writing the data of a fetch, the sync took seconds, and the publishes
+  of other volumes waited for it. Only a power loss can lose the record, and
+  it unmounts the volume too.
+
 ## 0.1.19 - 2026-11-20
 
 ### Changed

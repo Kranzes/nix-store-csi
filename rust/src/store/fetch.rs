@@ -114,7 +114,7 @@ impl Store {
         let paths: Arc<[StorePath]> = closure.keys().cloned().collect();
         // Under the guard, a collection either sees the hold or finishes
         // before this checks the limits and the store for the paths.
-        let (held, prefetched, mut missing) = {
+        let (generation, (held, prefetched, mut missing)) = {
             let _gc = self.gc_guard().await;
             if let Some(limit) = self.max_closure_size.filter(|_| !prefetch) {
                 let counted = (closure.iter())
@@ -131,7 +131,8 @@ impl Store {
                 }
             }
             let (this, closure, paths) = (self.clone(), closure.clone(), paths.clone());
-            tokio::task::spawn_blocking(move || this.hold(&closure, &paths, prefetch)).await??
+            let held = tokio::task::spawn_blocking(move || this.hold(&closure, &paths, prefetch));
+            (self.generation.load(Ordering::SeqCst), held.await??)
         };
         // The fetch of a closure ends about when its largest NAR's does, so
         // the largest NARs get slots first.
@@ -166,6 +167,7 @@ impl Store {
             start,
             start_bytes: read(&fetches),
             fetches: fetches.clone(),
+            generation,
             _held: (held, prefetched),
         });
         // Returns at the first failure, and the other fetches carry on.
@@ -498,6 +500,8 @@ struct Fetching {
     start_bytes: u64,
     /// The fetch of each other path.
     fetches: Vec<Fetch>,
+    /// The generation of views in which the ensure took its holds.
+    generation: u64,
     /// The holds in [`Store::ensuring`], and for a prefetch in
     /// [`Store::prefetched`]. They last until both the fetches and the caller
     /// are done with them, so garbage collection spares the closure until the
@@ -509,6 +513,13 @@ impl Ensuring {
     /// Returns the closure's paths once they're all in the store.
     pub async fn done(&mut self) -> anyhow::Result<Arc<[StorePath]>> {
         (&mut self.result).await?
+    }
+
+    /// The generation of views in which the ensure took its hold on the
+    /// closure, for [`Store::view`]. It is 0 until then, which is no view's
+    /// generation.
+    pub fn generation(&self) -> u64 {
+        self.progress.get().map_or(0, |f| f.generation)
     }
 
     /// The closure's NAR size, once it's resolved.

@@ -21,6 +21,10 @@
   sync. If the plugin exited before it had deleted the store paths that the
   last run left unsynced, the next start-up kept them as durable, since the
   kernel reports a lost write only once.
+- A publish fails if a failed sync deleted store paths after its closure was
+  resolved, and kubelet's next try resolves the closure again. With caches
+  that disagree on a store path's references, such a publish could have
+  mounted a closure that lacks one of them.
 
 ## 0.1.18 - 2026-11-19
 

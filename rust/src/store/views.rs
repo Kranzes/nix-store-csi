@@ -246,14 +246,17 @@ impl Store {
 
     /// Returns the view of `paths`, the closure of `roots`, for `volume` to
     /// mount at `target`. `paths` must be in order, as [`Store::ensure`]
-    /// returns them. Volumes with the same roots and closure share a view of
-    /// the current generation.
+    /// returns them, and `held_in` is their `Ensuring::generation`. Volumes
+    /// with the same roots and closure share a view of the current
+    /// generation.
+    #[expect(clippy::too_many_arguments)]
     pub fn view(
         &self,
         _gc: &GcGuard,
         volume: &str,
         roots: &[StorePath],
         paths: &[StorePath],
+        held_in: u64,
         target: &Path,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
     ) -> anyhow::Result<PathBuf> {
@@ -282,9 +285,17 @@ impl Store {
                 self.caches.store_dir().display(&path)
             );
         }
+        // The ensure checked the closure's references when it held it. A
+        // failed sync has since deleted paths despite the hold, and a fetch
+        // may have brought one back from a narinfo with other references.
+        let generation = self.generation.load(Ordering::SeqCst);
+        ensure!(
+            held_in == generation,
+            "a failed sync of the node store deleted store paths since the closure was resolved; a later try resolves it again"
+        );
         let links = root_links(roots)?;
         let volume = Volume {
-            key: view_key(self.generation.load(Ordering::SeqCst), &links, paths),
+            key: view_key(generation, &links, paths),
             target: target.to_owned(),
         };
         let dir = self.views.join(&volume.key);
@@ -971,6 +982,39 @@ mod tests {
                 .unwrap(),
             after
         );
+    }
+
+    /// A failed sync deletes paths that an ensure holds, and a fetch may
+    /// bring one back from a narinfo with other references than the closure
+    /// was checked against. So a publish refuses a closure from before, and
+    /// the next try resolves it again.
+    #[tokio::test]
+    async fn refuses_closures_from_before_a_failed_sync() {
+        let tmp = scratch();
+        let Some((store, hello, _)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        let mut ensuring = store.ensure(roots);
+        let paths = ensuring.done().await.unwrap();
+        unsync(&store, &hello);
+        store.forget(vec![hello.clone()]).await.unwrap();
+        let mut again = store.ensure(roots);
+        again.done().await.unwrap();
+
+        let gc = store.gc_guard().await;
+        let view = |ensuring: &crate::store::Ensuring| {
+            let held_in = ensuring.generation();
+            store.view(&gc, "v1", roots, &paths, held_in, &target, UNBOUND)
+        };
+        let err = view(&ensuring).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("since the closure was resolved"),
+            "{err:#}"
+        );
+        assert_eq!(count(tmp.path().join("views")), 0);
+        view(&again).unwrap();
     }
 
     #[tokio::test]

@@ -137,10 +137,12 @@ impl Plugin {
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
         let view_roots = roots.clone();
+        let held_in = ensuring.generation();
         let created = self
             .for_volume(&request.volume_id, move |store, gc| {
+                let is_bound = mounts::is_bound;
                 let view =
-                    store.view(gc, &volume, &view_roots, &names, &target, mounts::is_bound)?;
+                    store.view(gc, &volume, &view_roots, &names, held_in, &target, is_bound)?;
                 let created = store.add_mountpoints(&view)?;
                 mounts::publish(&view, &target)?;
                 Ok(created)

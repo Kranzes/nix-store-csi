@@ -130,7 +130,9 @@ impl Store {
         target: &Path,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
     ) -> anyhow::Result<PathBuf> {
-        self.view(&self.try_gc_guard(), volume, roots, paths, target, is_bound)
+        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let guard = self.try_gc_guard();
+        self.view(&guard, volume, roots, paths, generation, target, is_bound)
     }
 
     /// [`Store::drop_view`] with a guard held for the call, as an unpublish

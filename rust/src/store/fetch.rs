@@ -469,6 +469,51 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+impl Store {
+    /// The paths whose fetches are under way, each with whether its fetch
+    /// still waits for a job.
+    pub(super) fn fetches(&self) -> Vec<(StorePath, bool)> {
+        let fetching = self.fetching.lock().unwrap();
+        (fetching.iter())
+            .map(|(path, underway)| (path.clone(), underway.start.is_some()))
+            .collect()
+    }
+
+    /// Gives the fetch of `path` the job `slot`, as a feed would. Returns
+    /// whether the fetch succeeded, once it ends.
+    pub(super) fn start_fetch(
+        &self,
+        path: &StorePath,
+        slot: OwnedSemaphorePermit,
+    ) -> impl Future<Output = bool> + use<> {
+        let mut fetching = self.fetching.lock().unwrap();
+        let underway = fetching.get_mut(path).expect("a fetch of the path");
+        let start = underway.start.take().expect("a fetch that waits");
+        drop(start.send(slot));
+        let done = underway.fetch.done.clone();
+        async move { done.await.is_ok() }
+    }
+}
+
+#[cfg(test)]
+impl Ensuring {
+    /// Returns a check of whether the ensure's task has ended, or is about
+    /// to, since a fetch it waits for failed or all of them ended. The check
+    /// outlives the `Ensuring` and holds nothing of the closure. Call this
+    /// once the closure is resolved.
+    pub(super) fn watch(&self) -> impl Fn() -> bool + use<> {
+        let fetching = self.progress.get().into_iter();
+        let fetches: Vec<_> = (fetching.flat_map(|f| &f.fetches))
+            .map(|fetch| fetch.done.clone())
+            .collect();
+        move || {
+            let failed = |done: &Shared<_>| matches!(done.peek(), Some(Err(_)));
+            fetches.iter().any(failed) || fetches.iter().all(|done| done.peek().is_some())
+        }
+    }
+}
+
 /// Takes a fetch out of [`Store::fetching`] when it ends, even by a panic, so
 /// a later publish starts a new one.
 struct Leave(Arc<Store>, StorePath);
@@ -791,8 +836,7 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
-    use harmonia_file_nar::archive::write_nar;
-    use harmonia_file_nar::{NarByteStream, NarEvent};
+    use harmonia_file_nar::NarByteStream;
     use tracing_test::traced_test;
 
     use super::*;
@@ -805,17 +849,6 @@ mod tests {
 
     fn sha256(data: &[u8]) -> Hash {
         Algorithm::SHA256.digest(data)
-    }
-
-    /// A NAR of one regular file.
-    fn file_nar(contents: &[u8]) -> Vec<u8> {
-        let file = NarEvent::File {
-            name: Bytes::new(),
-            executable: false,
-            size: contents.len() as u64,
-            reader: std::io::Cursor::new(contents.to_vec().into()),
-        };
-        write_nar([&file]).into()
     }
 
     /// Checks that the tree at `path` serializes to the NAR with `nar_hash`,

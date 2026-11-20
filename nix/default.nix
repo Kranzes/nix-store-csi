@@ -43,6 +43,7 @@ let
   inherit (lib.importTOML ../rust/Cargo.toml) package;
   inherit (packages.nix-store-csi) commonArgs cargoArtifacts;
   chartSrc = ../deploy/helm/nix-store-csi;
+  specFiles = lib.fileset.fileFilter (f: f.hasExt "qnt") ../rust/spec;
   fixtures = pkgs.callPackage ./fixtures.nix { };
   packages = {
     nix-store-csi = pkgs.callPackage ./package.nix { inherit craneLib; };
@@ -114,6 +115,7 @@ rec {
       pkgs.rust-analyzer
       pkgs.rustfmt
       pkgs.bacon
+      pkgs.quint
     ];
   };
 
@@ -164,12 +166,57 @@ rec {
       commonArgs
       // {
         inherit cargoArtifacts;
-        nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.cacert ];
+        # The replay test has quint generate traces from the spec.
+        src = lib.fileset.toSource {
+          root = ../rust;
+          fileset = lib.fileset.unions [
+            packages.nix-store-csi.fileset
+            specFiles
+          ];
+        };
+        nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
+          pkgs.cacert
+          pkgs.quint
+        ];
         env = commonArgs.env // {
           NIX_STORE_CSI_FIXTURES = fixtures;
         };
       }
     );
+
+    # TLC visits every state of the model's small instances, and the
+    # simulator samples the larger one, which the tests replay.
+    spec =
+      pkgs.runCommand "${package.name}-spec"
+        {
+          nativeBuildInputs = [ pkgs.quint ];
+          src = lib.fileset.toSource {
+            root = ../rust/spec;
+            fileset = specFiles;
+          };
+        }
+        ''
+          export HOME=$TMPDIR
+          # Apalache writes its output next to the spec.
+          cp -r $src spec
+          chmod -R u+w spec
+          cd spec
+          quint test store_test.qnt
+          for module in caches faults; do
+            quint verify store.qnt --main $module --backend tlc --invariant safe
+          done
+          # A run with a seed takes one thread, so each step gets four runs.
+          for step in step replay; do
+            for seed in 1 2 3 4; do
+              quint run store.qnt --main sample --step $step --invariant safe \
+                --max-samples 12500 --max-steps 60 --seed $seed &
+            done
+          done
+          for job in $(jobs -p); do
+            wait $job
+          done
+          touch $out
+        '';
 
     deny = craneLib.cargoDeny (
       commonArgs

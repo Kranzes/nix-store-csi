@@ -2,3 +2,6 @@
 .direnv
 result*
 /.claude
+# What quint verify leaves
+/rust/spec/_apalache-out
+/rust/spec/tmp

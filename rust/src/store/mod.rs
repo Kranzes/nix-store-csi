@@ -5,6 +5,8 @@ mod fetch;
 mod fs;
 mod gc;
 mod holds;
+#[cfg(test)]
+mod model;
 mod narinfos;
 mod sandbox;
 #[cfg(test)]

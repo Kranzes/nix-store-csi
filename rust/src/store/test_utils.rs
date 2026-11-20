@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, SystemTime};
 
+use harmonia_file_nar::NarEvent;
+use harmonia_file_nar::archive::write_nar;
 use harmonia_store_path::StorePath;
+use tokio_util::bytes::Bytes;
 
 use super::fetch::{Ensuring, Progress};
 use super::fs::Scratch;
@@ -16,6 +19,17 @@ pub(super) fn scratch() -> Scratch {
 }
 
 pub(crate) const UNBOUND: fn(&Path, &Path) -> anyhow::Result<bool> = |_, _| Ok(false);
+
+/// A NAR of one regular file.
+pub(super) fn file_nar(contents: &[u8]) -> Vec<u8> {
+    let file = NarEvent::File {
+        name: Bytes::new(),
+        executable: false,
+        size: contents.len() as u64,
+        reader: std::io::Cursor::new(contents.to_vec().into()),
+    };
+    write_nar([&file]).into()
+}
 
 /// Copies `src` to `dst`. The copy is writable, unlike the fixtures.
 pub(super) fn copy_cache(src: &Path, dst: &Path) {

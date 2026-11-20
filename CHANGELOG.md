@@ -17,6 +17,10 @@
   Such a path lost its new narinfo, and stayed in the node store without one
   until the next restart. The same holds for the deletion after a failed
   sync.
+- A start-up whose sync of the node store fails leaves the record of a failed
+  sync. If the plugin exited before it had deleted the store paths that the
+  last run left unsynced, the next start-up kept them as durable, since the
+  kernel reports a lost write only once.
 
 ## 0.1.18 - 2026-11-19
 

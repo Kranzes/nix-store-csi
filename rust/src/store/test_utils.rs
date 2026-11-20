@@ -157,18 +157,31 @@ pub(super) async fn resolved(ensuring: &Ensuring) {
 }
 
 /// Waits for the tasks that hold `store` to end, so it releases its lock,
-/// and opens the store again. A child that a test forks holds the lock too
-/// until it execs, so this retries for about a second.
+/// and opens the store again.
 pub(super) async fn reopen(store: Arc<Store>, config: impl Fn() -> Config) -> Arc<Store> {
     settled(&store).await;
     drop(store);
+    open(config).await
+}
+
+/// Opens a store whose last user has dropped it.
+pub(super) async fn open(config: impl Fn() -> Config) -> Arc<Store> {
+    try_open(config).await.unwrap()
+}
+
+/// Like [`open`] for a state dir that start-up may refuse. A child that a
+/// test forks holds the last store's lock until it execs, so this retries
+/// for about a second while the lock is taken.
+pub(super) async fn try_open(config: impl Fn() -> Config) -> anyhow::Result<Arc<Store>> {
     for _ in 0..100 {
-        if let Ok(store) = Store::new(config()) {
-            return Arc::new(store);
+        match Store::new(config()) {
+            Err(e) if e.to_string().starts_with("another nix-store-csi") => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            opened => return opened.map(Arc::new),
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    Arc::new(Store::new(config()).unwrap())
+    Store::new(config()).map(Arc::new)
 }
 
 /// Makes `paths` look last used `days` ago.

@@ -43,6 +43,13 @@ pub use self::views::{Mountpoint, Usage, check_volume, root_links, view_generati
 /// The kernel's id for the current boot, which a reboot changes.
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 
+#[cfg(test)]
+thread_local! {
+    /// Makes the first [`Store::syncfs`] of the next store that this thread
+    /// opens fail.
+    static FAIL_SYNCFS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The version of the state dir's layout, which `<state>/version` records.
 /// Raise it when the layout changes.
 const LAYOUT_VERSION: u32 = 1;
@@ -111,6 +118,9 @@ pub struct Store {
     /// and a later syncfs doesn't report the loss again. So no later sync can
     /// make the paths written before a failed sync durable.
     failed_syncs: AtomicU64,
+    /// Makes the next [`Store::syncfs`] fail.
+    #[cfg(test)]
+    fail_syncfs: std::sync::atomic::AtomicBool,
     /// A failed sync creates this file, so a restart on the same boot deletes
     /// the unsynced paths, like a restart after a reboot does.
     failed_record: PathBuf,
@@ -241,6 +251,8 @@ impl Store {
             ensure_free: config.ensure_free,
             unsynced: Mutex::default(),
             failed_syncs: AtomicU64::default(),
+            #[cfg(test)]
+            fail_syncfs: std::sync::atomic::AtomicBool::new(FAIL_SYNCFS.take()),
             failed_record: state.join("sync-failed"),
             syncing: tokio::sync::Mutex::default(),
             fetching: Mutex::default(),
@@ -356,7 +368,7 @@ impl Store {
         // With nothing to settle, `flush` runs this syncfs instead.
         let flushed = if pending {
             let _ = self.flushed.set(());
-            rustix::fs::syncfs(&self.dir_fd)
+            self.syncfs()
                 .inspect_err(|e| {
                     warn!("syncing the node store: {e}; deleting the paths that the last run left unsynced");
                 })
@@ -539,16 +551,10 @@ impl Store {
             let batch: Vec<_> = (batch.into_iter())
                 .filter(|(p, _)| this.present(p))
                 .collect();
-            let synced = rustix::fs::syncfs(&this.dir_fd);
+            let synced = this.syncfs();
             if synced.is_err() {
                 this.failed_syncs.fetch_add(1, Ordering::SeqCst);
                 this.metrics.failed_sync();
-                // Only a restart on the same boot reads the record, and it
-                // reads it from the page cache. On a failing disk an fsync
-                // would fail and leave no record.
-                if let Err(e) = write_unsynced(&this.failed_record, b"") {
-                    warn!("writing {}: {e}", this.failed_record.display());
-                }
             }
             (batch, synced)
         })
@@ -589,6 +595,30 @@ impl Store {
             Ok(())
         })
         .await?
+    }
+
+    /// Syncs the store's filesystem. A later syncfs doesn't report a lost
+    /// write again, so a failed one leaves a record. If the plugin ends
+    /// before it has deleted the unsynced paths, the next start-up on this
+    /// boot finds the record and deletes them.
+    fn syncfs(&self) -> rustix::io::Result<()> {
+        #[cfg(test)]
+        let fails = self.fail_syncfs.swap(false, Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fails = false;
+        let synced = if fails {
+            Err(rustix::io::Errno::IO)
+        } else {
+            rustix::fs::syncfs(&self.dir_fd)
+        };
+        // The start-up reads the record from the page cache. On a failing
+        // disk an fsync would fail and leave no record.
+        if synced.is_err()
+            && let Err(e) = write_unsynced(&self.failed_record, b"")
+        {
+            warn!("writing {}: {e}", self.failed_record.display());
+        }
+        synced
     }
 
     /// Makes the paths that fetches moved into store/ durable. A caller that
@@ -837,6 +867,40 @@ mod tests {
         std::fs::write(&store.failed_record, "").unwrap();
         let store = reopen(store, || zstd_config(&dir, tmp.path())).await;
         assert!(!store.present(path));
+        assert!(!store.failed_record.exists());
+    }
+
+    /// A later syncfs doesn't report a lost write again. So a start-up
+    /// whose syncfs fails leaves the record of a failed sync, and if it ends
+    /// before it has deleted the unsynced paths, the next start-up does.
+    #[tokio::test]
+    async fn remembers_a_failed_sync_at_start_up() {
+        let Some(dir) = fixtures() else {
+            return;
+        };
+        let tmp = scratch();
+        let Some((store, hello, _)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        unsync(&store, &hello);
+        let narinfo = store.narinfos.unsynced(&hello);
+        settled(&store).await;
+        drop(store);
+        // Start-up fails at a narinfo that it cannot delete, right after
+        // its syncfs.
+        let aside = tmp.path().join("aside");
+        std::fs::rename(&narinfo, &aside).unwrap();
+        std::fs::create_dir(&narinfo).unwrap();
+        FAIL_SYNCFS.set(true);
+        let config = || zstd_config(&dir, tmp.path());
+        let err = try_open(config).await.err().unwrap();
+        assert!(format!("{err:#}").contains("deleting"), "{err:#}");
+        std::fs::remove_dir(&narinfo).unwrap();
+        std::fs::rename(&aside, &narinfo).unwrap();
+
+        let store = open(config).await;
+        assert!(!store.present(&hello));
+        assert!(store.narinfos.files(&hello).iter().all(|f| !f.exists()));
         assert!(!store.failed_record.exists());
     }
 

@@ -520,13 +520,10 @@ impl State<Node> for Observed {
             let [root] = &roots[..] else {
                 bail!("the view {key} has the roots {roots:?}");
             };
-            let paths = file_names(&dir).into_iter();
             Ok(View {
                 generation: view_generation(key).context("a view has another name")?,
                 root: root.clone(),
-                paths: (paths.filter_map(|file| StorePath::from_base_path(&file).ok()))
-                    .map(|path| name(&path))
-                    .collect(),
+                paths: super::list_store_paths(&dir)?.iter().map(name).collect(),
             })
         };
         let key = |view: &Path| view.file_name().unwrap().to_string_lossy().into_owned();

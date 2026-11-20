@@ -400,16 +400,12 @@ mod tests {
     #[tokio::test]
     async fn adds_mountpoints_to_views_from_before_the_start() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((store, hello, _)) = hello_store(tmp.path()).await else {
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
             return;
         };
         let roots = std::slice::from_ref(&hello);
         let target = tmp.path().join("target");
-        let mut ensuring = store.ensure(roots);
-        let paths = ensuring.done().await.unwrap();
-        let (gc, held_in) = (store.gc_guard().await, ensuring.generation());
-        let view = (store.view(&gc, "v1", roots, &paths, held_in, &target, UNBOUND)).unwrap();
-        drop(gc);
+        let view = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
         let mountpoints = Mountpoints::new(&format!("/nix/store/{GLIBC}/lib/"), None).unwrap();
         mountpoints.run(store).await;
         assert!(view.join(GLIBC).join("lib").is_dir());

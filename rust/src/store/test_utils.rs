@@ -136,7 +136,7 @@ pub(super) fn ends_while_busy(
 
 impl Store {
     /// [`Store::view`] with a guard held for the call, as a publish holds one.
-    pub(super) fn guarded_view(
+    pub(crate) fn guarded_view(
         &self,
         volume: &str,
         roots: &[StorePath],

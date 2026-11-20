@@ -875,9 +875,9 @@ mod tests {
         assert!(!store.failed_record.exists());
     }
 
-    /// A later syncfs doesn't report a lost write again. So a start-up
-    /// whose syncfs fails leaves the record of a failed sync, and if it ends
-    /// before it has deleted the unsynced paths, the next start-up does.
+    /// A start-up whose syncfs fails leaves the record of a failed sync, and
+    /// if it ends before it has deleted the unsynced paths, the next start-up
+    /// does.
     #[tokio::test]
     async fn remembers_a_failed_sync_at_start_up() {
         let Some(dir) = fixtures() else {
@@ -889,7 +889,6 @@ mod tests {
         };
         unsync(&store, &hello);
         let narinfo = store.narinfos.unsynced(&hello);
-        settled(&store).await;
         drop(store);
         // Start-up fails at a narinfo that it cannot delete, right after
         // its syncfs.

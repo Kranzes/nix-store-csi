@@ -285,13 +285,17 @@ rec {
           helm template ${chartSrc} "''${pools[@]}" | yq 'select(.kind == "DaemonSet")' > daemonsets.yaml
           mounts=$(yq -N '.metadata.name as $name | .spec.template.spec.volumes[] | select(.name == "prefetch") | (keys | .[1]) as $form | (.configMap // .projected.sources[].configMap) | $name + " " + $form + " " + .name + " " + (.optional | tostring)' daemonsets.yaml)
           test "$mounts" = "$(printf '%s\n' 'release-name-node configMap lists true' 'release-name-node-gpu configMap gpu-lists true' 'release-name-node-web projected lists true' 'release-name-node-web projected web-lists true')"
+          # Kubelet pulls the plugin's image last, after which prefetch
+          # writes to the disk.
+          last=$(yq -N '.spec.template.spec.containers[-1].name' daemonsets.yaml)
+          test "$last" = "$(printf 'nix-store-csi\nnix-store-csi\nnix-store-csi')"
           secrets=$(yq -N '.spec.template.spec.imagePullSecrets[].name' daemonsets.yaml)
           test "$secrets" = "$(printf 'registry\nregistry\nregistry')"
           # A pool's maxStoreSize replaces the top-level one, and an empty one
           # turns it off.
           limits=$(helm template ${chartSrc} --set maxStoreSize=200G \
             --set-json 'nodePools={"gpu":{"nodeSelector":{"pool":"gpu"},"maxStoreSize":"80%"},"web":{"nodeSelector":{"pool":"web"},"maxStoreSize":""}}' \
-            | yq -N 'select(.kind == "DaemonSet") | .metadata.name as $name | .spec.template.spec.containers[0].args[] | select(test("^--max-store-size")) | $name + " " + .')
+            | yq -N 'select(.kind == "DaemonSet") | .metadata.name as $name | .spec.template.spec.containers[] | select(.name == "nix-store-csi") | .args[] | select(test("^--max-store-size")) | $name + " " + .')
           test "$limits" = "$(printf '%s\n' 'release-name-node --max-store-size=200G' 'release-name-node-gpu --max-store-size=80%')"
           # A pool's stateDir replaces the top-level one in the plugin's flag
           # and its mount, which kubelet makes in the parent's hostPath.
@@ -299,8 +303,8 @@ rec {
             --set-json 'nodePools={"disk":{"nodeSelector":{"pool":"disk"},"stateDir":"/mnt/instance-store/nsc"},"web":{"nodeSelector":{"pool":"web"}}}' \
             | yq -N 'select(.kind == "DaemonSet") | .metadata.name as $name | .spec.template.spec as $spec
               | ($spec.volumes[] | select(.name == "state") | .hostPath) as $host
-              | ($spec.containers[0].volumeMounts[] | select(.name == "state")) as $mount
-              | $name + " " + ($spec.containers[0].args[] | select(test("^--state-dir")))
+              | ($spec.containers[] | select(.name == "nix-store-csi") | .volumeMounts[] | select(.name == "state")) as $mount
+              | $name + " " + ($spec.containers[] | select(.name == "nix-store-csi") | .args[] | select(test("^--state-dir")))
                 + " " + $host.path + " " + $host.type + " " + $mount.subPath + " " + $mount.mountPath')
           test "$dirs" = "$(printf '%s\n' \
             'release-name-node --state-dir=/srv/nix-store-csi /srv Directory nix-store-csi /srv/nix-store-csi' \

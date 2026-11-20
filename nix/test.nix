@@ -403,6 +403,7 @@ testers.runNixOSTest {
 
   testScript = ''
     import json
+    from datetime import datetime
 
     plugin = "kubectl -n kube-system logs daemonset/nix-store-csi-node -c nix-store-csi"
     volumes = "grep 'kubernetes.io~csi/nix/mount' /proc/mounts"
@@ -457,6 +458,12 @@ testers.runNixOSTest {
             job = "-n kube-system job/helm-install-nix-store-csi"
             print(machine.execute(f"kubectl describe {job}; kubectl logs {job}")[1])
             raise
+        # Kubelet starts the registrar before the plugin, so the registrar
+        # waited for the plugin's socket.
+        registrar = "kubectl -n kube-system logs daemonset/nix-store-csi-node -c registrar"
+        started = machine.succeed(f"{registrar} --timestamps | head -n 1").split()[0]
+        serving = machine.succeed(f"{plugin} --timestamps | grep -F 'serving the CSI plugin'").split()[0]
+        t.assertLess(datetime.fromisoformat(started), datetime.fromisoformat(serving))
 
     with subtest("the admission policy refuses the driver's volumes outside default"):
         machine.succeed("kubectl create namespace other")

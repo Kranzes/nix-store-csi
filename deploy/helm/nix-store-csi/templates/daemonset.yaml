@@ -105,6 +105,10 @@ spec:
       maxUnavailable: {{ $.Values.updateStrategy.rollingUpdate.maxUnavailable | toYaml }}
   template:
     metadata:
+      annotations:
+        # For `kubectl logs` and `kubectl exec`, which would pick the first
+        # container.
+        kubectl.kubernetes.io/default-container: nix-store-csi
       # Selector labels only: helm.sh/chart changes with every chart version,
       # and in the pod template that would restart every node plugin.
       labels:
@@ -132,7 +136,38 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Kubelet pulls the images and starts the containers in this order. The
+      # plugin comes last, so its prefetch does not write to the disk while
+      # kubelet pulls the other images, and the registrar is already waiting
+      # for the plugin's socket when the plugin serves.
       containers:
+        - name: registrar
+          image: {{ $.Values.registrar.image.repository }}:{{ $.Values.registrar.image.tag }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ $socketDir }}/csi.sock
+          {{- with $.Values.registrar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: registration
+              mountPath: /registration
+        # Serves the plugin's healthz probes by calling its Probe RPC.
+        - name: liveness-probe
+          image: {{ $.Values.livenessProbe.image.repository }}:{{ $.Values.livenessProbe.image.tag }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port={{ $.Values.livenessProbe.port }}
+          {{- with $.Values.livenessProbe.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
         - name: nix-store-csi
           {{- include "nix-store-csi.image" $ | nindent 10 }}
           args:
@@ -230,33 +265,6 @@ spec:
               readOnly: true
               mountPropagation: HostToContainer
             {{- end }}
-        - name: registrar
-          image: {{ $.Values.registrar.image.repository }}:{{ $.Values.registrar.image.tag }}
-          args:
-            - --csi-address=/csi/csi.sock
-            - --kubelet-registration-path={{ $socketDir }}/csi.sock
-          {{- with $.Values.registrar.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: socket
-              mountPath: /csi
-            - name: registration
-              mountPath: /registration
-        # Serves the healthz probe above by calling the plugin's Probe RPC.
-        - name: liveness-probe
-          image: {{ $.Values.livenessProbe.image.repository }}:{{ $.Values.livenessProbe.image.tag }}
-          args:
-            - --csi-address=/csi/csi.sock
-            - --health-port={{ $.Values.livenessProbe.port }}
-          {{- with $.Values.livenessProbe.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: socket
-              mountPath: /csi
       volumes:
         - name: socket
           hostPath:

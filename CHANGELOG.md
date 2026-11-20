@@ -11,6 +11,14 @@
   the wait for other volumes that do the same, and `mount_ms`. They add up to
   `elapsed_ms`.
 
+### Changed
+
+- The node plugin's pod starts the registrar and the liveness probe before
+  the plugin. Kubelet pulls a pod's images in the order of its containers, so
+  on a new node the prefetch wrote to the disk while kubelet pulled the other
+  two images, and the node's first mount waited for the registrar's.
+  `kubectl logs` and `kubectl exec` still pick the plugin's container.
+
 ### Fixed
 
 - A publish no longer syncs the volume's record to disk. On a disk that was

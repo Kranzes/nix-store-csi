@@ -22,6 +22,7 @@ use rustix::fs::{
 };
 use tracing::{info, warn};
 
+use super::fetch::Closure;
 use super::fs::{Scratch, count_inodes, remove_file};
 use super::{GcGuard, Store, list_names, write_synced};
 use crate::store_path::Names;
@@ -244,22 +245,19 @@ impl Store {
         add_to_view(view, &mountpoints)
     }
 
-    /// Returns the view of `paths`, the closure of `roots`, for `volume` to
-    /// mount at `target`. `paths` must be in order, as [`Store::ensure`]
-    /// returns them, and `held_in` is their `Ensuring::generation`. Volumes
-    /// with the same roots and closure share a view of the current
-    /// generation.
-    #[expect(clippy::too_many_arguments)]
+    /// Returns the view of `closure`, which [`Store::ensure`] returned for
+    /// `roots`, for `volume` to mount at `target`. Volumes with the same
+    /// roots and closure share a view of the current generation.
     pub fn view(
         &self,
         _gc: &GcGuard,
         volume: &str,
         roots: &[StorePath],
-        paths: &[StorePath],
-        held_in: u64,
+        closure: &Closure,
         target: &Path,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
     ) -> anyhow::Result<PathBuf> {
+        let paths = &*closure.paths;
         let record = self.volumes.join(check_volume(volume)?);
         // Kubelet retries publishes that succeeded. Replacing a view that is
         // still mounted wouldn't change what the pod sees, and the old view
@@ -290,7 +288,7 @@ impl Store {
         // may have brought one back from a narinfo with other references.
         let generation = self.generation.load(Ordering::SeqCst);
         ensure!(
-            held_in == generation,
+            closure.generation == generation,
             "a failed sync of the node store deleted store paths since the closure was resolved; a later try resolves it again"
         );
         let links = root_links(roots)?;
@@ -996,19 +994,14 @@ mod tests {
         };
         let roots = std::slice::from_ref(&hello);
         let target = tmp.path().join("target");
-        let mut ensuring = store.ensure(roots);
-        let paths = ensuring.done().await.unwrap();
+        let before = store.ensure(roots).done().await.unwrap();
         unsync(&store, &hello);
         store.forget(vec![hello.clone()]).await.unwrap();
-        let mut again = store.ensure(roots);
-        again.done().await.unwrap();
+        let again = store.ensure(roots).done().await.unwrap();
 
         let gc = store.gc_guard().await;
-        let view = |ensuring: &crate::store::Ensuring| {
-            let held_in = ensuring.generation();
-            store.view(&gc, "v1", roots, &paths, held_in, &target, UNBOUND)
-        };
-        let err = view(&ensuring).unwrap_err();
+        let view = |closure| store.view(&gc, "v1", roots, closure, &target, UNBOUND);
+        let err = view(&before).unwrap_err();
         assert!(
             format!("{err:#}").contains("since the closure was resolved"),
             "{err:#}"

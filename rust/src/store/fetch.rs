@@ -107,7 +107,7 @@ impl Store {
         prefetch: bool,
         progress: &OnceLock<Fetching>,
         resolved: &AtomicUsize,
-    ) -> anyhow::Result<Arc<[StorePath]>> {
+    ) -> anyhow::Result<Closure> {
         let installs = self.installs.load(Ordering::SeqCst);
         let closure = Arc::new(self.caches.resolve(roots, resolved).await?);
         let total: u64 = closure.values().map(|e| e.info.nar_size()).sum();
@@ -168,7 +168,6 @@ impl Store {
             start,
             start_bytes: read(&fetches),
             fetches: fetches.clone(),
-            generation,
             _held: (held, prefetched),
         });
         // Returns at the first failure, and the other fetches carry on.
@@ -193,7 +192,7 @@ impl Store {
             let caches = serde_json::json!(caches);
             info!(%store_paths, fetched = missing.len(), nar_size = fetching, %caches, elapsed_ms, "fetched the closure");
         }
-        Ok(paths)
+        Ok(Closure { paths, generation })
     }
 
     /// Fails unless `paths` holds every reference of each store object in it.
@@ -567,10 +566,26 @@ impl Drop for Leave {
 /// A closure on its way into the store, from [`Store::ensure`] or
 /// [`Store::prefetch`].
 pub struct Ensuring {
-    result: oneshot::Receiver<anyhow::Result<Arc<[StorePath]>>>,
+    result: oneshot::Receiver<anyhow::Result<Closure>>,
     /// The narinfos resolution has so far.
     resolved: Arc<AtomicUsize>,
     progress: Arc<OnceLock<Fetching>>,
+}
+
+/// A closure that an ensure made present: its store paths in order, and the
+/// generation of views in which the ensure took its holds on them.
+#[derive(Clone, Debug)]
+pub struct Closure {
+    pub paths: Arc<[StorePath]>,
+    pub(super) generation: u64,
+}
+
+impl std::ops::Deref for Closure {
+    type Target = [StorePath];
+
+    fn deref(&self) -> &[StorePath] {
+        &self.paths
+    }
 }
 
 /// The fetches of a closure's paths, set once the closure is resolved.
@@ -585,8 +600,6 @@ struct Fetching {
     start_bytes: u64,
     /// The fetch of each other path.
     fetches: Vec<Fetch>,
-    /// The generation of views in which the ensure took its holds.
-    generation: u64,
     /// The holds in [`Store::ensuring`], and for a prefetch in
     /// [`Store::prefetched`]. They last until both the fetches and the caller
     /// are done with them, so garbage collection spares the closure until the
@@ -596,15 +609,8 @@ struct Fetching {
 
 impl Ensuring {
     /// Returns the closure's paths once they're all in the store.
-    pub async fn done(&mut self) -> anyhow::Result<Arc<[StorePath]>> {
+    pub async fn done(&mut self) -> anyhow::Result<Closure> {
         (&mut self.result).await?
-    }
-
-    /// The generation of views in which the ensure took its hold on the
-    /// closure, for [`Store::view`]. It is 0 until then, which is no view's
-    /// generation.
-    pub fn generation(&self) -> u64 {
-        self.progress.get().map_or(0, |f| f.generation)
     }
 
     /// The closure's NAR size, once it's resolved.

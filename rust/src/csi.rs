@@ -112,8 +112,8 @@ impl Plugin {
         if timed_out || !ensuring.had_closure() {
             call.fetched();
         }
-        let names = match done {
-            Ok(Ok(names)) => names,
+        let closure = match done {
+            Ok(Ok(closure)) => closure,
             Ok(Err(e)) => {
                 warn!("{e:#}");
                 let code = if e.is::<store::TooBig>() || e.is::<store::StoreTooBig>() {
@@ -137,12 +137,10 @@ impl Plugin {
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
         let view_roots = roots.clone();
-        let held_in = ensuring.generation();
         let created = self
             .for_volume(&request.volume_id, move |store, gc| {
                 let is_bound = mounts::is_bound;
-                let view =
-                    store.view(gc, &volume, &view_roots, &names, held_in, &target, is_bound)?;
+                let view = store.view(gc, &volume, &view_roots, &closure, &target, is_bound)?;
                 let created = store.add_mountpoints(&view)?;
                 mounts::publish(&view, &target)?;
                 Ok(created)

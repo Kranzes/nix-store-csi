@@ -9,7 +9,7 @@ use harmonia_file_nar::archive::write_nar;
 use harmonia_store_path::StorePath;
 use tokio_util::bytes::Bytes;
 
-use super::fetch::{Ensuring, Progress};
+use super::fetch::{Closure, Ensuring, Progress};
 use super::fs::Scratch;
 use super::{Config, GcGuard, Size, Store};
 use crate::narinfo::tests::{file_store, fixture_root, fixtures};
@@ -77,7 +77,7 @@ pub(crate) fn ghost() -> StorePath {
 
 /// Returns a store that holds hello's closure from the fixtures, along with
 /// hello's store path and the closure.
-pub(crate) async fn hello_store(state: &Path) -> Option<(Arc<Store>, StorePath, Arc<[StorePath]>)> {
+pub(crate) async fn hello_store(state: &Path) -> Option<(Arc<Store>, StorePath, Closure)> {
     let dir = fixtures()?;
     let hello = fixture_root(&dir, "hello.path");
     let store = Arc::new(Store::new(zstd_config(&dir, state)).unwrap());
@@ -144,9 +144,12 @@ impl Store {
         target: &Path,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
     ) -> anyhow::Result<PathBuf> {
-        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let closure = Closure {
+            paths: paths.into(),
+            generation: self.generation.load(std::sync::atomic::Ordering::SeqCst),
+        };
         let guard = self.try_gc_guard();
-        self.view(&guard, volume, roots, paths, generation, target, is_bound)
+        self.view(&guard, volume, roots, &closure, target, is_bound)
     }
 
     /// [`Store::drop_view`] with a guard held for the call, as an unpublish

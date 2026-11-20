@@ -35,7 +35,7 @@ use serde::Deserialize;
 use tokio::runtime::Runtime;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
-use super::fetch::Ensuring;
+use super::fetch::{Closure, Ensuring};
 use super::fs::Scratch;
 use super::test_utils::{ALL, file_names, file_nar, open, resolved, scratch, unsigned_config};
 use super::{Config, Store, narinfos, view_generation};
@@ -133,7 +133,7 @@ struct Ensure {
     /// Whether its task has ended, or is about to.
     ended: Box<dyn Fn() -> bool>,
     /// Its closure or its error, once its task has ended.
-    result: Option<std::result::Result<Arc<[StorePath]>, String>>,
+    result: Option<std::result::Result<Closure, String>>,
 }
 
 /// A fetch that waits for its NAR.
@@ -364,15 +364,14 @@ impl Node {
         let (target, is_bound) = (self.target(v), self.is_bound());
         let plugin = self.plugin();
         let ensure = plugin.ensures.get(e).context("no such ensure")?;
-        let Some(Ok(paths)) = &ensure.result else {
+        let Some(Ok(closure)) = &ensure.result else {
             bail!("ensure {e} has no closure: {:?}", ensure.result);
         };
         let roots = [store_path(&ensure.root)];
-        let held_in = ensure.handle.as_ref().map_or(0, Ensuring::generation);
         let store = &plugin.store;
         let view = plugin.runtime.block_on(async {
             let guard = store.gc_guard().await;
-            store.view(&guard, v, &roots, paths, held_in, &target, is_bound)
+            store.view(&guard, v, &roots, closure, &target, is_bound)
         });
         // A publish that fails binds nothing, and the model changes nothing.
         if let Ok(view) = view {

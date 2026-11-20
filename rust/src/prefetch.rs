@@ -135,7 +135,7 @@ impl Prefetch {
                 let running = list.running.as_mut()?;
                 Some(async move {
                     let result = running.done().await;
-                    (file.clone(), result)
+                    (file.clone(), result.map(|closure| closure.paths))
                 })
             })
             .collect();

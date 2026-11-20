@@ -10,6 +10,14 @@
   its pool with node pools, and the share of node plugins that fetched it.
   The prefetch alerts point to the table.
 
+### Fixed
+
+- A fetch can no longer bring a store path back between the moment that
+  collection deletes it and the moment that collection deletes its narinfo.
+  Such a path lost its new narinfo, and stayed in the node store without one
+  until the next restart. The same holds for the deletion after a failed
+  sync.
+
 ## 0.1.18 - 2026-11-19
 
 ### Added

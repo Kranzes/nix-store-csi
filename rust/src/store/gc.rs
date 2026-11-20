@@ -185,14 +185,8 @@ impl Store {
             doomed.push((path, cost));
         }
         for (path, cost) in &doomed {
-            trash.push(self.evict(path, cost.bytes)?);
+            self.delete(trash, path, cost.bytes)?;
             self.metrics.deleted(cost.bytes);
-            // A fetch may have brought the path back since the check above,
-            // with a narinfo of its own.
-            let unsynced = self.unsynced.lock().unwrap();
-            if !unsynced.contains_key(path) {
-                self.remove_narinfo(path)?;
-            }
         }
         // A crash can leave a narinfo without its path. A fetch marks its path
         // unsynced before writing the narinfo, so with `unsynced` locked, an

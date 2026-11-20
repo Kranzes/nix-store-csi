@@ -478,6 +478,19 @@ impl Store {
         Ok(trash)
     }
 
+    /// Deletes `path`, whose NAR has `size` bytes, with its narinfo and its
+    /// mark, and leaves its store object in `trash`. A fetch marks its path
+    /// under the same lock before it writes the narinfo, and only once the
+    /// path has left store/. So no fetch writes a narinfo for this to delete.
+    fn delete(&self, trash: &mut Vec<Scratch>, path: &StorePath, size: u64) -> anyhow::Result<()> {
+        let mut unsynced = self.unsynced.lock().unwrap();
+        trash.push(self.evict(path, size)?);
+        unsynced.remove(path);
+        // An earlier sync may have renamed the narinfo before it failed, so
+        // this deletes it under either name.
+        self.remove_narinfo(path)
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -594,10 +607,10 @@ impl Store {
         Ok(())
     }
 
-    /// Deletes marked `paths` and their narinfos, then unmarks the ones that
-    /// left the node store. A path still in it stays marked, so the next sync
-    /// tries again. Call it with no guard from [`Store::gc_guard`] held,
-    /// since it waits for the publishes under way.
+    /// Deletes marked `paths`, their narinfos and their marks. A path that
+    /// cannot be deleted stays marked, so the next sync tries again. Call it
+    /// with no guard from [`Store::gc_guard`] held, since it waits for the
+    /// publishes under way.
     async fn forget(self: &Arc<Self>, paths: Vec<StorePath>) -> anyhow::Result<()> {
         // Publishes hold the guard while they build views, and `exclusively`
         // waits for them. So no publish links a store object as it leaves
@@ -609,20 +622,7 @@ impl Store {
                 // if the deletion below fails. A restart on this boot finds
                 // the failed sync's record and raises the generation too.
                 this.generation.fetch_add(1, Ordering::SeqCst);
-                let deleted = paths.iter().try_for_each(|path| {
-                    // `nar_size` reads the narinfo, so it runs before
-                    // `remove_narinfo`.
-                    trash.push(this.evict(path, this.nar_size(path))?);
-                    // An earlier sync may have renamed the narinfo before it
-                    // failed.
-                    this.remove_narinfo(path)
-                });
-                let gone: Vec<_> = paths.iter().filter(|path| !this.present(path)).collect();
-                let mut unsynced = this.unsynced.lock().unwrap();
-                for path in gone {
-                    unsynced.remove(path);
-                }
-                deleted
+                (paths.iter()).try_for_each(|path| this.delete(trash, path, this.nar_size(path)))
             })
             .await?;
         deleting.await?;

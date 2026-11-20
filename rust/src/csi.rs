@@ -112,6 +112,7 @@ impl Plugin {
         if timed_out || !ensuring.had_closure() {
             call.fetched();
         }
+        let fetched = started.elapsed();
         let closure = match done {
             Ok(Ok(closure)) => closure,
             Ok(Err(e)) => {
@@ -137,19 +138,37 @@ impl Plugin {
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
         let view_roots = roots.clone();
-        let created = self
+        let asked = Instant::now();
+        let (created, [waited, viewed, recorded, mounted]) = self
             .for_volume(&request.volume_id, move |store, gc| {
+                let waited = asked.elapsed();
                 let is_bound = mounts::is_bound;
-                let view = store.view(gc, &volume, &view_roots, &closure, &target, is_bound)?;
+                let viewing = Instant::now();
+                let (view, recorded) =
+                    store.view(gc, &volume, &view_roots, &closure, &target, is_bound)?;
+                let viewed = viewing.elapsed().saturating_sub(recorded);
+                let mounting = Instant::now();
                 let created = store.add_mountpoints(&view)?;
                 mounts::publish(&view, &target)?;
-                Ok(created)
+                Ok((created, [waited, viewed, recorded, mounting.elapsed()]))
             })
             .await?;
         self.waiting.lock().unwrap().remove(&request.volume_id);
-        let elapsed_ms = started.elapsed().as_millis();
         let mountpoints = (!created.is_empty()).then(|| field::display(Names(&created)));
-        info!(store_paths = %Names(&roots), mountpoints, elapsed_ms, "published");
+        // The phases add up to `elapsed_ms`. `fetch_ms` counts from the first
+        // try, `wait_ms` is the wait for the volume's turn and for
+        // collection, and `record_ms` the time on the lock on views/.
+        info!(
+            store_paths = %Names(&roots),
+            mountpoints,
+            elapsed_ms = started.elapsed().as_millis(),
+            fetch_ms = fetched.as_millis(),
+            wait_ms = waited.as_millis(),
+            view_ms = viewed.as_millis(),
+            record_ms = recorded.as_millis(),
+            mount_ms = mounted.as_millis(),
+            "published"
+        );
         Ok(NodePublishVolumeResponse {})
     }
 

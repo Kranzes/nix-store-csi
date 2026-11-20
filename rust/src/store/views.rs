@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail, ensure};
 use foldhash::{HashSet, HashSetExt};
@@ -247,7 +248,9 @@ impl Store {
 
     /// Returns the view of `closure`, which [`Store::ensure`] returned for
     /// `roots`, for `volume` to mount at `target`. Volumes with the same
-    /// roots and closure share a view of the current generation.
+    /// roots and closure share a view of the current generation. Also returns
+    /// how long it waited for and held the lock on views/, to look for the
+    /// view, put it there and write the volume's record.
     pub fn view(
         &self,
         _gc: &GcGuard,
@@ -256,7 +259,7 @@ impl Store {
         closure: &Closure,
         target: &Path,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
-    ) -> anyhow::Result<PathBuf> {
+    ) -> anyhow::Result<(PathBuf, Duration)> {
         let paths = &*closure.paths;
         let record = self.volumes.join(check_volume(volume)?);
         // Kubelet retries publishes that succeeded. Replacing a view that is
@@ -266,7 +269,7 @@ impl Store {
             && old.target == target
             && is_bound(&self.views.join(&old.key), target)?
         {
-            return Ok(self.views.join(old.key));
+            return Ok((self.views.join(old.key), Duration::ZERO));
         }
         // A failed sync misses the paths that fetches were still unpacking,
         // and they stay in store/ until their own syncs delete them.
@@ -305,13 +308,15 @@ impl Store {
             building.entry(volume.key.clone()).or_default().clone()
         };
         let _turn = turn.lock().unwrap_or_else(PoisonError::into_inner);
+        let locking = Instant::now();
         {
             let _views = self.views_lock.lock().unwrap();
             if (dir.try_exists()).with_context(|| format!("reading {}", dir.display()))? {
                 volume.write(&record)?;
-                return Ok(dir);
+                return Ok((dir, locking.elapsed()));
             }
         }
+        let looked = locking.elapsed();
         // A view gets its final name only once it's whole. This builds it
         // without the lock, so work on other views doesn't wait for it.
         let part = Scratch::new_in(&self.tmp)?;
@@ -329,11 +334,12 @@ impl Store {
                 .with_context(|| format!("linking {path} into the view"))
         })?;
         link_roots(&view.join(ROOTS), &links)?;
+        let locking = Instant::now();
         let _views = self.views_lock.lock().unwrap();
         std::fs::rename(&view, &dir)
             .with_context(|| format!("moving {} into place", dir.display()))?;
         volume.write(&record)?;
-        Ok(dir)
+        Ok((dir, looked + locking.elapsed()))
     }
 
     /// Forgets `volume`. If no other volume uses its view, moves the view

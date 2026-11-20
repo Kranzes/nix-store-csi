@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The `published` line says where a publish's time went: `fetch_ms` until the
+  closure was in the node store, counted from kubelet's first try, `wait_ms`
+  for the volume's turn and for garbage collection, `view_ms` to build the
+  view, `record_ms` to put it in place and write the volume's record, with
+  the wait for other volumes that do the same, and `mount_ms`. They add up to
+  `elapsed_ms`.
+
 ## 0.1.19 - 2026-11-20
 
 ### Changed

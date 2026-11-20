@@ -149,7 +149,8 @@ impl Store {
             generation: self.generation.load(std::sync::atomic::Ordering::SeqCst),
         };
         let guard = self.try_gc_guard();
-        self.view(&guard, volume, roots, &closure, target, is_bound)
+        let (view, _) = self.view(&guard, volume, roots, &closure, target, is_bound)?;
+        Ok(view)
     }
 
     /// [`Store::drop_view`] with a guard held for the call, as an unpublish

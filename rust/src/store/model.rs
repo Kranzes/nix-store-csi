@@ -374,7 +374,7 @@ impl Node {
             store.view(&guard, v, &roots, closure, &target, is_bound)
         });
         // A publish that fails binds nothing, and the model changes nothing.
-        if let Ok(view) = view {
+        if let Ok((view, _)) = view {
             self.bound.insert(target, view);
         }
         Ok(())

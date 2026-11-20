@@ -517,7 +517,12 @@ testers.runNixOSTest {
         post = "${curl}/bin/curl -sf -H 'Content-Type: application/json' --data-binary"
         # The first request starts resolving warm's closure, and the node
         # counts once the extender reads its plugin.
-        machine.wait_until_succeeds(f"{post} @${extenderArgs} http://127.0.0.1:8080/prioritize | ${jq}/bin/jq -e '.[0].Score > 0'", timeout=120)
+        try:
+            machine.wait_until_succeeds(f"{post} @${extenderArgs} http://127.0.0.1:8080/prioritize | ${jq}/bin/jq -e '.[0].Score > 0'", timeout=120)
+        except Exception:
+            system = "kubectl -n kube-system"
+            print(machine.execute(f"{system} logs deployment/nix-store-csi-locality --tail=40; {system} get endpointslices,pods -o wide")[1])
+            raise
         scores = json.loads(machine.succeed(f"{post} @${extenderArgs} http://127.0.0.1:8080/prioritize"))
         t.assertEqual(scores, [{"Host": "machine", "Score": 10 * held // warm_closure}, {"Host": "cold", "Score": 0}])
         scores = json.loads(machine.succeed(f"{post} @${volcanoRequest} http://127.0.0.1:8080/volcano/prioritize"))

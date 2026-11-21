@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, anyhow, bail, ensure};
 use futures::FutureExt;
@@ -37,14 +37,19 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 use super::fetch::{Closure, Ensuring};
 use super::fs::Scratch;
-use super::test_utils::{ALL, file_names, file_nar, open, resolved, scratch, unsigned_config};
-use super::{Config, Store, narinfos, view_generation};
+use super::test_utils::{file_names, file_nar, open, resolved, scratch, unsigned_config};
+use super::{Config, Excess, Store, narinfos, view_generation};
 
 /// The store paths of the model's `sample` module, each with its references.
 const REFERENCES: [(&str, &[&str]); 3] = [("a", &["b"]), ("b", &[]), ("c", &["b"])];
 
 /// How long a step may wait for the store before the test fails.
 const WAIT: Duration = Duration::from_secs(30);
+
+/// The `--keep-recent` of the plugin. The test dates each view that no
+/// volume uses to make collection keep the views the model keeps, and dates
+/// the narinfos to make it delete every path it may.
+const KEEP_RECENT: Duration = Duration::from_hours(1);
 
 fn store_path(name: &str) -> StorePath {
     StorePath::from_base_path(&format!("{}-{name}", name.repeat(32))).unwrap()
@@ -225,7 +230,7 @@ impl Node {
         let is_bound = self.is_bound();
         let starting = async {
             let store = open(config).await;
-            store.prune_views(is_bound).await?;
+            store.prune_views(is_bound, KEEP_RECENT).await?;
             let jobs = u32::try_from(store.max_jobs)?;
             let jobs = store.jobs.clone().acquire_many_owned(jobs).await?;
             anyhow::Ok((store, jobs))
@@ -259,7 +264,27 @@ impl Node {
         }
     }
 
-    fn restart(&mut self, reboot: bool) -> Result {
+    /// Dates the views that no bound volume uses: now if they are in
+    /// `kept`, or else long ago.
+    fn date_views(&mut self, kept: &BTreeSet<View>) -> Result {
+        let store = self.plugin().store.clone();
+        let bound: BTreeSet<_> = self.bound.values().cloned().collect();
+        for key in file_names(&store.views) {
+            if bound.contains(&store.views.join(&key)) {
+                continue;
+            }
+            let used = if kept.contains(&model_view(&store, &key)?) {
+                SystemTime::now()
+            } else {
+                SystemTime::UNIX_EPOCH
+            };
+            std::fs::File::create(store.kept.join(&key))?.set_modified(used)?;
+        }
+        Ok(())
+    }
+
+    fn restart(&mut self, reboot: bool, kept: &BTreeSet<View>) -> Result {
+        self.date_views(kept)?;
         self.stop();
         if reboot {
             std::fs::write(self.path("state").join("boot-id"), "another boot")?;
@@ -352,10 +377,15 @@ impl Node {
         Ok(())
     }
 
-    fn collect(&mut self) -> Result {
+    fn collect(&mut self, kept: &BTreeSet<View>) -> Result {
+        self.date_views(kept)?;
         let is_bound = self.is_bound();
         let plugin = self.plugin();
-        let collecting = plugin.store.collect(is_bound, Duration::ZERO, ALL);
+        for file in file_names(plugin.store.narinfos.dir()) {
+            let file = std::fs::File::open(plugin.store.narinfos.dir().join(file))?;
+            file.set_modified(SystemTime::UNIX_EPOCH)?;
+        }
+        let collecting = (plugin.store).collect(is_bound, KEEP_RECENT, Excess::default());
         (plugin.runtime).block_on(soon("the collection", collecting))??;
         Ok(())
     }
@@ -383,7 +413,7 @@ impl Node {
     fn unpublish(&mut self, v: &str) -> Result {
         let target = self.target(v);
         self.bound.remove(&target);
-        drop(self.plugin().store.guarded_drop_view(v)?);
+        self.plugin().store.guarded_drop_view(v)?;
         Ok(())
     }
 }
@@ -414,11 +444,11 @@ impl Driver for Node {
             fetchEnd(p: String) => self.fetch_end(&p, true)?,
             fetchFail(p: String) => self.fetch_fail(&p)?,
             sync(ok) => self.sync(ok)?,
-            collect => self.collect()?,
+            collect(kept: BTreeSet<View>) => self.collect(&kept)?,
             publish(v: String, e: String) => self.publish(&v, &e)?,
             unpublish(v: String) => self.unpublish(&v)?,
-            restart => self.restart(false)?,
-            reboot => self.restart(true)?,
+            restart(kept: BTreeSet<View>) => self.restart(false, &kept)?,
+            reboot(kept: BTreeSet<View>) => self.restart(true, &kept)?,
         })
     }
 }
@@ -428,6 +458,22 @@ struct View {
     generation: u64,
     root: String,
     paths: BTreeSet<String>,
+}
+
+/// The view `key` in views/ as the model has it. A view shows its generation
+/// in its name, its root in .roots/, and its closure in the store objects it
+/// links.
+fn model_view(store: &Store, key: &str) -> Result<View> {
+    let dir = store.views.join(key);
+    let roots = file_names(dir.join(super::views::ROOTS));
+    let [root] = &roots[..] else {
+        bail!("the view {key} has the roots {roots:?}");
+    };
+    Ok(View {
+        generation: view_generation(key).context("a view has another name")?,
+        root: root.clone(),
+        paths: super::list_store_paths(&dir)?.iter().map(name).collect(),
+    })
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -511,20 +557,7 @@ impl State<Node> for Observed {
             }
         }
 
-        // A view shows its generation in its name, its root in .roots/, and
-        // its closure in the store objects it links.
-        let view = |key: &str| -> Result<View> {
-            let dir = store.views.join(key);
-            let roots = file_names(dir.join(super::views::ROOTS));
-            let [root] = &roots[..] else {
-                bail!("the view {key} has the roots {roots:?}");
-            };
-            Ok(View {
-                generation: view_generation(key).context("a view has another name")?,
-                root: root.clone(),
-                paths: super::list_store_paths(&dir)?.iter().map(name).collect(),
-            })
-        };
+        let view = |key: &str| model_view(store, key);
         let key = |view: &Path| view.file_name().unwrap().to_string_lossy().into_owned();
         let mut volumes = BTreeMap::new();
         for volume in file_names(&store.volumes) {

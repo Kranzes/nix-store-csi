@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, bail, ensure};
 use foldhash::{HashSet, HashSetExt};
@@ -25,6 +25,7 @@ use tracing::{info, warn};
 
 use super::fetch::Closure;
 use super::fs::{Scratch, count_inodes, remove_file};
+use super::gc::old;
 use super::{GcGuard, Store, list_names, write_unsynced};
 use crate::store_path::Names;
 
@@ -223,7 +224,7 @@ impl Store {
                     updated += 1;
                     created.extend(new);
                 }
-                // An unpublish moved it to the trash meanwhile.
+                // A collection moved it to the trash meanwhile.
                 Err(e)
                     if e.downcast_ref()
                         .is_some_and(|e: &io::Error| e.kind() == io::ErrorKind::NotFound) => {}
@@ -312,7 +313,10 @@ impl Store {
         {
             let _views = self.views_lock.lock().unwrap();
             if (dir.try_exists()).with_context(|| format!("reading {}", dir.display()))? {
+                // The view is in use again.
+                remove_file(&self.kept.join(&volume.key))?;
                 volume.write(&record)?;
+                self.metrics.view(true);
                 return Ok((dir, locking.elapsed()));
             }
         }
@@ -338,29 +342,16 @@ impl Store {
         std::fs::rename(&view, &dir)
             .with_context(|| format!("moving {} into place", dir.display()))?;
         volume.write(&record)?;
+        self.metrics.view(false);
         Ok((dir, looked + locking.elapsed()))
     }
 
-    /// Forgets `volume`. If no other volume uses its view, moves the view
-    /// into a trash and returns the trash. Drop the trash after giving up the
-    /// guard, since dropping it deletes the view, and deleting a big view is
-    /// slow.
-    pub fn drop_view(&self, _gc: &GcGuard, volume: &str) -> anyhow::Result<Option<Scratch>> {
+    /// Forgets `volume`. Its view stays in views/, and collection decides
+    /// whether to keep it for later publishes.
+    pub fn drop_view(&self, _gc: &GcGuard, volume: &str) -> anyhow::Result<()> {
         let record = self.volumes.join(check_volume(volume)?);
         let _views = self.views_lock.lock().unwrap();
-        let old = Volume::read(&record)?;
-        remove_file(&record)?;
-        let Some(Volume { key, .. }) = old else {
-            return Ok(None);
-        };
-        for entry in std::fs::read_dir(&self.volumes)
-            .with_context(|| format!("reading {}", self.volumes.display()))?
-        {
-            if Volume::read(&entry?.path())?.is_some_and(|volume| volume.key == key) {
-                return Ok(None);
-            }
-        }
-        self.trash_view(&key).map(Some)
+        remove_file(&record)
     }
 
     /// The NAR size of each store path in the view `key`. A view's store paths
@@ -378,10 +369,9 @@ impl Store {
     }
 
     /// Moves the view into the trash it returns, so views/ only ever holds
-    /// whole views. Records a use of its paths.
+    /// whole views.
     fn trash_view(&self, key: &str) -> anyhow::Result<Scratch> {
         let dir = self.views.join(key);
-        self.touch(&view_store_paths(&dir)?)?;
         Scratch::move_in(&self.tmp, &dir)
             .with_context(|| format!("moving {} to the trash", dir.display()))
     }
@@ -410,29 +400,64 @@ impl Store {
         Ok(Some(usage))
     }
 
-    /// Returns the store paths that the remaining views hold.
+    /// Forgets the volumes that `is_bound` says aren't mounted. Of the views
+    /// that no mounted volume uses, it keeps those of the current generation
+    /// that it first found unused within `keep`, and moves the others to the
+    /// trash. Returns the store paths that the remaining views hold.
     pub(super) fn drop_unmounted(
         &self,
         trash: &mut Vec<Scratch>,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool>,
+        keep: Option<Duration>,
     ) -> anyhow::Result<HashSet<StorePath>> {
-        let (mounted, unmounted) = self.mounted_views(is_bound)?;
+        let (mut remaining, unmounted) = self.mounted_views(is_bound)?;
         for volume in unmounted {
             // A reboot drops the mounts without kubelet unpublishing them.
             info!(volume = %volume.display(), "forgetting a volume that is not mounted");
             remove_file(&self.volumes.join(volume))?;
         }
-        (self.measured.lock().unwrap()).retain(|key, _| mounted.contains(key));
-        (self.view_sizes.lock().unwrap()).retain(|key, _| mounted.contains(key));
+        let generation = self.generation.load(Ordering::SeqCst);
+        let mut kept = HashSet::new();
         for entry in std::fs::read_dir(&self.views)
             .with_context(|| format!("reading {}", self.views.display()))?
         {
             let key = entry?.file_name().to_string_lossy().into_owned();
-            if !mounted.contains(&key) {
+            if remaining.contains(&key) {
+                continue;
+            }
+            let stamp = self.kept.join(&key);
+            let unused_since = match std::fs::metadata(&stamp).and_then(|m| m.modified()) {
+                Ok(since) => Some(since),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e).with_context(|| format!("reading {}", stamp.display())),
+            };
+            if unused_since.is_none() {
+                // Its volumes used it until now.
+                self.touch(&view_store_paths(&self.views.join(&key))?)?;
+            }
+            let since = unused_since.unwrap_or_else(SystemTime::now);
+            let recent = keep.is_some_and(|keep| !old(since, keep));
+            if recent && view_generation(&key) == Some(generation) {
+                if unused_since.is_none() {
+                    std::fs::File::create(&stamp)
+                        .with_context(|| format!("creating {}", stamp.display()))?;
+                }
+                kept.insert(key);
+            } else {
                 trash.push(self.trash_view(&key)?);
+                remove_file(&stamp)?;
             }
         }
-        self.view_paths(&mounted)
+        // A crash can leave a stamp whose view is gone or in use.
+        for name in list_names(&self.kept, |name| Some(name.to_string_lossy().into_owned()))? {
+            if !kept.contains(&name) {
+                remove_file(&self.kept.join(name))?;
+            }
+        }
+        remaining.extend(kept);
+        (self.measured.lock().unwrap()).retain(|key, _| remaining.contains(key));
+        (self.view_sizes.lock().unwrap()).retain(|key, _| remaining.contains(key));
+        self.view_paths(&remaining)
     }
 
     /// Returns the store paths that the views named by `keys` hold. It skips
@@ -636,7 +661,9 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
+    use crate::metrics::tests::sample;
     use crate::narinfo::tests::fixtures;
+    use crate::store::Excess;
     use crate::store::test_utils::*;
 
     const DRIVER: &str = "00000000000000000000000000000000-nvidia-x11";
@@ -833,13 +860,14 @@ mod tests {
         store.guarded_drop_view("v3").unwrap();
         store.guarded_drop_view("v4").unwrap();
 
-        // Dropping the last volume that uses a view deletes the view.
+        // Dropping the last volume that uses a view leaves it to collection.
         store.guarded_drop_view("v1").unwrap();
+        store.guarded_drop_view("v2").unwrap();
         assert!(view.exists());
         store.guarded_drop_view("v2").unwrap();
-        assert!(!view.exists());
-        store.guarded_drop_view("v2").unwrap();
         assert!((store.guarded_view("..", roots, &paths, &target, UNBOUND)).is_err());
+        store.prune_views(UNBOUND, Duration::ZERO).await.unwrap();
+        assert!(!view.exists());
 
         // A view that can't be read, here a symlink loop, is an error, not a
         // missing view.
@@ -848,6 +876,73 @@ mod tests {
             .guarded_view("v1", roots, &paths, &target, UNBOUND)
             .unwrap_err();
         assert_eq!(err.to_string(), format!("reading {}", view.display()));
+    }
+
+    /// Collection keeps a view that no volume uses for `--keep-recent`, or
+    /// none while space is short, and a later publish finds it.
+    #[tokio::test]
+    async fn keeps_unused_views() {
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        let (day, kept) = (Duration::from_hours(24), tmp.path().join("kept"));
+        let metric = |name: &str| sample(&crate::metrics::registry(&store), name);
+        let views = |state| metric(&format!("nix_store_csi_views{{state=\"{state}\"}}"));
+        let publishes = |view| {
+            metric(&format!(
+                "nix_store_csi_publish_views_total{{view=\"{view}\"}}"
+            ))
+        };
+
+        let view = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
+        store.guarded_drop_view("v1").unwrap();
+        store
+            .collect(UNBOUND, day, Excess::default())
+            .await
+            .unwrap();
+        assert!(view.exists());
+        assert_eq!(
+            file_names(&kept),
+            [view.file_name().unwrap().to_str().unwrap()]
+        );
+        assert_eq!((views("mounted"), views("kept")), (Some(0.0), Some(1.0)));
+
+        assert_eq!(
+            store
+                .guarded_view("v2", roots, &paths, &target, UNBOUND)
+                .unwrap(),
+            view
+        );
+        assert_eq!(count(&kept), 0);
+        assert_eq!((views("mounted"), views("kept")), (Some(1.0), Some(0.0)));
+        assert_eq!(
+            (publishes("found"), publishes("built")),
+            (Some(1.0), Some(1.0))
+        );
+
+        // The second collection leaves the date from the first.
+        store.guarded_drop_view("v2").unwrap();
+        store
+            .collect(UNBOUND, day, Excess::default())
+            .await
+            .unwrap();
+        age_views(&store, 2);
+        store
+            .collect(UNBOUND, day, Excess::default())
+            .await
+            .unwrap();
+        assert!(!view.exists());
+        assert_eq!(count(&kept), 0);
+
+        store
+            .guarded_view("v3", roots, &paths, &target, UNBOUND)
+            .unwrap();
+        store.guarded_drop_view("v3").unwrap();
+        store.collect(UNBOUND, day, ALL).await.unwrap();
+        assert!(!view.exists());
     }
 
     #[tokio::test]
@@ -873,7 +968,7 @@ mod tests {
         assert_eq!(store.usage("v1", &tmp.path().join("other")).unwrap(), None);
         assert_eq!(store.usage("v2", &target).unwrap(), None);
 
-        store.prune_views(UNBOUND).await.unwrap();
+        store.prune_views(UNBOUND, Duration::ZERO).await.unwrap();
         assert!(store.measured.lock().unwrap().is_empty());
         assert!(store.view_sizes.lock().unwrap().is_empty());
     }
@@ -887,7 +982,7 @@ mod tests {
         let store = Arc::new(Store::new(unsigned_config(tmp.path(), &state)).unwrap());
         let leftover = state.join("volumes/.tmpAbC123");
         std::fs::write(&leftover, "").unwrap();
-        store.prune_views(UNBOUND).await.unwrap();
+        store.prune_views(UNBOUND, Duration::ZERO).await.unwrap();
         assert!(!leftover.exists());
     }
 

@@ -600,6 +600,7 @@ Every metric starts with `nix_store_csi_`:
 |---|---|---|
 | `publish_duration_seconds` | histogram | `grpc_code`, `fetched` |
 | `unpublish_duration_seconds` | histogram | `grpc_code` |
+| `publish_views_total` | counter | `view` |
 | `closures_in_flight` | gauge | |
 | `nar_fetch_duration_seconds` | histogram | `cache`, `result` |
 | `nar_fetched_bytes_total` | counter | `cache` |
@@ -612,7 +613,7 @@ Every metric starts with `nix_store_csi_`:
 | `max_store_size_bytes` | gauge | |
 | `unsynced_paths` | gauge | |
 | `failed_syncs_total` | counter | |
-| `views` | gauge | |
+| `views` | gauge | `state` |
 | `other_state_dir_volumes` | gauge | |
 | `free_bytes` | gauge | |
 | `free_inodes` | gauge | |

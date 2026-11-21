@@ -14,8 +14,8 @@
 //
 // What it leaves out, since no invariant below depends on it: signatures,
 // which cache serves a NAR, size limits, --keep-recent and last uses
-// (collection deletes any paths it may), job slots, mountpoints, metrics,
-// and errors from the filesystem other than a failed syncfs.
+// (collection deletes any paths and views it may), job slots, mountpoints,
+// metrics, and errors from the filesystem other than a failed syncfs.
 //
 // What it assumes:
 //
@@ -531,21 +531,24 @@ module store {
   // collect
 
   /// Store::drop_unmounted. It forgets the volumes that aren't bound to the
-  /// view in their record, and deletes the views that no other volume uses.
-  pure def pruned(s: State): State = {
+  /// view in their record. Of the views that no other volume uses, it keeps
+  /// those in `kept` that a publish may still share, and deletes the rest.
+  pure def pruned(s: State, kept: Set[View]): State = {
     val volumes = s.volumes.keys().filter(v => mounted(s, v))
-    { ...keeping(s, volumes.map(v => s.volumes.get(v))),
+    val shareable = kept.filter(v => v.generation == s.generation)
+    { ...keeping(s, volumes.map(v => s.volumes.get(v)).union(shareable)),
       volumes: volumes.mapBy(v => s.volumes.get(v)) }
   }
 
-  /// The paths that a collection starting in `s` may delete.
-  pure def collectable(s: State): Set[Path] = {
-    val t = pruned(s)
+  /// The paths that a collection starting in `s` and keeping `kept` may
+  /// delete.
+  pure def collectable(s: State, kept: Set[View]): Set[Path] = {
+    val t = pruned(s, kept)
     t.store.exclude(inUse(t)).exclude(t.marks.keys())
   }
 
-  pure def collectionBegun(s: State, doomed: Set[Path]): State = {
-    val t = pruned(s)
+  pure def collectionBegun(s: State, kept: Set[View], doomed: Set[Path]): State = {
+    val t = pruned(s, kept)
     { ...t, collection: { sweeping: true, inUse: inUse(t), doomed: doomed } }
   }
 
@@ -564,9 +567,9 @@ module store {
     { ...unlinked(s, orphans), collection: OFF }
   }
 
-  /// A whole collection that deletes every path it may.
-  pure def collected(s: State): State = {
-    val t = collectionBegun(s, collectable(s))
+  /// A whole collection that keeps `kept` and deletes every path it may.
+  pure def collected(s: State, kept: Set[View]): State = {
+    val t = collectionBegun(s, kept, collectable(s, kept))
     collectionEnded(t.collection.doomed.fold(t, (u, p) => collectionDeleted(u, p)))
   }
 
@@ -638,16 +641,12 @@ module store {
   pure def canDrop(s: State, v: Volume): bool =
     s.unpublishing.contains(v) and viewsFree(s)
 
-  /// Store::drop_view, which deletes the volume's view unless another
-  /// volume's record names it.
+  /// Store::drop_view, which forgets the volume and leaves its view to
+  /// collection.
   pure def unpublishDropped(s: State, v: Volume): State = {
-    val volumes = s.volumes.without(Set(v))
-    val used = volumes.keys().map(u => volumes.get(u))
-    val unused =
-      if (s.volumes.has(v)) Set(s.volumes.get(v)).exclude(used) else Set()
-    { ...keeping(s, s.views.exclude(unused)),
-      volumes: volumes,
-      unpublishing: s.unpublishing.exclude(Set(v)) }
+    ...s,
+    volumes: s.volumes.without(Set(v)),
+    unpublishing: s.unpublishing.exclude(Set(v)),
   }
 
   /// A whole unpublish.
@@ -750,20 +749,23 @@ module store {
   pure def startRecorded(s: State): State =
     { ...s, bootRecorded: true, startup: { ...s.startup, stage: Pruning } }
 
-  pure def startPruned(s: State): State = { ...pruned(s), startup: UP }
+  pure def startPruned(s: State, kept: Set[View]): State =
+    { ...pruned(s, kept), startup: UP }
 
-  /// A whole start-up.
-  pure def startedUp(s: State, flushed: bool): State = {
+  /// A whole start-up that keeps `kept`.
+  pure def startedUp(s: State, flushed: bool, kept: Set[View]): State = {
     val scanned = startScanned(s, flushed)
     val settled = scanned.startup.todo.fold(scanned, (t, p) =>
       startNarinfoSettled(t, p))
     val dropped = droppable(settled).fold(settled, (t, p) => startDropped(t, p))
-    startPruned(startRecorded(startCleared(startNumbered(dropped))))
+    startPruned(startRecorded(startCleared(startNumbered(dropped))), kept)
   }
 
-  pure def restarted(s: State): State = startedUp(crashed(s, false), true)
+  pure def restarted(s: State, kept: Set[View]): State =
+    startedUp(crashed(s, false), true, kept)
 
-  pure def rebooted(s: State): State = startedUp(crashed(s, true), true)
+  pure def rebooted(s: State, kept: Set[View]): State =
+    startedUp(crashed(s, true), true, kept)
 
   /// A crash of a plugin that serves an empty state dir starts up to the
   /// same state, so it would only use up the crashes.
@@ -867,6 +869,8 @@ module store {
   val keepsOldView = s.bound.keys().exists(v => s.bound.get(v).generation < s.generation)
   val holdsLostData = s.store.exists(p => s.data.get(p) == Lost)
   val hasStaleView = s.stale != Set()
+  val keepsUnusedView = s.views.exists(view =>
+    s.volumes.keys().forall(v => s.volumes.get(v) != view))
 
   // Actions that both steps share
 
@@ -993,10 +997,12 @@ module store {
 
   action syncRename = all { canRename(s), s' = syncRenamed(s) }
 
-  /// It may spare any of the paths, as --keep-recent would.
+  /// It may keep any of the views and spare any of the paths, as
+  /// --keep-recent and --ensure-free would.
   action collectBegin = {
-    nondet doomed = collectable(s).powerset().oneOf()
-    all { exclusive(s), s' = collectionBegun(s, doomed) }
+    nondet kept = s.views.powerset().oneOf()
+    nondet doomed = collectable(s, kept).powerset().oneOf()
+    all { exclusive(s), s' = collectionBegun(s, kept, doomed) }
   }
 
   action collectDelete = {
@@ -1037,9 +1043,9 @@ module store {
     s' = startRecorded(s),
   }
 
-  action startPrune = all {
-    s.startup.stage == Pruning,
-    s' = startPruned(s),
+  action startPrune = {
+    nondet kept = s.views.powerset().oneOf()
+    all { s.startup.stage == Pruning, s' = startPruned(s, kept) }
   }
 
   action step = any {
@@ -1072,7 +1078,10 @@ module store {
     all { canSync(s, ok), s' = syncedAll(s, ok) }
   }
 
-  action collect = all { exclusive(s), s' = collected(s) }
+  action collect = {
+    nondet kept = s.views.powerset().oneOf()
+    all { exclusive(s), s' = collected(s, kept) }
+  }
 
   action publish = {
     nondet v = VOLUMES.oneOf()
@@ -1085,9 +1094,15 @@ module store {
     s' = unpublished(s, v)
   }
 
-  action restart = all { canCrash(s), s' = restarted(s) }
+  action restart = {
+    nondet kept = s.views.powerset().oneOf()
+    all { canCrash(s), s' = restarted(s, kept) }
+  }
 
-  action reboot = all { canCrash(s), s' = rebooted(s) }
+  action reboot = {
+    nondet kept = s.views.powerset().oneOf()
+    all { canCrash(s), s' = rebooted(s, kept) }
+  }
 
   action replay = any {
     ensure, release,

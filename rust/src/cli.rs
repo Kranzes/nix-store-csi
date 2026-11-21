@@ -120,7 +120,8 @@ pub enum Command {
         #[arg(long, value_name = "NAME", env = "NODE_NAME")]
         node_id: String,
         /// Keep store paths that a pod used in the last DURATION, like `24h` or
-        /// `7d`, unless `--ensure-free` needs the space or inodes.
+        /// `7d`, and the views of closures that pods no longer mount, unless
+        /// `--ensure-free` needs the space or inodes.
         #[arg(
             long,
             value_name = "DURATION",

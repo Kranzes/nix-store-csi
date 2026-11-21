@@ -38,7 +38,7 @@ Options:
       --substituters <URLS>         Binary caches [env: NIX_STORE_CSI_SUBSTITUTERS=] [default: https://cache.nixos.org]
       --node-id <NAME>              This node's name, as kubelet knows it [env: NODE_NAME=]
       --trusted-public-keys <KEYS>  Keys that narinfos must be signed by [env: NIX_STORE_CSI_TRUSTED_PUBLIC_KEYS=] [default: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=]
-      --keep-recent <DURATION>      Keep store paths that a pod used in the last DURATION, like `24h` or `7d`, unless `--ensure-free` needs the space or inodes [env: NIX_STORE_CSI_KEEP_RECENT=] [default: 24h]
+      --keep-recent <DURATION>      Keep store paths that a pod used in the last DURATION, like `24h` or `7d`, and the views of closures that pods no longer mount, unless `--ensure-free` needs the space or inodes [env: NIX_STORE_CSI_KEEP_RECENT=] [default: 24h]
       --no-require-sigs             Accept narinfos without a trusted signature [env: NIX_STORE_CSI_NO_REQUIRE_SIGS=]
       --gc-interval <DURATION>      Collect garbage every DURATION, like `10m` or `1h`. While `--ensure-free` needs the space or inodes, collection also runs every minute [env: NIX_STORE_CSI_GC_INTERVAL=] [default: 10m]
       --netrc-file <FILE>           Netrc file with credentials for caches, read on every request [env: NIX_STORE_CSI_NETRC_FILE=]

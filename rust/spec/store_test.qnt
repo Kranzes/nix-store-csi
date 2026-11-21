@@ -42,12 +42,31 @@ module store_test {
       .then(s' = withClosure(s, "e1"))
       .then(s' = published(published(s, "v1", "e1"), "v2", "e1"))
       .expect(sharesView and s.views.size() == 1 and safe)
-      .then(s' = collected(released(s, "e1")))
+      .then(s' = collected(released(s, "e1"), Set()))
       .expect(s.store == Set("a", "b") and safe)
-      .then(s' = collected(unpublished(unpublished(s, "v1"), "v2")))
+      .then(s' = collected(unpublished(unpublished(s, "v1"), "v2"), Set()))
       .expect(s.store == Set("a", "b") and s.views == Set() and safe)
-      .then(s' = collected(syncedAll(s, true)))
+      .then(s' = collected(syncedAll(s, true), Set()))
       .expect(s.store == Set() and s.synced == Set() and safe)
+
+  /// An unpublish leaves the view. Collection and a restart may keep it,
+  /// with the paths it links, and a later publish shares it. Once a failed
+  /// sync starts a new generation, collection deletes it.
+  run keptViewTest =
+    init
+      .then(s' = withClosure(s, "e1"))
+      .then(s' = syncedAll(unpublished(published(s, "v1", "e1"), "v1"), true))
+      .expect(keepsUnusedView and safe)
+      .then(s' = restarted(collected(released(s, "e1"), s.views), s.views))
+      .expect(s.store == Set("a", "b") and keepsUnusedView and safe)
+      .then(s' = published(withEnsure(s, "e2", "a"), "v2", "e2"))
+      .expect(s.publishing == Map() and s.bound.keys() == Set("v2")
+        and s.views.size() == 1 and safe)
+      .then(s' = unpublished(s, "v2"))
+      .then(s' = syncedAll(withFetch(withEnsure(s, "e1", "c"), "c"), false))
+      .expect(s.generation == 2 and keepsUnusedView and safe)
+      .then(s' = collected(released(released(s, "e1"), "e2"), s.views))
+      .expect(s.views == Set() and s.store == Set() and safe)
 
   /// A failed sync deletes the paths it may have lost and starts a new
   /// generation. The pod keeps its view, a retry of its publish too, and
@@ -100,7 +119,7 @@ module store_test {
       // Their ensures fail, and nothing holds b any more.
       .then(s' = fetchEnded(s, "a", false))
       .expect(s.ensures == Map())
-      .then(s' = collectionDeleted(collectionBegun(s, Set("b")), "b"))
+      .then(s' = collectionDeleted(collectionBegun(s, Set(), Set("b")), "b"))
       .expect(s.store == Set() and narinfos(s) == Set())
       .then(s' = collectionEnded(withFetch(s, "b")))
       .expect(s.store == Set("b") and s.unsynced == Set("b") and safe)
@@ -142,7 +161,7 @@ module store_test {
     init
       .then(s' = withClosure(s, "e1"))
       .then(s' = published(s, "v1", "e1"))
-      .then(s' = restarted(s))
+      .then(s' = restarted(s, Set()))
       .expect(and {
         s.store == Set("a", "b"),
         s.synced == Set("a", "b"),
@@ -161,7 +180,7 @@ module store_test {
       .then(s' = withFetch(withEnsure(s, "e1", "c"), "c"))
       .then(s' = startScanned(crashed(s, false), false))
       .expect(s.syncFailed and s.data.get("c") == Lost)
-      .then(s' = restarted(s))
+      .then(s' = restarted(s, Set()))
       .expect(and {
         s.store == Set(),
         s.synced == Set(),
@@ -170,12 +189,13 @@ module store_test {
         safe,
       })
 
-  /// A reboot keeps only the paths that a sync made durable, and no view.
+  /// A reboot keeps only the paths that a sync made durable, and no view,
+  /// since it starts a new generation.
   run rebootTest =
     init
       .then(s' = syncedAll(withFetch(withEnsure(s, "e1", "a"), "b"), true))
       .then(s' = published(withFetch(s, "a"), "v1", "e1"))
-      .then(s' = rebooted(s))
+      .then(s' = rebooted(s, s.views))
       .expect(and {
         s.store == Set("b"),
         s.synced == Set("b"),

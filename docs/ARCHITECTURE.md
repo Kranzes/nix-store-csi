@@ -84,12 +84,18 @@ Either way, it deletes any path in `store/` with no narinfo.
 
 ## Collection
 
-Collection deletes the store paths that no mounted view, closure being fetched
+An unpublish leaves the volume's view in place. Collection keeps a view that no
+volume uses for `--keep-recent` after it first finds it unused, so a pod that
+mounts the same closure later gets the view without linking each file again.
+It drops such a view sooner when the view is from an older generation, or when
+the space is short.
+
+Collection deletes the store paths that no view, closure being fetched
 or pending sync holds, and that no pod used within `--keep-recent`. It runs
 every `--gc-interval`, 10 minutes by default. While free space or inodes on
 the state dir's filesystem fall short of `--ensure-free`, it runs every minute
-and also deletes recently used paths, least recently used first, until it
-frees enough. Even then it spares the closures that the plugin prefetches,
+and first drops every view that no volume uses. Then it also deletes recently
+used paths, least recently used first, until it frees enough. Even then it spares the closures that the plugin prefetches,
 since the plugin would fetch them again within a minute. A closure that leaves
 the prefetch lists counts as used at that moment.
 
@@ -137,6 +143,8 @@ closure, since the runtime binds the node's copy of that store path over it.
                               store/, .roots/ and mountpoints. The hash covers
                               the closure and the roots.
   volumes/<volume>            which view the volume mounts, and where
+  kept/<generation>-<hash>    a view that no volume uses, dated by when
+                              collection first found it unused
   tmp/                        store objects being unpacked, views being built,
                               and trash being deleted
 ```

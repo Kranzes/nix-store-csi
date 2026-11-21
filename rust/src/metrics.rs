@@ -84,6 +84,16 @@ struct ListLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ViewLabels {
+    view: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ViewStateLabels {
+    state: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct BuildLabels {
     version: &'static str,
     system: String,
@@ -96,6 +106,7 @@ pub(crate) type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
 pub struct Metrics {
     publishes: Histograms<CallLabels>,
     unpublishes: Histograms<CallLabels>,
+    views: Family<ViewLabels, Counter>,
     nar_fetches: Histograms<FetchLabels>,
     nar_bytes: Family<CacheLabels, Counter>,
     nar_received: Family<CacheLabels, Counter>,
@@ -120,6 +131,7 @@ impl Default for Metrics {
         Self {
             publishes: Family::new_with_constructor(calls),
             unpublishes: Family::new_with_constructor(calls),
+            views: Family::default(),
             nar_fetches: Family::new_with_constructor(fetches),
             nar_bytes: Family::default(),
             nar_received: Family::default(),
@@ -149,6 +161,9 @@ impl Metrics {
             fetched: None,
         };
         let _ = self.unpublishes.get_or_create(&ok);
+        for view in ["found", "built"] {
+            let _ = self.views.get_or_create(&ViewLabels { view });
+        }
         for cache in caches {
             let cache = cache.to_string();
             for result in ["ok", "error"] {
@@ -176,6 +191,13 @@ impl Metrics {
     /// Times a `NodeUnpublishVolume` call.
     pub fn unpublish(&self) -> Call<'_> {
         Call::new(&self.unpublishes, None)
+    }
+
+    /// Counts a publish that put a view in place, which it `found` in views/
+    /// or built.
+    pub fn view(&self, found: bool) {
+        let view = if found { "found" } else { "built" };
+        self.views.get_or_create(&ViewLabels { view }).inc();
     }
 
     /// The counter of NAR bytes received from `cache`.
@@ -246,6 +268,11 @@ impl Metrics {
             "NodeUnpublishVolume calls, by gRPC status code",
             Unit::Seconds,
             self.unpublishes.clone(),
+        );
+        registry.register(
+            "publish_views",
+            "Publishes that put a view in place, by whether they found it in views/ or built it",
+            self.views.clone(),
         );
         registry.register_with_unit(
             "nar_fetch_duration",
@@ -420,12 +447,6 @@ impl Collector for StoreGauges {
             None,
             count(gauges.unsynced_paths),
         )?;
-        gauge(
-            "views",
-            "Views, one for each closure that volumes use",
-            None,
-            gauges.views.and_then(count),
-        )?;
         let other_volumes = (mounts::other_state_dirs(self.store.views()))
             .map(|dirs| dirs.iter().map(|dir| dir.volumes).sum())
             .inspect_err(|e| warn!("{e:#}; leaving the other state dirs' gauge out"))
@@ -472,6 +493,21 @@ impl Collector for StoreGauges {
             None,
             count(gauges.closures_in_flight),
         )?;
+        let mut views = encoder.encode_descriptor(
+            "views",
+            "Views, one for each closure, by whether volumes use them or collection keeps them for later publishes",
+            None,
+            MetricType::Gauge,
+        )?;
+        for (state, n) in [
+            ("mounted", gauges.mounted_views),
+            ("kept", gauges.kept_views),
+        ] {
+            if let Some(n) = n {
+                let n = i64::try_from(n).unwrap_or(i64::MAX);
+                ConstGauge::new(n).encode(views.encode_family(&ViewStateLabels { state })?)?;
+            }
+        }
         let mut paused = encoder.encode_descriptor(
             "cache_paused",
             "Whether a cache is skipped for a minute after failed requests",

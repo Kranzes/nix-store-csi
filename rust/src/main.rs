@@ -168,7 +168,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let mountpoints =
                 Mountpoints::new(&mountpoints.unwrap_or_default(), host_root.as_deref())?;
-            store.prune_views(mounts::is_bound).await?;
+            store.prune_views(mounts::is_bound, keep_recent).await?;
             tokio::spawn(mountpoints.run(store.clone()));
             if let Some(address) = metrics_address {
                 let listener = http::listen(address)

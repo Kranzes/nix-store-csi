@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The `publish_views_total` counter counts publishes by whether they found
+  their view or built it, and the `views` gauge has a `state` label,
+  `mounted` or `kept`.
+
+### Changed
+
+- An unpublish leaves the view in place. Collection keeps a view that no
+  volume uses for `--keep-recent`, so a later publish with the same store
+  paths links nothing. With cold caches, building the view of a closure
+  with tens of thousands of files took seconds. While `--ensure-free` needs
+  the space, collection drops every view that no volume uses before it
+  picks store paths. Kept views don't count toward `--max-store-size`.
+
 ## 0.1.21 - 2026-11-20
 
 ### Changed

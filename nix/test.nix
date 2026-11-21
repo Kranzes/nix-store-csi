@@ -496,9 +496,10 @@ testers.runNixOSTest {
         t.assertGreater(metric('nix_store_csi_publish_duration_seconds_count{grpc_code="InvalidArgument",fetched="false"}'), 0)
         t.assertEqual(fetches(), int(machine.succeed("wc -l < ${podsClosure}")))
 
-    with subtest("kubelet unpublishes hello's volume once hello exits"):
+    with subtest("kubelet unpublishes hello's volume once hello exits, and the plugin keeps its view"):
         machine.wait_until_succeeds(f"[ $({volumes} | wc -l) = 1 ]", timeout=60)
-        machine.wait_until_succeeds(f"[ $({views} | wc -l) = 1 ]", timeout=60)
+        t.assertEqual(metric('nix_store_csi_views{state="mounted"}'), 1)
+        t.assertEqual(metric('nix_store_csi_views{state="kept"}'), 1)
 
     with subtest("the plugin lists the node store's store paths"):
         listed = machine.succeed("${curl}/bin/curl -sf http://127.0.0.1:9809/store-paths").split()
@@ -725,7 +726,7 @@ testers.runNixOSTest {
     with subtest("deleting the pods unpublishes their volumes"):
         machine.wait_until_succeeds("kubectl delete pod sleep offline warm other --wait --ignore-not-found", timeout=120)
         machine.wait_until_fails(volumes)
-        machine.wait_until_succeeds(f"[ -z \"$({views})\" ]", timeout=60)
+        t.assertEqual(metric('nix_store_csi_views{state="mounted"}'), 0)
 
     with subtest("a node that joins a pool gets the pool's plugin, which prefetches the pool's list and the top-level one"):
         join_pool("warm")

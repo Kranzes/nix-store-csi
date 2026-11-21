@@ -155,7 +155,7 @@ impl Store {
 
     /// [`Store::drop_view`] with a guard held for the call, as an unpublish
     /// holds one.
-    pub(super) fn guarded_drop_view(&self, volume: &str) -> anyhow::Result<Option<Scratch>> {
+    pub(super) fn guarded_drop_view(&self, volume: &str) -> anyhow::Result<()> {
         self.drop_view(&self.try_gc_guard(), volume)
     }
 
@@ -211,6 +211,15 @@ pub(crate) fn age(store: &Store, paths: &[StorePath], days: u64) {
         let file = (store.narinfos.files(path).iter())
             .find_map(|file| std::fs::File::open(file).ok())
             .unwrap();
+        file.set_modified(old).unwrap();
+    }
+}
+
+/// Makes the views that collection keeps look first found unused `days` ago.
+pub(crate) fn age_views(store: &Store, days: u64) {
+    let old = SystemTime::now() - Duration::from_hours(24 * days);
+    for name in file_names(&store.kept) {
+        let file = std::fs::File::open(store.kept.join(name)).unwrap();
         file.set_modified(old).unwrap();
     }
 }

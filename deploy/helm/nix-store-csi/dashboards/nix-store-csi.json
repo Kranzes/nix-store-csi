@@ -2081,7 +2081,7 @@
         {
           "type": "timeseries",
           "title": "Views",
-          "description": "Views, one for each closure that volumes on the node use.",
+          "description": "Views, one for each closure, that volumes on the node use or that collection keeps for later publishes.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2093,8 +2093,8 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (instance) (nix_store_csi_views{instance=~\"$instance\"})",
-              "legendFormat": "{{instance}}"
+              "expr": "sum by (instance, state) (nix_store_csi_views{instance=~\"$instance\"})",
+              "legendFormat": "{{instance}} {{state}}"
             }
           ],
           "fieldConfig": {

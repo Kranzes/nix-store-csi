@@ -80,6 +80,10 @@ pub struct Store {
     dir: PathBuf,
     views: PathBuf,
     volumes: PathBuf,
+    /// A file for each view that no volume uses, from when collection first
+    /// found it unused. It lives outside the view, whose root pods see as
+    /// /nix/store.
+    kept: PathBuf,
     /// Held while a view gains or loses a volume.
     views_lock: Mutex<()>,
     /// Names the views that publishes build now. It goes up when store
@@ -89,11 +93,11 @@ pub struct Store {
     generation: AtomicU64,
     /// A turn for each view that publishes are building, by key.
     building: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// What [`Store::usage`] measured, by view key, until no mounted volume
-    /// uses the view.
+    /// What [`Store::usage`] measured, by view key, until collection drops
+    /// the view.
     measured: Mutex<HashMap<String, Usage>>,
-    /// What [`Store::view_nar_sizes`] read, by view key, until no mounted
-    /// volume uses the view.
+    /// What [`Store::view_nar_sizes`] read, by view key, until collection
+    /// drops the view.
     view_sizes: Mutex<HashMap<String, NarSizes>>,
     /// What [`Store::add_mountpoints`] adds.
     mountpoints: Mutex<Arc<[Mountpoint]>>,
@@ -183,7 +187,9 @@ pub struct Gauges {
     pub uncollectable_size: Option<u64>,
     pub max_store_size: Option<u64>,
     pub unsynced_paths: usize,
-    pub views: Option<usize>,
+    /// The views that volumes use, and the others.
+    pub mounted_views: Option<usize>,
+    pub kept_views: Option<usize>,
     /// The free bytes and inodes on the node store's filesystem, and what
     /// `--ensure-free` keeps free. The inodes are left out on a filesystem
     /// with no limit on them.
@@ -219,10 +225,11 @@ impl Store {
         let narinfos = state.join("narinfo");
         let views = state.join("views");
         let volumes = state.join("volumes");
+        let kept = state.join("kept");
         let tmp = state.join("tmp");
         // Whatever a crash left in tmp/ is incomplete.
         remove_tree(&tmp).with_context(|| format!("clearing {}", tmp.display()))?;
-        for d in [&dir, &narinfos, &views, &volumes, &tmp] {
+        for d in [&dir, &narinfos, &views, &volumes, &kept, &tmp] {
             std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
         }
         let narinfos = Narinfos::new(narinfos);
@@ -239,6 +246,7 @@ impl Store {
             dir,
             views,
             volumes,
+            kept,
             views_lock: Mutex::default(),
             generation: AtomicU64::default(),
             building: Mutex::default(),
@@ -321,6 +329,11 @@ impl Store {
             })
             .ok();
         let target = space.map(|space| gc::target(space, self.ensure_free));
+        let views = entries(&self.views);
+        let mounted_views = (self.mounted_views(|_, _| Ok(true)))
+            .map(|(keys, _)| keys.len())
+            .inspect_err(|e| warn!("{e:#}; leaving the views gauge out"))
+            .ok();
         let limits_inodes = space.is_some_and(|space| space.inodes > 0);
         Gauges {
             store_paths: entries(&self.dir),
@@ -329,7 +342,9 @@ impl Store {
             max_store_size: (self.max_store_size.zip(space))
                 .map(|(limit, space)| limit.bytes(space.size)),
             unsynced_paths,
-            views: entries(&self.views),
+            mounted_views,
+            kept_views: (views.zip(mounted_views))
+                .map(|(all, mounted)| all.saturating_sub(mounted)),
             free_bytes: space.map(|space| space.free),
             free_inodes: (space.filter(|_| limits_inodes)).map(|space| space.free_inodes),
             ensure_free_bytes: target.map(|(bytes, _)| bytes),

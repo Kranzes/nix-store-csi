@@ -18,18 +18,25 @@ use super::{Store, list_store_paths};
 
 impl Store {
     /// Forgets the volumes that `is_bound(view, target)` says aren't mounted,
-    /// and moves the views no volume uses to the trash. It returns before the
-    /// deletion, which after a reboot can take longer than kubelet waits.
+    /// and moves to the trash the views that no volume uses, other than those
+    /// of the current generation found unused within `keep_recent`. It
+    /// returns before the deletion, which after a reboot can take longer than
+    /// kubelet waits.
     pub async fn prune_views(
         self: &Arc<Self>,
         is_bound: impl Fn(&Path, &Path) -> anyhow::Result<bool> + Send + 'static,
+        keep_recent: Duration,
     ) -> anyhow::Result<()> {
-        let pruned = |this: &Self, trash: &mut _| this.drop_unmounted(trash, is_bound).map(drop);
+        let pruned = move |this: &Self, trash: &mut _| {
+            this.drop_unmounted(trash, is_bound, Some(keep_recent))
+                .map(drop)
+        };
         self.exclusively(pruned).await?.0
     }
 
-    /// Prunes the views like [`Store::prune_views`], then deletes the store
-    /// paths that no view, ensure or pending sync holds and that weren't used
+    /// Prunes the views like [`Store::prune_views`], or with `excess` to free
+    /// drops every view that no volume uses. Then it deletes the store paths
+    /// that no view, ensure or pending sync holds and that weren't used
     /// within `keep_recent`. Then it deletes more such paths, least recently
     /// used first, until their NARs add up to `excess.bytes` and their store
     /// objects to `excess.inodes` inodes. Returns how many paths it deleted.
@@ -47,7 +54,8 @@ impl Store {
             let inodes = tokio::task::spawn_blocking(move || this.inode_counts(excess)).await??;
             let (collected, deleting) = self
                 .exclusively(move |this, trash| {
-                    let mut in_use = this.drop_unmounted(trash, is_bound)?;
+                    let keep = (excess == Excess::default()).then_some(keep_recent);
+                    let mut in_use = this.drop_unmounted(trash, is_bound, keep)?;
                     in_use.extend(this.ensuring.paths());
                     this.drop_unused(trash, &in_use, keep_recent, excess, &inodes)
                 })
@@ -234,8 +242,8 @@ impl Store {
     }
 }
 
-/// Whether a path last used at `used` is past `keep_recent`.
-fn old(used: SystemTime, keep_recent: Duration) -> bool {
+/// Whether a path or a view last used at `used` is past `keep_recent`.
+pub(super) fn old(used: SystemTime, keep_recent: Duration) -> bool {
     used.elapsed().unwrap_or_default() >= keep_recent
 }
 
@@ -351,7 +359,7 @@ mod tests {
         let day = Duration::from_hours(24);
 
         // v1 is mounted and holds hello alone. v2 isn't mounted, so collection
-        // deletes its view, which counts as a use of its paths.
+        // forgets it and keeps its view, which counts as a use of its paths.
         age(&store, &paths, 2);
         let t1 = tmp.path().join("t1");
         let view = store
@@ -375,10 +383,12 @@ mod tests {
         let bound = move |v: &Path, t: &Path| Ok(v == view && t == t1);
         assert_eq!(store.collect(bound.clone(), day, NONE).await.unwrap(), 0);
         assert_eq!(file_names(tmp.path().join("volumes")), ["v1"]);
-        assert_eq!(count(tmp.path().join("views")), 1);
+        assert_eq!(count(tmp.path().join("views")), 2);
 
         age(&store, &paths, 2);
+        age_views(&store, 2);
         assert_eq!(store.collect(bound, day, NONE).await.unwrap(), 4);
+        assert_eq!(count(tmp.path().join("views")), 1);
         let deleted = sample(
             &crate::metrics::registry(&store),
             "nix_store_csi_gc_deleted_paths_total",
@@ -400,6 +410,7 @@ mod tests {
         store.guarded_drop_view("v1").unwrap();
         assert_eq!(store.collect(UNBOUND, day, NONE).await.unwrap(), 0);
         age(&store, std::slice::from_ref(&hello), 2);
+        age_views(&store, 2);
         assert_eq!(store.collect(UNBOUND, day, NONE).await.unwrap(), 1);
 
         // Deleted paths come back on the next ensure.
@@ -524,9 +535,14 @@ mod tests {
         ))
         .unwrap();
         let view_ino = ino(&view);
-        let trash = store.guarded_drop_view("v1").unwrap();
-        assert_eq!(inodes(&tmp.path().join("tmp")), [view_ino]);
-        drop(trash);
+        store.guarded_drop_view("v1").unwrap();
+        let trashed = store.exclusively(|this, trash| {
+            this.drop_unmounted(trash, UNBOUND, None)?;
+            Ok(inodes(&this.tmp))
+        });
+        let (trashed, deleting) = trashed.await.unwrap();
+        deleting.await.unwrap();
+        assert_eq!(trashed.unwrap(), [view_ino]);
 
         let object = ino(&store.unpacked(&hello));
         let moved = store.exclusively(move |this, trash| {

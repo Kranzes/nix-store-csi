@@ -180,15 +180,11 @@ impl Plugin {
         check_request(&request.volume_id, &request.target_path)?;
         let target = std::path::PathBuf::from(&request.target_path);
         let volume = request.volume_id.clone();
-        let trash = self
-            .for_volume(&request.volume_id, move |store, gc| {
-                mounts::unpublish(&target)?;
-                store.drop_view(gc, &volume)
-            })
-            .await?;
-        // Deleting a big view is slow, so it happens after the hold on
-        // collection ends.
-        self.store.discard(trash);
+        self.for_volume(&request.volume_id, move |store, gc| {
+            mounts::unpublish(&target)?;
+            store.drop_view(gc, &volume)
+        })
+        .await?;
         info!("unpublished");
         Ok(NodeUnpublishVolumeResponse {})
     }

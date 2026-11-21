@@ -24,7 +24,7 @@ use tokio_util::bytes::Bytes;
 use tokio_util::io::{ReaderStream, StreamReader};
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use crate::closure::Entry;
+use crate::closure::{Entry, LOOKUPS};
 use crate::narinfo::Compression;
 use crate::store_path::Names;
 use crate::transport;
@@ -130,8 +130,11 @@ impl Store {
                     .into());
                 }
             }
+            let present = self.presence(&paths).await?;
             let (this, closure, paths) = (self.clone(), closure.clone(), paths.clone());
-            let held = tokio::task::spawn_blocking(move || this.hold(&closure, &paths, prefetch));
+            let held = tokio::task::spawn_blocking(move || {
+                this.hold(&closure, &paths, &present, prefetch)
+            });
             (self.generation.load(Ordering::SeqCst), held.await??)
         };
         // The fetch of a closure ends about when its largest NAR's does, so
@@ -217,17 +220,37 @@ impl Store {
         Ok(())
     }
 
-    /// Holds `paths`, the keys of `closure`, records a use of those the store
-    /// has, and returns the holds and the rest. If the store lacks some of
-    /// them, an ensure first checks the closure against `max_store_size`.
+    /// Which of `paths` the store has. With cold caches each check waits for
+    /// the disk, so it splits them among up to [`LOOKUPS`] blocking threads.
+    async fn presence(self: &Arc<Self>, paths: &Arc<[StorePath]>) -> anyhow::Result<Vec<bool>> {
+        let chunk = paths.len().div_ceil(LOOKUPS).max(1);
+        let checks = (0..paths.len()).step_by(chunk).map(|start| {
+            let (this, paths) = (self.clone(), paths.clone());
+            tokio::task::spawn_blocking(move || {
+                let end = paths.len().min(start + chunk);
+                paths[start..end]
+                    .iter()
+                    .map(|path| this.present(path))
+                    .collect::<Vec<_>>()
+            })
+        });
+        Ok(futures::future::try_join_all(checks).await?.concat())
+    }
+
+    /// Holds `paths`, the keys of `closure`, records a use of those that are
+    /// `present`, and returns the holds and the rest. If the store lacks some
+    /// of them, an ensure first checks the closure against `max_store_size`.
     fn hold(
         &self,
         closure: &BTreeMap<StorePath, Arc<Entry>>,
         paths: &Arc<[StorePath]>,
+        present: &[bool],
         prefetch: bool,
     ) -> anyhow::Result<(Held, Option<Held>, Vec<StorePath>)> {
+        // `partition` takes the paths in order.
+        let mut present = present.iter();
         let (present, missing): (Vec<_>, Vec<_>) =
-            paths.iter().partition(|path| self.present(path));
+            paths.iter().partition(|_| *present.next().unwrap());
         let limit = if prefetch || missing.is_empty() {
             None
         } else {

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{Display, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,10 +23,10 @@ use crate::transport::{self, Transport};
 /// Nix's priority for a cache whose `nix-cache-info` sets none.
 const DEFAULT_PRIORITY: i32 = 0;
 
-/// How many narinfo lookups each closure keeps in flight, and how many each
-/// cache gets at a time from all the closures being resolved. A cache that
-/// speaks only HTTP/1.1 gets a connection for each.
-const LOOKUPS: usize = 128;
+/// How many narinfo lookups and presence checks each closure keeps in flight,
+/// and how many lookups each cache gets at a time from all the closures being
+/// resolved. A cache that speaks only HTTP/1.1 gets a connection for each.
+pub(crate) const LOOKUPS: usize = 128;
 
 /// How long a file, or a whole cache, is skipped after a request fails.
 const PAUSE: Duration = Duration::from_mins(1);
@@ -297,13 +297,20 @@ impl Caches {
         path: &StorePath,
         tiers: &OnceCell<Vec<Vec<usize>>>,
     ) -> anyhow::Result<Lookup> {
-        match self.local_info(path) {
-            Ok(Some(info)) => {
-                // A local hit never waits. Without this, a warm resolve would
-                // block its runtime thread until the whole closure resolves.
-                tokio::task::consume_budget().await;
-                return Ok(Lookup::Found(Arc::new(Entry { cache: None, info })));
+        // With cold caches each read waits for the disk, so the lookups in
+        // flight read on blocking threads.
+        let local = match &self.local {
+            Some(local) => {
+                let files = local.files(path);
+                tokio::task::spawn_blocking(move || read_first(files)).await?
             }
+            None => Ok(None),
+        };
+        let local = local.and_then(|text| {
+            (text.map(|(file, text)| self.parse(text, path, file.display()))).transpose()
+        });
+        match local {
+            Ok(Some(info)) => return Ok(Lookup::Found(Arc::new(Entry { cache: None, info }))),
             Ok(None) => {}
             Err(e) => tracing::warn!("{e:#}; looking in the caches"),
         }
@@ -319,14 +326,8 @@ impl Caches {
         let Some(local) = &self.local else {
             return Ok(None);
         };
-        for file in local.files(path) {
-            match std::fs::read(&file) {
-                Ok(text) => return self.parse(text, path, file.display()).map(Some),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
-            }
-        }
-        Ok(None)
+        let text = read_first(local.files(path))?;
+        (text.map(|(file, text)| self.parse(text, path, file.display()))).transpose()
     }
 
     /// Asks every cache at once. A better priority always wins, so a tier's
@@ -556,6 +557,20 @@ impl Failure {
     fn skips(&self, file: &str) -> bool {
         self.fresh() && self.file.as_deref().is_none_or(|f| f == file)
     }
+}
+
+/// The first of `files` that exists, with its contents.
+fn read_first(
+    files: impl IntoIterator<Item = PathBuf>,
+) -> anyhow::Result<Option<(PathBuf, Vec<u8>)>> {
+    for file in files {
+        match std::fs::read(&file) {
+            Ok(text) => return Ok(Some((file, text))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+        }
+    }
+    Ok(None)
 }
 
 /// The URL's `?priority=`, which overrides the one in `nix-cache-info`.

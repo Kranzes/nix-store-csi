@@ -16,6 +16,10 @@
   with tens of thousands of files took seconds. While `--ensure-free` needs
   the space, collection drops every view that no volume uses before it
   picks store paths. Kept views don't count toward `--max-store-size`.
+- A publish reads the node store's narinfos, and checks which store paths
+  the node store holds, on several threads. With cold caches each read
+  waited for the disk in turn, so a closure the node store already held
+  took a millisecond or more per store path to resolve.
 
 ## 0.1.21 - 2026-11-20
 

@@ -245,11 +245,12 @@ impl Plugin {
     }
 }
 
-/// Runs `f` on a blocking thread.
+/// Runs `f` on a blocking thread, in the caller's span.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
 ) -> Result<T, Status> {
-    tokio::task::spawn_blocking(f)
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || span.in_scope(f))
         .await
         .map_err(|e| Status::internal(e.to_string()))?
         .map_err(|e| Status::internal(format!("{e:#}")))

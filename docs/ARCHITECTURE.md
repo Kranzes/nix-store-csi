@@ -88,7 +88,10 @@ An unpublish leaves the volume's view in place. Collection keeps a view that no
 volume uses for `--keep-recent` after it first finds it unused, so a pod that
 mounts the same closure later gets the view without linking each file again.
 It drops such a view sooner when the view is from an older generation, or when
-the space is short.
+the space is short. A publish that needs a new view builds it from the kept
+view that lacks the fewest of its store paths, if that view holds at least half
+of them, and that view is gone from then on. A closure that changed a few store
+paths since a pod last mounted it then links only those.
 
 Collection deletes the store paths that no view, closure being fetched
 or pending sync holds, and that no pod used within `--keep-recent`. It runs

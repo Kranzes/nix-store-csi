@@ -129,6 +129,14 @@ pub struct Store {
     /// Makes the next [`Store::syncfs`] fail.
     #[cfg(test)]
     fail_syncfs: std::sync::atomic::AtomicBool,
+    /// Makes the next view build from the view of this key, or with `None`
+    /// from nothing, as the model chose.
+    #[cfg(test)]
+    #[expect(
+        clippy::option_option,
+        reason = "no choice, or a choice of a view or none"
+    )]
+    pub(super) forced_donor: Mutex<Option<Option<String>>>,
     /// A failed sync creates this file, so a restart on the same boot deletes
     /// the unsynced paths, like a restart after a reboot does.
     failed_record: PathBuf,
@@ -266,6 +274,8 @@ impl Store {
             failed_syncs: AtomicU64::default(),
             #[cfg(test)]
             fail_syncfs: std::sync::atomic::AtomicBool::new(FAIL_SYNCFS.take()),
+            #[cfg(test)]
+            forced_donor: Mutex::default(),
             failed_record: state.join("sync-failed"),
             syncing: tokio::sync::Mutex::default(),
             fetching: Mutex::default(),

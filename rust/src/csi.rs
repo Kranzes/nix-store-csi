@@ -227,7 +227,7 @@ impl Plugin {
     async fn for_volume<T: Send + 'static>(
         &self,
         volume: &str,
-        f: impl FnOnce(&Store, &GcGuard) -> anyhow::Result<T> + Send + 'static,
+        f: impl FnOnce(&Arc<Store>, &GcGuard) -> anyhow::Result<T> + Send + 'static,
     ) -> Result<T, Status> {
         let lock = {
             let mut volumes = self.volumes.lock().unwrap();

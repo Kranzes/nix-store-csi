@@ -161,7 +161,7 @@ impl Metrics {
             fetched: None,
         };
         let _ = self.unpublishes.get_or_create(&ok);
-        for view in ["found", "built"] {
+        for view in ["found", "edited", "built"] {
             let _ = self.views.get_or_create(&ViewLabels { view });
         }
         for cache in caches {
@@ -193,10 +193,9 @@ impl Metrics {
         Call::new(&self.unpublishes, None)
     }
 
-    /// Counts a publish that put a view in place, which it `found` in views/
-    /// or built.
-    pub fn view(&self, found: bool) {
-        let view = if found { "found" } else { "built" };
+    /// Counts a publish that put a view in place: `found` in views/,
+    /// `edited` from a view that no volume used, or `built`.
+    pub fn view(&self, view: &'static str) {
         self.views.get_or_create(&ViewLabels { view }).inc();
     }
 
@@ -271,7 +270,7 @@ impl Metrics {
         );
         registry.register(
             "publish_views",
-            "Publishes that put a view in place, by whether they found it in views/ or built it",
+            "Publishes that put a view in place, by whether they found it in views/, edited one that no volume used, or built it",
             self.views.clone(),
         );
         registry.register_with_unit(

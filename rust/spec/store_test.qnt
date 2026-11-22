@@ -68,6 +68,23 @@ module store_test {
       .then(s' = collected(released(released(s, "e1"), "e2"), s.views))
       .expect(s.views == Set() and s.store == Set() and safe)
 
+  /// A publish builds its view from a kept view that no volume uses, and
+  /// takes it out of views/. Collection may then delete what only the kept
+  /// view linked. A view that a volume uses is no donor.
+  run donorTest =
+    init
+      .then(s' = withEnsure(withClosure(s, "e1"), "e2", "b"))
+      .then(s' = syncedAll(published(s, "v1", "e1"), true))
+      .then(s' = publishedFrom(s, "v2", "e2", s.views))
+      .expect(s.views.size() == 2 and safe)
+      .then(s' = unpublished(unpublished(s, "v1"), "v2"))
+      .then(s' = collected(s, Set(viewOf(s, "e1"))))
+      .expect(s.views == Set(viewOf(s, "e1")) and safe)
+      .then(s' = publishedFrom(s, "v2", "e2", s.views))
+      .expect(s.views == Set(viewOf(s, "e2")) and s.bound.keys() == Set("v2") and safe)
+      .then(s' = collected(released(s, "e1"), Set()))
+      .expect(s.store == Set("b") and safe)
+
   /// A failed sync deletes the paths it may have lost and starts a new
   /// generation. The pod keeps its view, a retry of its publish too, and
   /// another volume gets a view of the paths fetched again.

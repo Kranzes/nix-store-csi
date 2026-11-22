@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A publish that needs a new view builds it from a kept view that holds at
+  least half of the closure's store paths, and links only the store paths
+  that view lacks. A redeploy whose closure changed a few store paths links
+  those. Building a view from nothing creates every directory again, and
+  with cold caches each new directory waited for a read of the inode table,
+  so kept views that piled up made every build slower. `publish_views_total`
+  counts these publishes as `view="edited"`.
+
 ## 0.1.22 - 2026-11-21
 
 ### Added

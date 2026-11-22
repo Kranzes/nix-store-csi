@@ -583,23 +583,49 @@ module store {
     done(s.ensures.get(e)),
   }
 
+  /// The view that a publish of the closure of ensure `e` mounts.
+  pure def viewOf(s: State, e: EnsureId): View = {
+    val x = s.ensures.get(e)
+    { generation: s.generation, root: x.root, paths: x.paths }
+  }
+
+  /// The views that a publish may build `view` from: those of the current
+  /// generation that no volume's record names, which hold at least half of
+  /// its store paths.
+  pure def donors(s: State, view: View): Set[View] =
+    s.views.filter(d => and {
+      d.generation == s.generation,
+      s.volumes.keys().forall(u => s.volumes.get(u) != d),
+      d.paths.intersect(view.paths).size() >= view.paths.exclude(d.paths).size(),
+    })
+
+  /// What a publish of `view` may build it from: nothing, or one of its
+  /// donors.
+  pure def sources(s: State, view: View): Set[Set[View]] =
+    Set(Set()).union(donors(s, view).map(d => Set(d)))
+
   /// Store::view up to the view's place in views/. A view that is there
-  /// gets the volume's record at once. A refused or failed publish changes
-  /// nothing.
-  pure def publishStarted(s: State, v: Volume, e: EnsureId): State = {
+  /// gets the volume's record at once. Otherwise the publish builds the
+  /// view, from `donor` if it names one, which it takes out of views/. A
+  /// refused or failed publish changes nothing.
+  pure def publishStarted(s: State, v: Volume, e: EnsureId, donor: Set[View]): State = {
     val x = s.ensures.get(e)
     val paths = x.paths
-    val view = { generation: s.generation, root: x.root, paths: paths }
+    val view = viewOf(s, e)
     val shares = s.views.contains(view)
     // A `forget` has deleted paths since the ensure checked its closure, or
     // a failed sync missed a path that a fetch was still unpacking.
     val refused = x.heldAt != s.generation or paths.exists(p => lost(s, p))
+    val consumed = if (shares) Set() else donor.intersect(donors(s, view))
+    // The view keeps the donor's links, so it is stale if the donor was.
+    val inherited = if (consumed.intersect(s.stale) != Set()) Set(view) else Set()
     if (mounted(s, v) or refused or not(shares or paths.subseteq(s.store))) s
     else { ...s,
-      views: s.views.union(Set(view)),
+      views: s.views.exclude(consumed).union(Set(view)),
+      stale: s.stale.exclude(consumed).union(inherited),
       volumes: if (shares) s.volumes.put(v, view) else s.volumes,
       publishing: s.publishing.put(v, { view: view, recorded: shares }),
-      servedLost: s.servedLost or s.stale.contains(view)
+      servedLost: s.servedLost or s.stale.contains(view) or inherited != Set()
         or paths.exists(p => s.store.contains(p) and s.data.get(p) == Lost) }
   }
 
@@ -619,11 +645,15 @@ module store {
     publishing: s.publishing.without(Set(v)),
   }
 
-  /// A whole publish.
-  pure def published(s: State, v: Volume, e: EnsureId): State = {
-    val t = publishStarted(s, v, e)
+  /// A whole publish that builds its view, if it does, from `donor`.
+  pure def publishedFrom(s: State, v: Volume, e: EnsureId, donor: Set[View]): State = {
+    val t = publishStarted(s, v, e, donor)
     if (t.publishing.has(v)) publishBound(publishRecorded(t, v), v) else t
   }
+
+  /// A whole publish that builds its view, if it does, from nothing.
+  pure def published(s: State, v: Volume, e: EnsureId): State =
+    publishedFrom(s, v, e, Set())
 
   pure def canUnpublish(s: State, v: Volume): bool = and {
     shared(s),
@@ -955,7 +985,8 @@ module store {
   action publishStart = {
     nondet v = VOLUMES.oneOf()
     nondet e = ENSURES.filter(e => canPublish(s, v, e)).oneOf()
-    s' = publishStarted(s, v, e)
+    nondet donor = sources(s, viewOf(s, e)).oneOf()
+    s' = publishStarted(s, v, e, donor)
   }
 
   action publishRecord = {
@@ -1086,7 +1117,8 @@ module store {
   action publish = {
     nondet v = VOLUMES.oneOf()
     nondet e = ENSURES.filter(e => canPublish(s, v, e)).oneOf()
-    s' = published(s, v, e)
+    nondet donor = sources(s, viewOf(s, e)).oneOf()
+    s' = publishedFrom(s, v, e, donor)
   }
 
   action unpublish = {

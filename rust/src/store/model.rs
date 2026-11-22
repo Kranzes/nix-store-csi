@@ -390,9 +390,18 @@ impl Node {
         Ok(())
     }
 
-    fn publish(&mut self, v: &str, e: &str) -> Result {
+    /// Publishes `v`, building its view, if it does, from `donor` as the
+    /// model chose.
+    fn publish(&mut self, v: &str, e: &str, donor: &BTreeSet<View>) -> Result {
         let (target, is_bound) = (self.target(v), self.is_bound());
         let plugin = self.plugin();
+        let mut forced = None;
+        for key in file_names(&plugin.store.views) {
+            if donor.contains(&model_view(&plugin.store, &key)?) {
+                forced = Some(key);
+            }
+        }
+        *plugin.store.forced_donor.lock().unwrap() = Some(forced);
         let ensure = plugin.ensures.get(e).context("no such ensure")?;
         let Some(Ok(closure)) = &ensure.result else {
             bail!("ensure {e} has no closure: {:?}", ensure.result);
@@ -403,6 +412,8 @@ impl Node {
             let guard = store.gc_guard().await;
             store.view(&guard, v, &roots, closure, &target, is_bound)
         });
+        // Only a publish that builds its view takes the choice.
+        store.forced_donor.lock().unwrap().take();
         // A publish that fails binds nothing, and the model changes nothing.
         if let Ok((view, _)) = view {
             self.bound.insert(target, view);
@@ -445,7 +456,7 @@ impl Driver for Node {
             fetchFail(p: String) => self.fetch_fail(&p)?,
             sync(ok) => self.sync(ok)?,
             collect(kept: BTreeSet<View>) => self.collect(&kept)?,
-            publish(v: String, e: String) => self.publish(&v, &e)?,
+            publish(v: String, e: String, donor: BTreeSet<View>) => self.publish(&v, &e, &donor)?,
             unpublish(v: String) => self.unpublish(&v)?,
             restart(kept: BTreeSet<View>) => self.restart(false, &kept)?,
             reboot(kept: BTreeSet<View>) => self.restart(true, &kept)?,

@@ -21,12 +21,12 @@ use rustix::fs::{
     AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, Timespec, Timestamps, UTIME_OMIT, fchmod,
     fstat, futimens, linkat, mkdirat, openat, statat, utimensat,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::fetch::Closure;
-use super::fs::{Scratch, count_inodes, remove_file};
+use super::fs::{Scratch, count_inodes, remove_file, rename_writable};
 use super::gc::old;
-use super::{GcGuard, Store, list_names, write_unsynced};
+use super::{GcGuard, Store, list_names, list_store_paths, write_unsynced};
 use crate::store_path::Names;
 
 /// The directory in a view that links each root under its name without the
@@ -249,11 +249,13 @@ impl Store {
 
     /// Returns the view of `closure`, which [`Store::ensure`] returned for
     /// `roots`, for `volume` to mount at `target`. Volumes with the same
-    /// roots and closure share a view of the current generation. Also returns
-    /// how long it waited for and held the lock on views/, to look for the
-    /// view, put it there and write the volume's record.
+    /// roots and closure share a view of the current generation. A new view
+    /// starts from a view that no volume uses, if one holds at least half of
+    /// the closure. Also returns how long it waited for and held the lock on
+    /// views/, to look for a view, take one, put the view there and write
+    /// the volume's record.
     pub fn view(
-        &self,
+        self: &Arc<Self>,
         _gc: &GcGuard,
         volume: &str,
         roots: &[StorePath],
@@ -316,7 +318,7 @@ impl Store {
                 // The view is in use again.
                 remove_file(&self.kept.join(&volume.key))?;
                 volume.write(&record)?;
-                self.metrics.view(true);
+                self.metrics.view("found");
                 return Ok((dir, locking.elapsed()));
             }
         }
@@ -325,10 +327,24 @@ impl Store {
         // without the lock, so work on other views doesn't wait for it.
         let part = Scratch::new_in(&self.tmp)?;
         let view = part.path().join(&volume.key);
-        std::fs::create_dir(&view)?;
-        std::fs::set_permissions(&view, Permissions::from_mode(0o755))?;
+        let (donor, claimed) = self.claim_donor(&volume.key, paths, &view)?;
+        let mut trash = Vec::new();
+        let have = if let Some(donor) = &donor {
+            let have = self.trim(&view, &donor.held, paths, &mut trash)?;
+            let (linked, dropped) = (paths.len() - have.len(), donor.held.len() - have.len());
+            debug!(
+                view = donor.key,
+                linked, dropped, "building the view from a view that no volume uses"
+            );
+            have
+        } else {
+            std::fs::create_dir(&view)?;
+            std::fs::set_permissions(&view, Permissions::from_mode(0o755))?;
+            HashSet::new()
+        };
         let view_dir = std::fs::File::open(&view)?;
-        paths.par_iter().try_for_each(|path| {
+        let missing = paths.par_iter().filter(|path| !have.contains(*path));
+        missing.try_for_each(|path| {
             let name = CString::new(path.to_string())?;
             let kind = statat(&self.dir_fd, &name, AtFlags::SYMLINK_NOFOLLOW)
                 .with_context(|| format!("reading {}", self.unpacked(path).display()))?;
@@ -338,12 +354,128 @@ impl Store {
         })?;
         link_roots(&view.join(ROOTS), &links)?;
         let locking = Instant::now();
-        let _views = self.views_lock.lock().unwrap();
-        std::fs::rename(&view, &dir)
-            .with_context(|| format!("moving {} into place", dir.display()))?;
-        volume.write(&record)?;
-        self.metrics.view(false);
-        Ok((dir, looked + locking.elapsed()))
+        {
+            let _views = self.views_lock.lock().unwrap();
+            std::fs::rename(&view, &dir)
+                .with_context(|| format!("moving {} into place", dir.display()))?;
+            volume.write(&record)?;
+        }
+        let recorded = locking.elapsed();
+        self.metrics
+            .view(if donor.is_some() { "edited" } else { "built" });
+        // What the view no longer holds can be big, so it goes after the
+        // publish.
+        self.discard(trash);
+        Ok((dir, looked + claimed + recorded))
+    }
+
+    /// Moves to `to` the view that a view of `paths` named `key` is best
+    /// built from, and returns it with how long this waited for and held
+    /// the lock on views/. That is the view of the current generation that
+    /// no volume uses which lacks the fewest of `paths` and then holds the
+    /// fewest others, if it holds at least half of `paths`. Out of views/,
+    /// no publish shares it while it changes. A new view would need a new
+    /// inode for each directory, and with cold caches each takes a read of
+    /// the inode table.
+    fn claim_donor(
+        &self,
+        key: &str,
+        paths: &[StorePath],
+        to: &Path,
+    ) -> anyhow::Result<(Option<Donor>, Duration)> {
+        let Some(donor) = self.pick_donor(key, paths)? else {
+            return Ok((None, Duration::ZERO));
+        };
+        let from = self.views.join(&donor);
+        let locking = Instant::now();
+        {
+            let _views = self.views_lock.lock().unwrap();
+            // Another publish may have taken it or given it a volume since.
+            let taken = !(from.try_exists())
+                .with_context(|| format!("reading {}", from.display()))?
+                || self.mounted_views(|_, _| Ok(true))?.0.contains(&donor);
+            if taken {
+                return Ok((None, locking.elapsed()));
+            }
+            rename_writable(&from, to).with_context(|| format!("moving {}", from.display()))?;
+            remove_file(&self.kept.join(&donor))?;
+        }
+        let claimed = locking.elapsed();
+        self.measured.lock().unwrap().remove(&donor);
+        self.view_sizes.lock().unwrap().remove(&donor);
+        let held = view_store_paths(to)?;
+        Ok((Some(Donor { key: donor, held }), claimed))
+    }
+
+    /// The key of the view that [`Store::claim_donor`] takes, judged by the
+    /// names in each view.
+    fn pick_donor(&self, key: &str, paths: &[StorePath]) -> anyhow::Result<Option<String>> {
+        #[cfg(test)]
+        if let Some(forced) = self.forced_donor.lock().unwrap().take() {
+            return Ok(forced);
+        }
+        let generation = self.generation.load(Ordering::SeqCst);
+        let used = self.mounted_views(|_, _| Ok(true))?.0;
+        let mut best: Option<(usize, usize, String)> = None;
+        for name in list_names(&self.views, |name| name.to_str().map(str::to_owned))? {
+            if name == key || used.contains(&name) || view_generation(&name) != Some(generation) {
+                continue;
+            }
+            let held = match list_store_paths(&self.views.join(&name)) {
+                Ok(held) => held,
+                // A collection or another publish took it meanwhile.
+                Err(e)
+                    if e.downcast_ref()
+                        .is_some_and(|e: &io::Error| e.kind() == io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let shared = held
+                .iter()
+                .filter(|p| paths.binary_search(p).is_ok())
+                .count();
+            let (lacks, others) = (paths.len() - shared, held.len() - shared);
+            let better = best
+                .as_ref()
+                .is_none_or(|(l, o, n)| (lacks, others, &name) < (*l, *o, n));
+            if shared >= lacks && better {
+                best = Some((lacks, others, name));
+            }
+        }
+        Ok(best.map(|(_, _, name)| name))
+    }
+
+    /// Makes `view`, a view that [`Store::claim_donor`] took holding `held`,
+    /// hold only the store paths it shares with `paths`, and returns those.
+    /// The rest, with `.roots/` and mountpoints, goes to `trash`.
+    fn trim(
+        &self,
+        view: &Path,
+        held: &[StorePath],
+        paths: &[StorePath],
+        trash: &mut Vec<Scratch>,
+    ) -> anyhow::Result<HashSet<StorePath>> {
+        let mut keep = HashSet::new();
+        keep.extend(
+            held.iter()
+                .filter(|p| paths.binary_search(p).is_ok())
+                .cloned(),
+        );
+        for name in list_names(view, |name| Some(name.to_owned()))? {
+            let path = name
+                .to_str()
+                .and_then(|n| StorePath::from_base_path(n).ok());
+            if !path.is_some_and(|path| keep.contains(&path)) {
+                let from = view.join(&name);
+                let moved = Scratch::move_in(&self.tmp, &from);
+                trash.push(
+                    moved.with_context(|| format!("moving {} to the trash", from.display()))?,
+                );
+            }
+        }
+        Ok(keep)
     }
 
     /// Forgets `volume`. Its view stays in views/, and collection decides
@@ -606,6 +738,13 @@ impl Volume {
         write_unsynced(record, &[self.key.as_bytes(), b"\n", target].concat())
             .with_context(|| format!("writing {}", record.display()))
     }
+}
+
+/// A view that no volume used, which a publish took to build its view from.
+struct Donor {
+    key: String,
+    /// The store paths it held.
+    held: Vec<StorePath>,
 }
 
 pub fn check_volume(volume: &str) -> anyhow::Result<&str> {
@@ -943,6 +1082,63 @@ mod tests {
         store.guarded_drop_view("v3").unwrap();
         store.collect(UNBOUND, day, ALL).await.unwrap();
         assert!(!view.exists());
+    }
+
+    /// A publish builds its view from a view that no volume uses, keeping
+    /// the directories of the store paths that both hold.
+    #[tokio::test]
+    async fn edits_unused_views() {
+        let tmp = scratch();
+        let Some((store, hello, paths)) = hello_store(tmp.path()).await else {
+            return;
+        };
+        let roots = std::slice::from_ref(&hello);
+        let target = tmp.path().join("target");
+        let ino = |p: &Path| std::fs::symlink_metadata(p).unwrap().ino();
+        let publishes = |view| {
+            let sample_name = format!("nix_store_csi_publish_views_total{{view=\"{view}\"}}");
+            sample(&crate::metrics::registry(&store), &sample_name)
+        };
+        let other = paths.iter().find(|&p| *p != hello).unwrap().to_string();
+        let fewer: Vec<_> = (paths.iter())
+            .filter(|p| p.to_string() != other)
+            .cloned()
+            .collect();
+
+        let full = (store.guarded_view("v1", roots, &paths, &target, UNBOUND)).unwrap();
+        let (root, kept_dir) = (ino(&full), ino(&full.join(hello.to_string())));
+        store.guarded_drop_view("v1").unwrap();
+        let day = Duration::from_hours(24);
+        store
+            .collect(UNBOUND, day, Excess::default())
+            .await
+            .unwrap();
+        assert_eq!(count(tmp.path().join("kept")), 1);
+
+        let edited = (store.guarded_view("v2", roots, &fewer, &target, UNBOUND)).unwrap();
+        assert_eq!(
+            (ino(&edited), ino(&edited.join(hello.to_string()))),
+            (root, kept_dir)
+        );
+        assert!(!full.exists() && !edited.join(&other).exists());
+        assert_eq!(count(&edited), fewer.len() + 1);
+        assert_eq!(file_names(edited.join(ROOTS)), [hello.name().to_string()]);
+        assert_eq!(count(tmp.path().join("kept")), 0);
+        assert_eq!(publishes("edited"), Some(1.0));
+
+        // It links back what the view it starts from lacks.
+        store.guarded_drop_view("v2").unwrap();
+        let again = (store.guarded_view("v3", roots, &paths, &target, UNBOUND)).unwrap();
+        assert_eq!(ino(&again), root);
+        let kind = |p: &Path| std::fs::symlink_metadata(p).unwrap().file_type();
+        assert_eq!(kind(&again.join(&other)), kind(&store.dir().join(&other)));
+        assert_eq!(publishes("edited"), Some(2.0));
+
+        // A view that a volume uses is no start for another.
+        let built = (store.guarded_view("v4", roots, &fewer, &target, UNBOUND)).unwrap();
+        assert_ne!(ino(&built), root);
+        assert!(again.exists());
+        assert_eq!(publishes("built"), Some(2.0));
     }
 
     #[tokio::test]

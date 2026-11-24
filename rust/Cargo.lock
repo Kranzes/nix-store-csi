@@ -389,9 +389,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.8"
+version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac230478587d0269d8d6998b82ae69ea51509d55df66d9e92edd1f986904cd4a"
+checksum = "844c5c0b65be192cb68d570cca1b21a6444431d24e39c084dc0336177015337c"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -411,9 +411,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.6.8"
+version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "895c9d8d2ac2dd8b8a29f3724a14e72aaaa6debcf8c38c82f97305c6a172767a"
+checksum = "b4c174f11f949b9ca8c60580925e282b9cbd5454750e506f08648b2038080cd7"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -955,9 +955,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1125,7 +1125,7 @@ dependencies = [
 [[package]]
 name = "harmonia-file-core"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1135,7 +1135,7 @@ dependencies = [
 [[package]]
 name = "harmonia-file-nar"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "bstr",
  "bytes",
@@ -1159,7 +1159,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-content-address"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "derive_more",
  "harmonia-store-path",
@@ -1171,7 +1171,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-nar-info"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "harmonia-store-content-address",
  "harmonia-store-path",
@@ -1185,7 +1185,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-path"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "derive_more",
  "harmonia-utils-base-encoding",
@@ -1198,7 +1198,7 @@ dependencies = [
 [[package]]
 name = "harmonia-store-path-info"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "harmonia-store-content-address",
  "harmonia-store-path",
@@ -1210,7 +1210,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-base-encoding"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -1220,7 +1220,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-hash"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "aws-lc-rs",
  "blake3",
@@ -1238,7 +1238,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-io"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1252,7 +1252,7 @@ dependencies = [
 [[package]]
 name = "harmonia-utils-signature"
 version = "3.3.0"
-source = "git+https://github.com/nix-community/harmonia#6e572f473b1cf50f9ebe2913de283b1cf95f3c02"
+source = "git+https://github.com/nix-community/harmonia#cd299cfe0a309a524b2c52935bb5d6f7133409f5"
 dependencies = [
  "data-encoding",
  "ed25519-dalek",
@@ -1901,9 +1901,9 @@ dependencies = [
 
 [[package]]
 name = "landlock"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+checksum = "03795bb5dba9d001e861618f7301289e3ad0bb146d0a8192ff5fd8b06d069087"
 dependencies = [
  "enumflags2",
  "libc",
@@ -1995,9 +1995,9 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lru"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
+checksum = "83be4da409554841af087163ad187608824ad8ca8713d8e124c8e0f704a2f92f"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -2127,9 +2127,9 @@ checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "nix"
-version = "0.31.4"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bc81ce8148d3b4f3274da811f11cdd824ae661ee4ef732cdb229825cf5be7f7"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -3814,9 +3814,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -3870,9 +3870,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "walkdir"
-version = "2.5.0"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+checksum = "b42e295b7452c4604982280d8586001fcad9b8b201cac67bca9771e7a7475403"
 dependencies = [
  "same-file",
  "winapi-util",
